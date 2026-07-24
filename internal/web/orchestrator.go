@@ -102,6 +102,18 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 	s.instances[instanceID] = instance
 	s.instancesMu.Unlock()
 
+	// Persist the queue state immediately, BEFORE the admission wait loop.
+	// Previously the first saveQueueState ran only after admission (well past
+	// the wait loop), so an instance parked at "pending" left ZERO disk trace.
+	// On server restart both rebuildInstancesFromDisk (scan.json) and the
+	// auto-resume goroutine (queue_state_*.json) found nothing → pending scans
+	// were silently dropped instead of re-queued. Writing it here at CurrentIdx=0
+	// means the existing auto-resume path (scanRequestFromQueueState →
+	// runMultiScan) re-enters the admission loop after a restart. Thread the
+	// instance ID onto the request now so the file lands at the right path.
+	req.InstanceID = instanceID
+	s.saveQueueState(0, req)
+
 	// Broadcast to dashboard
 	s.broadcastDashboard(WSEvent{Type: "instance_started", Content: instanceID})
 
@@ -146,6 +158,22 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 				s.clearQueueState(instanceID)
 			} else {
 				log.Printf("[AUTO-RESUME] Preserving queue state after interrupted scan")
+			}
+		} else {
+			// The instance exited pending WITHOUT ever running. A queue_state
+			// file was written at creation so the scan could survive a restart;
+			// decide its fate here.
+			//   - server_shutdown: preserve → the auto-resume goroutine re-queues
+			//     it after restart (the whole point of persisting pending scans).
+			//   - user_stopped / any other reason: clear → a canceled scan must
+			//     NOT be resurrected on the next boot.
+			instance.mu.RLock()
+			reason := instance.StopReason
+			instance.mu.RUnlock()
+			if reason == "server_shutdown" {
+				log.Printf("[AUTO-RESUME] Preserving pending queue state (server_shutdown) for %s", instanceID)
+			} else {
+				s.clearQueueState(instanceID)
 			}
 		}
 
@@ -318,7 +346,7 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 	// IMPORTANT: This runs AFTER the queue wait. Do not clear the queue file
 	// before the refreshed state is written; resumed scans rely on it if the
 	// process exits during admission/startup.
-	req.InstanceID = instanceID // thread instance ID to all target handlers
+	req.InstanceID = instanceID // (re)thread instance ID; also set before the admission wait
 	s.running.Store(true)
 	s.stopReq.Store(false) // clear global stop so this scan isn't immediately aborted
 	if req.DiscordWebhook != "" {
