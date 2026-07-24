@@ -166,6 +166,56 @@ func (r *Registry) List() []string {
 	return names
 }
 
+// MatchByParams returns the registered tool whose parameter names best match
+// the supplied set, used to recover tool calls whose <function=NAME> open tag
+// was dropped by the model (leaving orphaned <parameter=X> blocks + a trailing
+// </function>). The match is schema-guided: a tool scores +1 for each of the
+// given param names it declares, and the tool with the highest score wins,
+// provided every REQUIRED parameter of that tool is present in the given set.
+// Returns ("", false) when no tool's required params are all satisfied.
+//
+// This is deliberately conservative: it only ever resolves to a tool when the
+// orphaned parameters are a complete-enough superset of that tool's required
+// schema, so a genuinely ambiguous or partial fragment is left unresolved
+// (caller treats it as no-tool) rather than executing the wrong tool.
+func (r *Registry) MatchByParams(paramNames []string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(paramNames) == 0 {
+		return "", false
+	}
+	got := make(map[string]bool, len(paramNames))
+	for _, p := range paramNames {
+		got[strings.ToLower(strings.TrimSpace(p))] = true
+	}
+	bestName := ""
+	bestScore := 0
+	for _, t := range r.tools {
+		score := 0
+		allRequired := true
+		for _, p := range t.Parameters {
+			pn := strings.ToLower(strings.TrimSpace(p.Name))
+			if got[pn] {
+				score++
+			} else if p.Required {
+				allRequired = false
+			}
+		}
+		// Only candidate tools whose required params are all present, and
+		// that actually matched at least one param. Prefer the tighter match
+		// (higher score / fewer unmatched given params) to disambiguate tools
+		// that share a parameter name.
+		if allRequired && score > bestScore {
+			bestScore = score
+			bestName = t.Name
+		}
+	}
+	if bestName == "" || bestScore == 0 {
+		return "", false
+	}
+	return bestName, true
+}
+
 // Execute runs a tool by name with the given arguments.
 // Note: the caller's args map is never mutated — Execute works on a copy.
 func (r *Registry) Execute(name string, args map[string]string) (Result, error) {

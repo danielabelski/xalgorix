@@ -227,6 +227,64 @@ func FormatToolCall(name string, args map[string]string) string {
 	return b.String()
 }
 
+// OrphanedCall is a block of <parameter=...> values closed by </function> but
+// with no preceding <function=NAME> open tag — the model dropped the open tag.
+// Recoverable when the caller matches the param set against the tool schema.
+type OrphanedCall struct {
+	Args       map[string]string
+	ParamNames []string // ordered, dedup'd param names present
+}
+
+// ParseOrphanedCalls extracts <parameter=X>...</parameter> blocks that are
+// bounded by a </function> close tag but have NO <function=NAME> open tag
+// before them. These are the calls the strict fnRegex misses because the model
+// truncated/dropped the opening tag (observed: `_plan>\n<parameter=task_id>…`
+// and `parameter=method>POST</parameter>…</function>`).
+//
+// It works by:
+//  1. Removing all WELL-FORMED <function=…>…</function> blocks (already parsed
+//     by ParseToolCalls) so only malformed fragments remain.
+//  2. Finding </function> close tags and walking back to collect the contiguous
+//     run of <parameter=…>…</parameter> blocks immediately preceding each close.
+//
+// Returns one OrphanedCall per close tag that has ≥1 parameter. The caller
+// resolves the tool name via registry.MatchByParams; if it can't, the call is
+// dropped (safer than executing an ambiguous guess).
+func ParseOrphanedCalls(content string) []OrphanedCall {
+	content = normalizeFormat(content)
+	// Strip well-formed calls so their params aren't mistaken for orphans.
+	stripped := fnRegex.ReplaceAllString(content, "")
+	// Also drop any lone incomplete <function=…> opens that survived (no body).
+	stripped = incompleteFunc.ReplaceAllString(stripped, "")
+
+	var out []OrphanedCall
+	// Split on </function>; each segment that ends at a close tag may carry
+	// orphaned <parameter> blocks in its tail.
+	for _, frag := range strings.Split(stripped, "</function>") {
+		// Collect the trailing run of <parameter=…>…</parameter> in this fragment.
+		params := paramEqRegex.FindAllStringSubmatch(frag, -1)
+		if len(params) == 0 {
+			continue
+		}
+		args := make(map[string]string, len(params))
+		var names []string
+		seen := make(map[string]bool)
+		for _, pm := range params {
+			name := sanitizeParamName(strings.TrimSpace(pm[1]))
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			names = append(names, name)
+			args[name] = html.UnescapeString(strings.TrimSpace(pm[2]))
+		}
+		if len(args) > 0 {
+			out = append(out, OrphanedCall{Args: args, ParamNames: names})
+		}
+	}
+	return out
+}
+
 // CleanContent removes tool call XML from content for display.
 func CleanContent(content string) string {
 	content = normalizeFormat(content)

@@ -194,3 +194,42 @@ func TestSchemaXML_ConcurrentReads(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// MatchByParams resolves a tool whose required params are all present — the
+// recovery path for tool calls whose <function=NAME> open tag was dropped,
+// leaving only <parameter> blocks. Must be conservative: ambiguous/partial
+// sets resolve to nothing.
+func TestMatchByParamsUpdatePlan(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&Tool{Name: "update_plan", Parameters: []Parameter{
+		{Name: "task_id", Required: true}, {Name: "status", Required: true}, {Name: "notes", Required: false},
+	}})
+	r.Register(&Tool{Name: "terminal_execute", Parameters: []Parameter{
+		{Name: "command", Required: true},
+	}})
+
+	// update_plan's required params present → resolves to update_plan.
+	name, ok := r.MatchByParams([]string{"task_id", "status", "notes"})
+	if !ok || name != "update_plan" {
+		t.Errorf("MatchByParams(task_id,status,notes) = %q,%v, want update_plan,true", name, ok)
+	}
+	// Missing a required param (status) → no match (don't execute wrong tool).
+	name, ok = r.MatchByParams([]string{"task_id", "notes"})
+	if ok {
+		t.Errorf("MatchByParams with missing required param should not resolve, got %q", name)
+	}
+	// terminal_execute's single required param → resolves.
+	name, ok = r.MatchByParams([]string{"command"})
+	if !ok || name != "terminal_execute" {
+		t.Errorf("MatchByParams(command) = %q,%v, want terminal_execute,true", name, ok)
+	}
+	// Empty / unknown params → no match.
+	name, ok = r.MatchByParams([]string{"nonsense"})
+	if ok {
+		t.Errorf("MatchByParams(nonsense) should not resolve, got %q", name)
+	}
+	name, ok = r.MatchByParams(nil)
+	if ok {
+		t.Errorf("MatchByParams(nil) should not resolve, got %q", name)
+	}
+}
