@@ -5,9 +5,9 @@ BUILD_DIR=./build
 VERSION=4.5.71
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
 
-webui/node_modules: webui/package.json
-	@echo "Installing webui dependencies..."
-	cd webui && npm install --no-audit --no-fund
+webui/node_modules: webui/package.json webui/package-lock.json
+	@echo "Installing webui dependencies (locked)..."
+	cd webui && npm ci --no-audit --no-fund
 	@touch webui/node_modules
 
 webui-install: webui/node_modules

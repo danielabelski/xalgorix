@@ -27,10 +27,18 @@
 # the one-line installer.
 
 # ── Stage 1: build the React web UI ──────────────────────────────────────────
-FROM node:20-bookworm-slim AS webui
+FROM node:22-bookworm-slim AS webui
 WORKDIR /src
+# Copy the lockfile so npm ci installs the exact versions verified by the
+# contributor (React 19 / TS 7 / Vite 8), instead of resolving fresh from
+# the caret ranges on every rebuild. package-lock.json is now tracked in
+# the repo (see .gitignore exception); the glob stays for any older build
+# context that lacks it.
 COPY webui/package.json webui/package-lock.json* ./webui/
-RUN cd webui && npm install --no-audit --no-fund
+# npm ci fails if package.json and the lockfile disagree — that is the
+# point: a drift between the manifest and the lockfile must break the
+# build rather than silently re-resolving to whatever is latest.
+RUN cd webui && npm ci --no-audit --no-fund
 COPY webui ./webui
 COPY internal/web ./internal/web
 RUN cd webui && npm run build
