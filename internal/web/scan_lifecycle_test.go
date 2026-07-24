@@ -113,3 +113,91 @@ func TestHandleInstanceStop_ClearsQueueState(t *testing.T) {
 		t.Errorf("queue state file must be removed after stop (err=%v)", err)
 	}
 }
+
+// A pending scan must leave a resumable queue_state_<id>.json on disk so that,
+// after a server restart, the auto-resume goroutine re-queues it instead of
+// silently dropping it. Before the fix, runMultiScan only wrote queue state
+// AFTER admission, so an instance parked at "pending" left no trace and was
+// lost on restart. This test verifies the persistence + resume round-trip that
+// change relies on: saveQueueState(0, req) produces a file that
+// autoResumeQueueEntries considers resumable and scanRequestFromQueueState
+// rebuilds faithfully.
+func TestPendingScanQueueState_RoundTripsForResume(t *testing.T) {
+	s := newTestServer(t, nil)
+
+	req := ScanRequest{
+		InstanceID: "pending-1",
+		Targets:    []string{"https://pentest-ground.com:9000"},
+		ScanMode:   "quick",
+		Name:       "Pentest ground",
+	}
+	// This is exactly what runMultiScan now does on instance creation.
+	s.saveQueueState(0, req)
+
+	queuePath := s.queueStatePathForInstance("pending-1")
+	if _, err := os.Stat(queuePath); err != nil {
+		t.Fatalf("pending scan must persist queue state on creation: %v", err)
+	}
+
+	// The file must be picked up by the auto-resume path (not filtered out as
+	// inactive/empty/corrupt/completed).
+	entries := autoResumeQueueEntries(s.validQueueStateEntries(true))
+	var found *QueueState
+	for _, e := range entries {
+		if e.state != nil && e.state.InstanceID == "pending-1" {
+			found = e.state
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("pending queue state not resumable via auto-resume path (entries=%d)", len(entries))
+	}
+	if found.CurrentIdx != 0 {
+		t.Errorf("pending scan CurrentIdx = %d, want 0 (never started)", found.CurrentIdx)
+	}
+	if !found.Active {
+		t.Error("pending scan queue state must be Active=true")
+	}
+
+	// scanRequestFromQueueState must rebuild a request that re-enters the
+	// admission loop with all original targets.
+	resumed := scanRequestFromQueueState(found, queuePath)
+	if len(resumed.Targets) != 1 || resumed.Targets[0] != "https://pentest-ground.com:9000" {
+		t.Errorf("resumed targets = %v, want original single target", resumed.Targets)
+	}
+	if resumed.ScanMode != "quick" || resumed.Name != "Pentest ground" {
+		t.Errorf("resumed request lost fields: mode=%q name=%q", resumed.ScanMode, resumed.Name)
+	}
+	if !resumed.IsResume {
+		t.Error("resumed request must have IsResume=true")
+	}
+}
+
+// clearQueueState must remove a pending scan's file — this is the contract the
+// cancel path (user_stopped) relies on so a cancelled scan is not resurrected
+// on the next boot.
+func TestClearQueueState_RemovesPendingScanFile(t *testing.T) {
+	s := newTestServer(t, nil)
+
+	s.saveQueueState(0, ScanRequest{
+		InstanceID: "cancel-1",
+		Targets:    []string{"a.com"},
+	})
+	queuePath := s.queueStatePathForInstance("cancel-1")
+	if _, err := os.Stat(queuePath); err != nil {
+		t.Fatalf("precondition: queue state should exist: %v", err)
+	}
+
+	s.clearQueueState("cancel-1")
+	if _, err := os.Stat(queuePath); !os.IsNotExist(err) {
+		t.Errorf("clearQueueState must remove pending scan file (err=%v)", err)
+	}
+
+	// And it must no longer appear in the auto-resume set (so a restart won't
+	// resurrect it).
+	for _, e := range autoResumeQueueEntries(s.validQueueStateEntries(true)) {
+		if e.state != nil && e.state.InstanceID == "cancel-1" {
+			t.Error("cancelled pending scan must not be resumable after clearQueueState")
+		}
+	}
+}
