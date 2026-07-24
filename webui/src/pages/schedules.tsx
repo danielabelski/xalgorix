@@ -54,6 +54,66 @@ import { api } from "@/api/client";
 const SEVERITIES = ["info", "low", "medium", "high", "critical"];
 type ActivityMode = "active" | "passive";
 
+// Mirrors Go's time.Weekday: index 0 is Sunday.
+const WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
+const MONTH_DAYS = Array.from({ length: 31 }, (_, i) => i + 1);
+
+// Intervals that carry a day component; the others only take a time of day.
+function hasDayPicker(interval: string): boolean {
+  return interval === "weekly" || interval === "monthly";
+}
+
+// Keep the selected day inside the range the interval's picker offers.
+function clampRunDay(day: number, interval: string): number {
+  if (interval === "weekly") return Math.min(Math.max(day, 0), 6);
+  if (interval === "monthly") return Math.min(Math.max(day, 1), 31);
+  return day;
+}
+
+function detectTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+// Full IANA list when the browser exposes it (Chrome 99+/FF 93+/Safari 15.4+),
+// otherwise just the detected zone so the picker is never empty.
+function listTimeZones(detected: string): string[] {
+  let all: string[] = [];
+  try {
+    all = Intl.supportedValuesOf?.("timeZone") ?? [];
+  } catch {
+    all = [];
+  }
+  return Array.from(new Set(["UTC", detected, ...all])).sort();
+}
+
+// One-line summary of when a schedule fires, for the list view.
+function formatScheduleWindow(s: ScanSchedule): string {
+  if (!s.run_at) return "";
+  const tz = s.timezone ? ` · ${s.timezone}` : "";
+  switch (s.interval) {
+    case "hourly":
+      return `:${s.run_at.slice(3)} every hour${tz}`;
+    case "weekly":
+      return `${WEEKDAYS[s.run_day ?? 0] ?? WEEKDAYS[0]} ${s.run_at}${tz}`;
+    case "monthly":
+      return `Day ${s.run_day ?? 1} · ${s.run_at}${tz}`;
+    default:
+      return `${s.run_at}${tz}`;
+  }
+}
+
 export default function SchedulesPage() {
   const { data, isLoading, error, refetch } = useSchedulesList();
   const createMutation = useCreateSchedule();
@@ -71,6 +131,12 @@ export default function SchedulesPage() {
   // Form State
   const [name, setName] = useState("");
   const [interval, setInterval] = useState("daily");
+  // Day/time-of-day anchor. `runAt` empty means "run one interval after
+  // creation or the last run" — the behavior schedules had before this was
+  // configurable — so existing schedules keep working untouched.
+  const [runAt, setRunAt] = useState("");
+  const [runDay, setRunDay] = useState(1);
+  const [timezone, setTimezone] = useState(detectTimeZone);
   const [targetsText, setTargetsText] = useState("");
   const [scanMode, setScanMode] = useState("single");
   const [reconMode, setReconMode] = useState<ActivityMode>("active");
@@ -107,6 +173,11 @@ export default function SchedulesPage() {
   // each profile's catalog entry to render `displayName · profileId`.
   // When neither query has loaded yet the picker collapses to the
   // single "Server default" option.
+  const timeZoneOptions = useMemo(
+    () => listTimeZones(detectTimeZone()),
+    [],
+  );
+
   const profilesQuery = useAuthProfiles();
   const catalogQuery = useProviders();
   const profileOptions = useMemo(() => {
@@ -128,6 +199,9 @@ export default function SchedulesPage() {
     setEditingSchedule(null);
     setName("");
     setInterval("daily");
+    setRunAt("");
+    setRunDay(1);
+    setTimezone(detectTimeZone());
     setTargetsText("");
     setScanMode("single");
     setReconMode("active");
@@ -149,6 +223,9 @@ export default function SchedulesPage() {
     setEditingSchedule(sch);
     setName(sch.name);
     setInterval(sch.interval);
+    setRunAt(sch.run_at || "");
+    setRunDay(clampRunDay(sch.run_day ?? 1, sch.interval));
+    setTimezone(sch.timezone || detectTimeZone());
     setTargetsText(sch.targets.join("\n"));
     setScanMode(sch.scan_mode || "single");
     const nextScanIntensity = sch.scan_intensity || "active";
@@ -246,6 +323,11 @@ export default function SchedulesPage() {
     const payload = {
       name: name.trim() || undefined,
       interval,
+      run_at: runAt || undefined,
+      run_day: hasDayPicker(interval) ? runDay : undefined,
+      // Only meaningful alongside a time of day; omit it otherwise so the
+      // schedule stays on the legacy relative behavior.
+      timezone: runAt ? timezone : undefined,
       targets,
       scan_mode: scanMode,
       recon_mode: reconMode,
@@ -374,6 +456,11 @@ export default function SchedulesPage() {
                         <Badge variant="outline" className="capitalize">
                           {s.interval}
                         </Badge>
+                        {s.run_at && (
+                          <div className="mt-1 text-[11px] text-muted-foreground">
+                            {formatScheduleWindow(s)}
+                          </div>
+                        )}
                       </td>
                       <td className="px-4 py-3 align-middle max-w-xs truncate mono text-xs text-muted-foreground">
                         {s.targets.join(", ")}
@@ -440,7 +527,15 @@ export default function SchedulesPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="sched-interval">Frequency Interval *</Label>
-                <Select value={interval} onValueChange={setInterval}>
+                <Select
+                  value={interval}
+                  onValueChange={(v) => {
+                    setInterval(v);
+                    // Weekdays are 0-6 and days of month 1-31, so carry the
+                    // selection into the range the new picker can display.
+                    setRunDay((cur) => clampRunDay(cur, v));
+                  }}
+                >
                   <SelectTrigger id="sched-interval">
                     <SelectValue />
                   </SelectTrigger>
@@ -452,6 +547,85 @@ export default function SchedulesPage() {
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <div
+                className={cn(
+                  "grid gap-4",
+                  hasDayPicker(interval) ? "sm:grid-cols-3" : "sm:grid-cols-2",
+                )}
+              >
+                {hasDayPicker(interval) && (
+                  <div className="space-y-2">
+                    <Label htmlFor="sched-run-day">
+                      {interval === "weekly" ? "Day of week" : "Day of month"}
+                    </Label>
+                    <Select
+                      value={String(runDay)}
+                      onValueChange={(v) => setRunDay(Number(v))}
+                    >
+                      <SelectTrigger id="sched-run-day">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {interval === "weekly"
+                          ? WEEKDAYS.map((day, i) => (
+                              <SelectItem key={day} value={String(i)}>
+                                {day}
+                              </SelectItem>
+                            ))
+                          : MONTH_DAYS.map((day) => (
+                              <SelectItem key={day} value={String(day)}>
+                                {day}
+                              </SelectItem>
+                            ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                <div className="space-y-2">
+                  <Label htmlFor="sched-run-at">Run at</Label>
+                  <Input
+                    id="sched-run-at"
+                    type="time"
+                    value={runAt}
+                    onChange={(e) => setRunAt(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="sched-timezone">Timezone</Label>
+                  <Select
+                    value={timezone}
+                    onValueChange={setTimezone}
+                    disabled={!runAt}
+                  >
+                    <SelectTrigger id="sched-timezone">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-72">
+                      {timeZoneOptions.map((tz) => (
+                        <SelectItem key={tz} value={tz}>
+                          {tz}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {interval === "hourly"
+                  ? "Only the minutes are used: the scan runs at that minute of every hour."
+                  : `Wall-clock time the scan is launched${
+                      hasDayPicker(interval)
+                        ? interval === "weekly"
+                          ? ", on the selected weekday"
+                          : ", on the selected day of the month (clamped to the last day of shorter months)"
+                        : ""
+                    }.`}{" "}
+                Leave blank to keep running one interval after the schedule was
+                created or last ran.
+              </p>
             </div>
 
             <div className="space-y-2">

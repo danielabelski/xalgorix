@@ -47,9 +47,13 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 			req.Interval = "daily"
 		}
 		normalizeScheduleActivity(&req)
+		if err := normalizeScheduleTiming(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		req.ID = randomSlug()
 		req.Enabled = true
-		req.NextRun = calculateNextRun(req.Interval, time.Now())
+		req.NextRun = calculateNextRun(&req, time.Now())
 
 		s.schedulesMu.Lock()
 		s.schedules[req.ID] = &req
@@ -150,13 +154,20 @@ func (s *Server) handleScheduleDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		normalizeScheduleActivity(&req)
+		if err := normalizeScheduleTiming(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		s.schedulesMu.Lock()
 		oldEnabled := sch.Enabled
-		oldInterval := sch.Interval
+		oldTiming := sch.timing()
 
 		sch.Name = req.Name
 		sch.Interval = req.Interval
+		sch.RunAt = req.RunAt
+		sch.RunDay = req.RunDay
+		sch.Timezone = req.Timezone
 		sch.Enabled = req.Enabled
 		sch.Targets = req.Targets
 		sch.Instruction = req.Instruction
@@ -170,9 +181,9 @@ func (s *Server) handleScheduleDetail(w http.ResponseWriter, r *http.Request) {
 		sch.DiscordWebhook = req.DiscordWebhook
 		sch.Model = req.Model
 
-		// If interval changed, or enabled transitioned false -> true, recalculate NextRun
-		if sch.Interval != oldInterval || (sch.Enabled && !oldEnabled) {
-			sch.NextRun = calculateNextRun(sch.Interval, time.Now())
+		// If any timing field changed, or enabled transitioned false -> true, recalculate NextRun
+		if sch.timing() != oldTiming || (sch.Enabled && !oldEnabled) {
+			sch.NextRun = calculateNextRun(sch, time.Now())
 		}
 
 		diskCopy := *sch // snapshot under lock for race-free disk write

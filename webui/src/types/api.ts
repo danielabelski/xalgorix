@@ -479,6 +479,18 @@ export interface ScanSchedule {
   id: string;
   name: string;
   interval: string;
+  // Wall-clock time of day the schedule fires, "HH:MM" in 24h form and
+  // interpreted in `timezone`. Empty/absent keeps the legacy behavior of
+  // running one interval after creation or the last run. For the "hourly"
+  // interval only the minutes apply.
+  run_at?: string;
+  // Day within the interval: weekday for "weekly" (0=Sunday … 6=Saturday) and
+  // day of month for "monthly" (1-31, clamped to the last day of shorter
+  // months). Ignored for "hourly" and "daily".
+  run_day?: number;
+  // IANA timezone name `run_at`/`run_day` are read in, e.g.
+  // "America/Argentina/Buenos_Aires". Empty means the server's local time.
+  timezone?: string;
   next_run: string;
   last_run?: string;
   enabled: boolean;
