@@ -149,3 +149,58 @@ func TestFixIncomplete_PartialEndTag(t *testing.T) {
 		t.Fatalf("expected 1 finish call, got %+v", calls)
 	}
 }
+
+// ParseOrphanedCalls must recover <parameter> blocks that have a trailing
+// </function> but NO <function=NAME> open tag — the malformation that force-
+// stopped the codeant.ai scan. The caller resolves the tool name via the
+// registry schema.
+func TestParseOrphanedCallsDroppedOpenTag(t *testing.T) {
+	// Exact pattern from codeant.ai: open tag truncated to "_plan>", then
+	// well-formed params + close.
+	got := ParseOrphanedCalls("_plan>\n<parameter=task_id>dirbust</parameter>\n<parameter=status>completed</parameter>\n<parameter=notes>Done</parameter>\n</function>")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 orphaned call, got %d", len(got))
+	}
+	if got[0].Args["task_id"] != "dirbust" || got[0].Args["status"] != "completed" || got[0].Args["notes"] != "Done" {
+		t.Errorf("orphaned args = %v, want task_id/status/notes", got[0].Args)
+	}
+	if len(got[0].ParamNames) != 3 {
+		t.Errorf("ParamNames = %v, want 3", got[0].ParamNames)
+	}
+}
+
+// The http_request-style malformation: entire open tag + the "<" of the first
+// <parameter gone, leaving "parameter=method>...</parameter>...</function>".
+func TestParseOrphanedCallsMissingOpenAndParamBracket(t *testing.T) {
+	got := ParseOrphanedCalls("parameter=method>POST</parameter>\n<parameter=url>https://api.x/api/analysis</parameter>\n<parameter=headers>{\"Content-Type\":\"application/json\"}</parameter>\n<parameter=body>{\"repo\":\"foo/bar\"}</parameter>\n</function>")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 orphaned call, got %d", len(got))
+	}
+	// The first param lost its leading "<" so paramEqRegex won't match it;
+	// the remaining well-formed params must still be recovered so the caller
+	// can match the tool by url/headers/body.
+	if got[0].Args["url"] == "" {
+		t.Errorf("url param not recovered: %v", got[0].Args)
+	}
+	if got[0].Args["headers"] == "" {
+		t.Errorf("headers param not recovered: %v", got[0].Args)
+	}
+}
+
+// Well-formed calls must NOT be double-counted as orphans.
+func TestParseOrphanedCallsSkipsWellFormed(t *testing.T) {
+	content := "<function=terminal_execute>\n<parameter=command>id</parameter>\n</function>"
+	got := ParseOrphanedCalls(content)
+	if len(got) != 0 {
+		t.Errorf("well-formed call should not produce orphans, got %d", len(got))
+	}
+}
+
+// Multiple orphaned calls in one response each map to a separate OrphanedCall.
+func TestParseOrphanedCallsMultiple(t *testing.T) {
+	content := "<parameter=command>curl a</parameter>\n</function>\n<parameter=command>curl b</parameter>\n</function>"
+	got := ParseOrphanedCalls(content)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 orphaned calls, got %d", len(got))
+	}
+}

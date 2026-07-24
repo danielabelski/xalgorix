@@ -880,6 +880,24 @@ func (a *Agent) Run(targets []string, instruction string) {
 		a.msgMu.Unlock()
 
 		toolCalls := llm.ParseToolCalls(responseClean)
+		// ── Schema-guided recovery of dropped-open-tag tool calls ──
+		// Some models intermittently drop the <function=NAME> open tag and
+		// emit only <parameter=X>…</parameter> blocks + a trailing
+		// </function>. ParseToolCalls can't recover the tool name from that,
+		// so every such response counts as "no tool call" and the scan
+		// force-stops at 15 (observed on codeant.ai). Recover by matching
+		// the orphaned parameter set against the registered tool schemas:
+		// a tool whose required params are all present is the intended call.
+		// This runs BEFORE the no-tool hook so recovered calls are healthy,
+		// not counted toward the reasoning-loop threshold.
+		if len(toolCalls) == 0 {
+			for _, oc := range llm.ParseOrphanedCalls(responseClean) {
+				if name, ok := a.registry.MatchByParams(oc.ParamNames); ok {
+					a.emit(Event{Type: "message", Content: fmt.Sprintf("🔧 Recovered a tool call whose <function> open tag was dropped — inferred '%s' from parameters %v.", name, oc.ParamNames), TotalTokens: tokenCount()})
+					toolCalls = append(toolCalls, llm.ToolCall{Name: name, Args: oc.Args})
+				}
+			}
+		}
 		// Enforce the tool-call budget WITHIN the batch. overBudget is only
 		// checked at iteration start, so a single response emitting many calls
 		// could otherwise blow past XALGORIX_MAX_TOOL_CALLS. Truncate the batch
