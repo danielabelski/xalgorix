@@ -174,6 +174,9 @@ func providerModelsURLs(entry providers.Entry) ([]string, error) {
 	if entry.HeaderStyle == "openai" && !strings.HasSuffix(u.Path, "/v1") && !strings.Contains(u.Path, "/v1/") {
 		u.Path = strings.TrimRight(u.Path, "/") + "/v1"
 	}
+	if entry.HeaderStyle == "gemini" && !strings.HasSuffix(u.Path, "/v1beta") && !strings.Contains(u.Path, "/v1beta/") {
+		u.Path = strings.TrimRight(u.Path, "/") + "/v1beta"
+	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/models"
 	if entry.HeaderStyle == "openai_responses" {
 		query := u.Query()
