@@ -174,7 +174,7 @@ func TestPendingScanQueueState_RoundTripsForResume(t *testing.T) {
 }
 
 // clearQueueState must remove a pending scan's file — this is the contract the
-// cancel path (user_stopped) relies on so a cancelled scan is not resurrected
+// cancel path (user_stopped) relies on so a canceled scan is not resurrected
 // on the next boot.
 func TestClearQueueState_RemovesPendingScanFile(t *testing.T) {
 	s := newTestServer(t, nil)
@@ -197,7 +197,7 @@ func TestClearQueueState_RemovesPendingScanFile(t *testing.T) {
 	// resurrect it).
 	for _, e := range autoResumeQueueEntries(s.validQueueStateEntries(true)) {
 		if e.state != nil && e.state.InstanceID == "cancel-1" {
-			t.Error("cancelled pending scan must not be resumable after clearQueueState")
+			t.Error("canceled pending scan must not be resumable after clearQueueState")
 		}
 	}
 }

@@ -165,7 +165,7 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 			// decide its fate here.
 			//   - server_shutdown: preserve → the auto-resume goroutine re-queues
 			//     it after restart (the whole point of persisting pending scans).
-			//   - user_stopped / any other reason: clear → a cancelled scan must
+			//   - user_stopped / any other reason: clear → a canceled scan must
 			//     NOT be resurrected on the next boot.
 			instance.mu.RLock()
 			reason := instance.StopReason
