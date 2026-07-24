@@ -124,8 +124,66 @@ let state = {
   },
   rateLimit: { requests: 60, window: 60 },
   agentMail: { pod: "ops-pod-1", apiKey: "", hasApiKey: true },
+  schedules: [],
+  authProfiles: [],
   reqCounter: 0,
 };
+
+const providerCatalog = [
+  { id: "openai", displayName: "OpenAI", baseURL: "https://api.openai.com/v1", headerStyle: "openai", authMethods: ["api_key"], models: ["gpt-5", "gpt-5-mini"] },
+  { id: "google", displayName: "Google Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta", headerStyle: "gemini", authMethods: ["api_key"], models: ["gemini-2.5-pro", "gemini-2.5-flash"] },
+];
+
+const llmSettings = {
+  model: "",
+  apiBase: "",
+  apiKey: "",
+  hasApiKey: false,
+  reasoningEffort: "high",
+  ollamaCompatible: false,
+  llmMaxRetries: 3,
+  memoryCompressorTimeout: 120,
+  maxIterations: 40,
+  geminiApiKey: "",
+  hasGeminiApiKey: false,
+  envFile: "~/.xalgorix.env",
+  provider: "",
+  authMethod: "api_key",
+  profiles: [],
+};
+
+// Flatten every seeded instance vuln into the FlatFinding shape the
+// /findings page and Overview totals consume, so the list, the summary
+// widget and the per-scan counts all agree.
+function allFindings() {
+  const out = [];
+  for (const inst of state.instances) {
+    for (const v of inst.vulns || []) {
+      out.push({
+        ...v,
+        scan_id: inst.id,
+        scan_target: inst.parent_target || inst.targets,
+        scan_started_at: inst.started_at,
+        verified: v.severity === "critical" || v.severity === "high",
+        tags: [],
+      });
+    }
+  }
+  return out;
+}
+
+function findingsSummary() {
+  const totals = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const f of allFindings()) {
+    const sev = (f.severity || "").toLowerCase();
+    if (sev in totals) totals[sev] += 1;
+  }
+  return {
+    totals,
+    as_of: nowIso(),
+    etag: `mock-${totals.critical}${totals.high}${totals.medium}${totals.low}${totals.info}`,
+  };
+}
 
 function runningInstance() {
   return state.instances.find((i) => i.status === "running");
@@ -410,7 +468,50 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // Default
+  // -------- Findings list + on-disk summary --------------------------------
+  if (method === "GET" && url === "/api/findings") {
+    return send(res, allFindings());
+  }
+  if (method === "GET" && url === "/api/findings/summary") {
+    return send(res, findingsSummary());
+  }
+
+  // -------- Per-instance persisted event history ---------------------------
+  // The live feed streams over the WebSocket below; there is no synthetic
+  // backlog, so return an empty (but valid) WSEvent[] history.
+  if (method === "GET" && /^\/api\/instances\/[^/]+\/events$/.test(url)) {
+    return send(res, []);
+  }
+
+  // -------- Schedules ------------------------------------------------------
+  if (method === "GET" && url === "/api/schedules") {
+    return send(res, state.schedules);
+  }
+
+  // -------- Provider catalog + stored auth profiles ------------------------
+  if (method === "GET" && url === "/api/providers") {
+    return send(res, providerCatalog);
+  }
+  if (method === "GET" && url === "/api/auth/profiles") {
+    return send(res, state.authProfiles);
+  }
+
+  // -------- LLM / environment / legacy-import settings ---------------------
+  if (method === "GET" && url === "/api/settings/llm") {
+    return send(res, llmSettings);
+  }
+  if (method === "GET" && url === "/api/settings/environment") {
+    return send(res, { envFile: "~/.xalgorix.env", variables: [], restartRequired: false });
+  }
+  if (method === "GET" && url === "/api/legacy-import/status") {
+    return send(res, { count: 0, dismissed: true });
+  }
+
+  // Default. For an unhandled GET /api/* route fall back to an empty array
+  // so a forgotten endpoint degrades to an empty collection instead of an
+  // object that crashes array consumers with "(...).map is not a function".
+  // Non-GET keeps the neutral ok envelope.
+  if (method === "GET" && url.startsWith("/api/")) return send(res, []);
   send(res, { ok: true });
 });
 
