@@ -201,7 +201,19 @@ type geminiCandidate struct {
 }
 
 type geminiResponse struct {
-	Candidates []geminiCandidate `json:"candidates"`
+	Candidates    []geminiCandidate    `json:"candidates"`
+	UsageMetadata *geminiUsageMetadata `json:"usageMetadata,omitempty"`
+}
+
+// geminiUsageMetadata carries token counts returned by the Gemini
+// generateContent and streamGenerateContent endpoints. Unlike the
+// OpenAI-style `usage` object, Gemini reports usage under `usageMetadata`;
+// in a streamed response the counts are cumulative and the final chunk
+// carries the totals.
+type geminiUsageMetadata struct {
+	PromptTokenCount     int `json:"promptTokenCount"`
+	CandidatesTokenCount int `json:"candidatesTokenCount"`
+	TotalTokenCount      int `json:"totalTokenCount"`
 }
 
 // geminiStreamResponse is the same structure but used for SSE streaming responses.
@@ -912,7 +924,10 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 			return
 		}
 
-		// OpenAI/Google streaming: "data: JSON" lines
+		// OpenAI/Google streaming: "data: JSON" lines. Gemini reports token usage
+		// under usageMetadata (cumulative per chunk); keep the latest values and
+		// add them to the running totals once, after the stream ends.
+		var gemPromptTokens, gemCandidateTokens int
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {
@@ -929,6 +944,11 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 				var gemResp geminiStreamResponse
 				if err := json.Unmarshal([]byte(data), &gemResp); err != nil {
 					continue
+				}
+				if gemResp.UsageMetadata != nil {
+					// Gemini streams cumulative usage; remember the latest.
+					gemPromptTokens = gemResp.UsageMetadata.PromptTokenCount
+					gemCandidateTokens = gemResp.UsageMetadata.CandidatesTokenCount
 				}
 				if len(gemResp.Candidates) > 0 && len(gemResp.Candidates[0].Content.Parts) > 0 {
 					content := gemResp.Candidates[0].Content.Parts[0].Text
@@ -956,6 +976,12 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 			}
 		}
 
+		if gemPromptTokens > 0 || gemCandidateTokens > 0 {
+			c.mu.Lock()
+			c.totalIn += gemPromptTokens
+			c.totalOut += gemCandidateTokens
+			c.mu.Unlock()
+		}
 		ch <- StreamChunk{Done: true}
 	})
 
@@ -1091,6 +1117,12 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 		}
 		if len(gemResp.Candidates) == 0 || len(gemResp.Candidates[0].Content.Parts) == 0 {
 			return "", fmt.Errorf("no content in Gemini response")
+		}
+		if gemResp.UsageMetadata != nil {
+			c.mu.Lock()
+			c.totalIn += gemResp.UsageMetadata.PromptTokenCount
+			c.totalOut += gemResp.UsageMetadata.CandidatesTokenCount
+			c.mu.Unlock()
 		}
 		return gemResp.Candidates[0].Content.Parts[0].Text, nil
 	}
