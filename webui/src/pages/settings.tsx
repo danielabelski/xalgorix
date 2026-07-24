@@ -265,6 +265,24 @@ export default function SettingsPage() {
     return (profiles.data ?? []).filter((p) => p.provider === llmForm.provider);
   }, [profiles.data, llmForm.provider]);
 
+  // Every saved profile across ALL providers, enriched with the
+  // catalog display name and an active flag. This is the same list
+  // the schedule / scan "Provider profile" pickers draw from, so the
+  // Settings page can review and delete credentials that belong to a
+  // provider other than the one currently selected above.
+  const allProfiles = useMemo(() => {
+    const byID = new Map((providers.data ?? []).map((e) => [e.id, e]));
+    return (profiles.data ?? []).map((profile) => {
+      const key = profile.key ?? `${profile.provider}:${profile.profileId}`;
+      return {
+        profile,
+        key,
+        display: byID.get(profile.provider)?.displayName ?? profile.provider,
+        active: key === llmForm.activeProfileKey,
+      };
+    });
+  }, [profiles.data, providers.data, llmForm.activeProfileKey]);
+
   function changeTab(value: string) {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
@@ -720,6 +738,66 @@ export default function SettingsPage() {
                           </div>
                         );
                       })}
+                    </div>
+                  </div>
+                )}
+
+                {/* All saved provider profiles across every provider —
+                    the same set the schedule / scan "Provider profile"
+                    pickers offer. Lets the operator review and delete
+                    credentials for providers other than the one selected
+                    above (the picker there is scoped to that provider). */}
+                {allProfiles.length > 0 && (
+                  <div className="space-y-2">
+                    <Label>All provider profiles</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Every stored credential across all providers. These
+                      are the profiles available in the schedule and scan
+                      "Provider profile" pickers.
+                    </p>
+                    <div className="divide-y divide-border rounded-md border border-border">
+                      {allProfiles.map(({ profile, key, display, active }) => (
+                        <div
+                          key={key}
+                          className="flex flex-wrap items-center gap-3 px-3 py-2"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 text-sm font-medium">
+                              {display} · {profile.profileId}
+                              <Badge variant="muted">{profile.type}</Badge>
+                              {active && (
+                                <CheckCircle2 className="h-4 w-4 text-success" />
+                              )}
+                              {profile.requiresReauth && (
+                                <Badge variant="warning">
+                                  <AlertTriangle className="mr-1 h-3 w-3" />
+                                  re-auth required
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="font-mono text-xs text-muted-foreground">
+                              {profile.type === "oauth"
+                                ? maskedTokenLabel(profile)
+                                : maskedAPIKeyLabel(profile)}
+                            </div>
+                            {profile.expiresAt && (
+                              <div className="text-xs text-muted-foreground">
+                                expires {profile.expiresAt}
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={deleteProfile.isPending}
+                              onClick={() => deleteProfile.mutateAsync(key)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
