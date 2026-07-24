@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/providers"
 )
 
@@ -99,5 +100,36 @@ func TestProviderModelsURLsUsesCodexCatalogProtocol(t *testing.T) {
 	want := "https://chatgpt.com/backend-api/codex/models?client_version=" + codexModelsClientVersion
 	if len(urls) != 1 || urls[0] != want {
 		t.Fatalf("URLs = %v, want [%s]", urls, want)
+	}
+}
+
+func TestModelDiscoveryConfigMatchesActiveProviderByLLMProvider(t *testing.T) {
+	// Providers routed via XALGORIX_LLM_PROVIDER (for example DeepSeek) persist a
+	// bare, provider-native model name with no "<provider>/" prefix on XALGORIX_LLM
+	// (LLMProvider="deepseek", LLM="deepseek-v4-pro"). Discovery must recognize the
+	// active provider from LLMProvider and reuse the saved credentials instead of
+	// failing with "save or select credentials before scanning models".
+	req := httptest.NewRequest(http.MethodGet, "/api/providers/deepseek/models", nil)
+	entry := providers.Entry{
+		ID: "deepseek", BaseURL: "https://api.deepseek.com/v1", HeaderStyle: "openai", AuthMethods: []string{"api_key"},
+	}
+	srv := &Server{cfg: &config.Config{
+		LLM:         "deepseek-v4-pro",
+		LLMProvider: "deepseek",
+		APIKey:      "secret",
+		APIBase:     "https://api.deepseek.com/v1",
+	}}
+	got, credential, accountID, err := srv.modelDiscoveryConfig(req, entry)
+	if err != nil {
+		t.Fatalf("modelDiscoveryConfig returned error: %v", err)
+	}
+	if credential != "secret" {
+		t.Fatalf("credential = %q, want %q", credential, "secret")
+	}
+	if accountID != "" {
+		t.Fatalf("accountID = %q, want empty", accountID)
+	}
+	if got.BaseURL != "https://api.deepseek.com/v1" {
+		t.Fatalf("BaseURL = %q, want %q", got.BaseURL, "https://api.deepseek.com/v1")
 	}
 }

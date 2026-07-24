@@ -56,10 +56,28 @@ func (s *Server) handleDiscoverProviderModels(w http.ResponseWriter, r *http.Req
 	writeJSONStatus(w, http.StatusOK, discoveredModelsResponse{Models: models, Source: "remote"})
 }
 
+// activeConfigTargetsProvider reports whether the operator's persisted active
+// LLM config (XALGORIX_LLM*) targets providerID. It matches either the legacy
+// "<provider>/<model>" prefix carried on XALGORIX_LLM or the explicit
+// XALGORIX_LLM_PROVIDER routing field, which deliberately keeps the provider
+// separate from a bare, provider-native model name (for example
+// LLMProvider="deepseek" with LLM="deepseek-v4-pro"). Without the LLMProvider
+// branch, discovery for such providers falls through to "save or select
+// credentials" even though the active credentials are already persisted.
+func (s *Server) activeConfigTargetsProvider(providerID string) bool {
+	if s.cfg == nil {
+		return false
+	}
+	if strings.HasPrefix(s.cfg.LLM, providerID+"/") {
+		return true
+	}
+	return strings.TrimSpace(s.cfg.LLMProvider) == providerID
+}
+
 func (s *Server) modelDiscoveryConfig(r *http.Request, entry providers.Entry) (providers.Entry, string, string, error) {
 	for _, method := range entry.AuthMethods {
 		if method == "none" {
-			if s.cfg != nil && strings.HasPrefix(s.cfg.LLM, entry.ID+"/") && strings.TrimSpace(s.cfg.APIBase) != "" {
+			if s.activeConfigTargetsProvider(entry.ID) && strings.TrimSpace(s.cfg.APIBase) != "" {
 				entry.BaseURL = strings.TrimSpace(s.cfg.APIBase)
 			}
 			return entry, "", "", nil
@@ -85,7 +103,7 @@ func (s *Server) modelDiscoveryConfig(r *http.Request, entry providers.Entry) (p
 		}
 		return entry, strings.TrimSpace(profile.APIKey), "", nil
 	}
-	if s.cfg != nil && strings.HasPrefix(s.cfg.LLM, entry.ID+"/") {
+	if s.activeConfigTargetsProvider(entry.ID) {
 		if strings.TrimSpace(s.cfg.APIBase) != "" {
 			entry.BaseURL = strings.TrimSpace(s.cfg.APIBase)
 		}
