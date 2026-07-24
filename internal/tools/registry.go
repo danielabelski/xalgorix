@@ -176,8 +176,13 @@ func (r *Registry) List() []string {
 //
 // This is deliberately conservative: it only ever resolves to a tool when the
 // orphaned parameters are a complete-enough superset of that tool's required
-// schema, so a genuinely ambiguous or partial fragment is left unresolved
-// (caller treats it as no-tool) rather than executing the wrong tool.
+// schema AND uniquely identify a single tool, so a genuinely ambiguous or
+// partial fragment is left unresolved (caller treats it as no-tool) rather
+// than executing the wrong tool. A tie between two or more tools at the best
+// score is treated as ambiguous and resolves to nothing — executing a
+// randomly-chosen winner (e.g. browser_action vs terminal_execute when both
+// share a single required "command" param) has caused whole-scan force-stops
+// in production (codeant.ai), because the wrong tool then fails on every call.
 func (r *Registry) MatchByParams(paramNames []string) (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -190,6 +195,7 @@ func (r *Registry) MatchByParams(paramNames []string) (string, bool) {
 	}
 	bestName := ""
 	bestScore := 0
+	tie := false
 	for _, t := range r.tools {
 		score := 0
 		allRequired := true
@@ -204,13 +210,22 @@ func (r *Registry) MatchByParams(paramNames []string) (string, bool) {
 		// Only candidate tools whose required params are all present, and
 		// that actually matched at least one param. Prefer the tighter match
 		// (higher score / fewer unmatched given params) to disambiguate tools
-		// that share a parameter name.
-		if allRequired && score > bestScore {
+		// that share a parameter name. If two eligible tools score equally,
+		// mark it a tie — the parameter set does not uniquely identify the
+		// tool, so resolving to either one would be a guess.
+		if !allRequired || score == 0 {
+			continue
+		}
+		switch {
+		case score > bestScore:
 			bestScore = score
 			bestName = t.Name
+			tie = false
+		case score == bestScore:
+			tie = true
 		}
 	}
-	if bestName == "" || bestScore == 0 {
+	if bestName == "" || bestScore == 0 || tie {
 		return "", false
 	}
 	return bestName, true
