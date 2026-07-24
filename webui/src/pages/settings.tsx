@@ -1339,7 +1339,7 @@ function CatalogModelField({
         {
           onSuccess: (result) => {
             setDiscoveredModels(result.models);
-            if (result.models.length > 0) {
+            if (result.models.length > 0 && !result.models.includes(value)) {
               onChange(result.models[0]);
             }
           },
@@ -1428,7 +1428,7 @@ function CatalogModelField({
                   onSuccess: (result) => {
                     setDiscoveredModels(result.models);
                     setManualEntry(false);
-                    if (result.models.length > 0) {
+                    if (result.models.length > 0 && !result.models.includes(value)) {
                       onChange(result.models[0]);
                     }
                   },
