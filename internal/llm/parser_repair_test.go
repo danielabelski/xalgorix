@@ -65,6 +65,23 @@ func TestParseToolCalls_RepairsMalformedOpenTag(t *testing.T) {
 			wantVal:  "GET",
 		},
 		{
+			// The codeant.ai incident: the model dropped the ENTIRE "<function="
+			// prefix, leaving the bare tool name + a stray quote, then a
+			// well-formed <parameter> body + </function>. Before the
+			// repairBareNameQuotedRe repair was added, this shape was NOT
+			// recovered, fell through to orphaned-param matching, tied
+			// terminal_execute/browser_action/str_replace_editor/pageagent (all
+			// share a single required "command" param), and the wrong tool
+			// (browser_action) won non-deterministically — failing every call
+			// with "unknown browser action: python3..." and force-stopping the
+			// scan at 15 no-tool responses.
+			name:     "whole function= prefix dropped, bare name + stray quote (codeant.ai)",
+			input:    "terminal_execute\">\n<parameter=command>python3 << 'EOF'\nimport re\nEOF</parameter>\n</function>",
+			wantName: "terminal_execute",
+			wantKey:  "command",
+			wantVal:  "python3 << 'EOF'\nimport re\nEOF",
+		},
+		{
 			name:     "correct tag still parses (idempotent)",
 			input:    "<function=finish>\n<parameter=summary>done</parameter>\n</function>",
 			wantName: "finish",

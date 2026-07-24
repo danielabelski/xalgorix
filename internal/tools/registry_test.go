@@ -233,3 +233,49 @@ func TestMatchByParamsUpdatePlan(t *testing.T) {
 		t.Errorf("MatchByParams(nil) should not resolve, got %q", name)
 	}
 }
+
+// MatchByParams must NOT resolve a tie. This is the codeant.ai root cause:
+// terminal_execute, browser_action, str_replace_editor and pageagent all share
+// a single required "command" parameter, so a dropped-open-tag call that
+// recovers only {"command"} cannot uniquely identify the tool. The previous
+// implementation picked an arbitrary winner via randomized map iteration
+// (browser_action), executed the wrong tool, and force-stopped the scan.
+// A tie is ambiguity — it must resolve to nothing rather than a guess.
+func TestMatchByParamsRejectsTie(t *testing.T) {
+	r := NewRegistry()
+	for _, def := range []struct {
+		name   string
+		params []Parameter
+	}{
+		{"terminal_execute", []Parameter{{Name: "command", Required: true}}},
+		{"browser_action", []Parameter{
+			{Name: "command", Required: true},
+			{Name: "url", Required: false},
+		}},
+		{"str_replace_editor", []Parameter{
+			{Name: "command", Required: true},
+			{Name: "path", Required: true},
+		}},
+		{"pageagent", []Parameter{
+			{Name: "command", Required: true},
+			{Name: "id", Required: false},
+		}},
+	} {
+		r.Register(&Tool{Name: def.name, Parameters: def.params})
+	}
+
+	// "command" alone ties all four tools at score 1 → ambiguous → no match.
+	if name, ok := r.MatchByParams([]string{"command"}); ok {
+		t.Errorf("MatchByParams(command) with 4 command-param tools = %q,true, want no match (tie)", name)
+	}
+
+	// Adding a browser-only optional param breaks the tie → browser_action wins.
+	if name, ok := r.MatchByParams([]string{"command", "url"}); !ok || name != "browser_action" {
+		t.Errorf("MatchByParams(command,url) = %q,%v, want browser_action,true", name, ok)
+	}
+
+	// Adding pageagent-only "id" → pageagent wins (score 2 vs the others' 1).
+	if name, ok := r.MatchByParams([]string{"command", "id"}); !ok || name != "pageagent" {
+		t.Errorf("MatchByParams(command,id) = %q,%v, want pageagent,true", name, ok)
+	}
+}

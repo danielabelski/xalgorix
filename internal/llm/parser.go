@@ -37,15 +37,31 @@ var (
 	//     =send_request><parameter=method>GET</parameter></function>               (no "<function")
 	//     function=terminal_execute"><parameter=command>id</parameter></function>  (stray quote before ">")
 	//     <function="terminal_execute"><parameter=...>                             (quoted name)
-	// 15 such responses in a row force-stops the whole scan (observed in
+	// 15 such responses in a row force-stop the whole scan (observed in
 	// production against bitbank.cc). This repair rebuilds the canonical
 	// "<function=name>" form, tolerating an optional leading "<"/"<function",
 	// optional surrounding quotes, and stray quotes/whitespace before the ">".
-	// Requiring a "<parameter" or "</function>" immediately after makes it a
-	// specific, low-false-positive signal (ordinary prose has no
-	// "=word><parameter"), and correct "<function=name>" tags rewrite to the
-	// identical form, so it is idempotent.
-	repairFnOpenRe = regexp.MustCompile(`(?s)<?(?:function)?\s*=\s*["']?([A-Za-z_][A-Za-z0-9_-]*)["'\s]*>(\s*(?:<parameter|</function>))`)
+	// The leading "(^|[^\w/<])" boundary prevents the name from also matching
+	// inside a CLOSING tag ("</parameter>" has no "=", but the name "parameter"
+	// plus its ">" must never be mistaken for an open tag); it is captured so it
+	// can be re-emitted in the replacement. Requiring a "<parameter" or
+	// "</function>" immediately after the name makes this a specific,
+	// low-false-positive signal (ordinary prose never has "=word><parameter"),
+	// and correct "<function=name>" tags rewrite to the identical form, so it is
+	// idempotent.
+	repairFnOpenRe = regexp.MustCompile(`(?s)(^|[^\w/<])<?(?:function\s*)?=\s*["']?([A-Za-z_][A-Za-z0-9_-]*)["'\s]*>(\s*(?:<parameter|</function>))`)
+
+	// Second repair for the codeant.ai shape: the model dropped the ENTIRE
+	// "<function=" prefix, leaving only the bare tool name + a STRAY QUOTE before
+	// the ">", then a well-formed body. E.g.
+	//     terminal_execute"><parameter=command>python3...</parameter></function>
+	// This is distinct from a truncation like "_plan>" (suffix of "<update_plan>")
+	// because the stray quote (a leftover from "<function=\"name\">" or
+	// "function=name\">") is a near-zero-false-positive signal that ordinary
+	// prose never produces. Truncations carry NO quote, so they correctly stay
+	// on the orphaned-call path where MatchByParams resolves them via their
+	// parameter set (e.g. {task_id,status,notes} → update_plan).
+	repairBareNameQuotedRe = regexp.MustCompile(`(?s)(^|[^\w/<])([A-Za-z_][A-Za-z0-9_-]*)["']\s*>(\s*(?:<parameter|</function>))`)
 
 	// Normalize quotes around = in tags: <function = "name"> → <function=name>
 	stripQuotesRe = regexp.MustCompile(`<(function|parameter)\s*=\s*["']?([^>"']+?)["']?\s*>`)
@@ -174,7 +190,10 @@ func normalizeFormat(content string) string {
 	}
 
 	// Repair malformed function-open tags (missing leading "<" / "<function").
-	content = repairFnOpenRe.ReplaceAllString(content, "<function=${1}>${2}")
+	// ${1} is the leading boundary char (re-emitted so we don't eat punctuation).
+	content = repairFnOpenRe.ReplaceAllString(content, "${1}<function=${2}>${3}")
+	// Repair bare-name+quote drops (codeant.ai shape). Same ${1} boundary trick.
+	content = repairBareNameQuotedRe.ReplaceAllString(content, "${1}<function=${2}>${3}")
 
 	// Normalize quotes/spaces around = signs: <function = "name"> → <function=name>
 	content = stripQuotesRe.ReplaceAllStringFunc(content, func(s string) string {
