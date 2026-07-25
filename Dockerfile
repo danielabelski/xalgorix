@@ -44,7 +44,10 @@ COPY internal/web ./internal/web
 RUN cd webui && npm run build
 
 # ── Stage 2: build the Go binary + the latest Go security toolset ────────────
-FROM golang:1.25-bookworm AS gobuild
+# Go 1.26+ is required: projectdiscovery/httpx v1.10.0 declares `go >= 1.26`, so
+# a 1.25 builder makes `go install httpx@latest` fail (silently, via the `|| WARN`
+# in the tool loop) and the image ships without the ProjectDiscovery scanner.
+FROM golang:1.26-bookworm AS gobuild
 # libpcap-dev is needed to compile naabu (CGO); git for module fetches.
 RUN apt-get update && apt-get install -y --no-install-recommends libpcap-dev git \
     && rm -rf /var/lib/apt/lists/*
@@ -138,6 +141,14 @@ RUN pipx install scrapling || pip3 install --break-system-packages scrapling || 
 
 # Bake nuclei templates so first-run scans don't stall on a template fetch.
 RUN /root/go/bin/nuclei -update-templates >/dev/null 2>&1 || echo "WARN: nuclei template prefetch skipped"
+
+# Make `httpx` resolve to ProjectDiscovery's scanner. Kali/pip ship a Python
+# `httpx` CLI (the HTTP client) at /usr/bin/httpx that otherwise answers `httpx`
+# and breaks the engine's recon (unknown flags like -silent/-title). /root/go/bin
+# is already ahead of /usr/bin on PATH; also point the absolute path at the PD
+# binary so nothing falls back to the Python client.
+RUN if [ -x /root/go/bin/httpx ]; then ln -sf /root/go/bin/httpx /usr/bin/httpx; \
+    else echo "WARN: ProjectDiscovery httpx not baked into /root/go/bin"; fi
 
 ENV XALGORIX_BIND=0.0.0.0 \
     XALGORIX_BROWSER_PATH=/usr/bin/chromium \
