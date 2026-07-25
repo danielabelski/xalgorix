@@ -107,6 +107,21 @@ func (c Config) loopbackPortAllowed(hostPort string) bool {
 	return false
 }
 
+// schemeDefaultPort returns the well-known default port for a URL scheme, so a
+// scheme://host URL with no explicit port is still compared against the
+// dashboard's listener port. Returns "" for schemes with no port convention we
+// should assume.
+func schemeDefaultPort(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "http", "ws":
+		return "80"
+	case "https", "wss":
+		return "443"
+	default:
+		return ""
+	}
+}
+
 // LookupHost is the package-level resolver indirection. Tests
 // overwrite this var to feed deterministic resolutions; production
 // uses net.LookupHost. Single var, single call site (inside
@@ -130,6 +145,13 @@ func IsLocalOrListener(cfg Config, target string) bool {
 	if u, err := url.Parse(target); err == nil && u.Host != "" {
 		host = u.Hostname()
 		hostPort = u.Port()
+		// url.Port() is "" when the URL omits an explicit port. Fall back to
+		// the scheme's default (http->80, https->443) so the dashboard-port
+		// checks below — which compare hostPort against cfg.Port — are not
+		// silently bypassed for URLs like "https://127.0.0.1/".
+		if hostPort == "" {
+			hostPort = schemeDefaultPort(u.Scheme)
+		}
 	}
 	// Also handle host:port without scheme
 	if h, p, err := net.SplitHostPort(host); err == nil {
