@@ -984,6 +984,25 @@ var packageMap = map[string]string{
 	"bc":      "bc",
 	// SQL
 	"sqlmap": "sqlmap",
+
+	// ── Extended coverage for docs/tools.md ─────────────────────────
+	// Go tools — routed to `go install` via goTools in installPackage.
+	"shuffledns": "shuffledns",
+	"gosec":      "gosec",
+	"subjack":    "subjack",
+	"gitleaks":   "gitleaks",
+	"unfurl":     "unfurl",
+	"gron":       "gron",
+	"httprobe":   "httprobe",
+	// Python tools — routed to pipx/pip via pipxTools.
+	"semgrep":    "semgrep",
+	"bandit":     "bandit",
+	"git-dumper": "git-dumper",
+	// Ruby tool — routed to gem via gemTools.
+	"brakeman": "brakeman",
+	// Distro packages (apt). gh needs GitHub's apt repo (added in the Dockerfile).
+	"dirsearch": "dirsearch",
+	"gh":        "gh",
 }
 
 // decode decodes a base64 string
@@ -1621,6 +1640,9 @@ func installPackage(pkg string) string {
 		"paramspider": "paramspider",
 		"scrapling":   "scrapling",
 		"uro":         "uro",
+		"semgrep":     "semgrep",
+		"bandit":      "bandit",
+		"git-dumper":  "git-dumper",
 	}
 
 	// Special handling for Cargo (Rust) tools
@@ -1650,11 +1672,24 @@ func installPackage(pkg string) string {
 		"assetfinder": "github.com/tomnomnom/assetfinder@latest",
 		// Vulnerability scanners
 		"dalfox": "github.com/hahwul/dalfox/v2@latest",
+		// Extended coverage (docs/tools.md)
+		"shuffledns": "github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest",
+		"unfurl":     "github.com/tomnomnom/unfurl@latest",
+		"gron":       "github.com/tomnomnom/gron@latest",
+		"httprobe":   "github.com/tomnomnom/httprobe@latest",
+		"gitleaks":   "github.com/zricethezav/gitleaks/v8@latest",
+		"gosec":      "github.com/securego/gosec/v2/cmd/gosec@latest",
+		"subjack":    "github.com/haccer/subjack@latest",
 	}
 
 	// npm-installed tools
 	npmTools := map[string]string{
 		"playwright-cli": "@anthropic-ai/playwright-cli",
+	}
+
+	// gem-installed tools (Ruby)
+	gemTools := map[string]string{
+		"brakeman": "brakeman",
 	}
 
 	homeDir := os.Getenv("HOME")
@@ -1689,6 +1724,19 @@ func installPackage(pkg string) string {
 			return fmt.Sprintf("[install %s via apt/cargo failed: %s]\n%s", pkg, err, truncate(string(out)))
 		}
 		return fmt.Sprintf("[installed %s successfully]", pkg)
+	}
+
+	// gem (Ruby) tools
+	if gemPkg, ok := gemTools[pkg]; ok {
+		installCmd := fmt.Sprintf("gem install --no-document %s 2>&1", gemPkg)
+		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "bash", "-c", installCmd)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Sprintf("[install %s via gem failed: %s]\n%s", pkg, err, truncate(string(out)))
+		}
+		return fmt.Sprintf("[installed %s via gem successfully]", pkg)
 	}
 
 	if goPkg, ok := goTools[pkg]; ok {
@@ -2009,6 +2057,9 @@ func extractCommands(cmd string) []string {
 		"arjun", "x8", "jq", "xmllint", "hydra", "john",
 		"git", "dirsearch", "feroxbuster", "testssl", "sslyze",
 		"okenv", "ds_store", "gitdumper", "githacker",
+		// Extended coverage (docs/tools.md): pre-install before first use.
+		"shuffledns", "gosec", "subjack", "gitleaks", "semgrep", "bandit",
+		"brakeman", "git-dumper",
 	}
 
 	found := make(map[string]bool)

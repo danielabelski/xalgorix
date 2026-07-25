@@ -85,6 +85,13 @@ RUN set -eux; \
       github.com/projectdiscovery/mapcidr/cmd/mapcidr@latest \
       github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest \
       github.com/projectdiscovery/notify/cmd/notify@latest \
+      github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest \
+      github.com/tomnomnom/unfurl@latest \
+      github.com/tomnomnom/gron@latest \
+      github.com/tomnomnom/httprobe@latest \
+      github.com/haccer/subjack@latest \
+      github.com/securego/gosec/v2/cmd/gosec@latest \
+      github.com/zricethezav/gitleaks/v8@latest \
     ; do go install -v "$pkg" || echo "WARN: go install $pkg failed (installable at runtime)"; done; \
     CGO_ENABLED=1 go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest \
       || echo "WARN: naabu build failed (installable at runtime)"
@@ -115,6 +122,7 @@ RUN apt-get update && apt-get install -y \
       nodejs npm \
       build-essential pkg-config libpcap-dev \
       chromium \
+      findomain dirsearch \
     && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain at runtime so the agent can `go install` anything not baked in.
@@ -136,8 +144,44 @@ RUN curl -sSLo /tmp/ferox.zip https://github.com/epi052/feroxbuster/releases/lat
     && rm -f /tmp/ferox.zip \
     || echo "WARN: feroxbuster prefetch failed (present via Kali/cargo)"
 
-# Python tools the engine auto-installs via pipx (best-effort at build).
-RUN pipx install scrapling || pip3 install --break-system-packages scrapling || echo "WARN: scrapling prefetch failed (installable at runtime)"
+# Python tools the engine auto-installs via pipx (best-effort at build). One per
+# tool so a single flaky package never fails the image; the rest stay
+# runtime-installable via the packageMap → pipx path.
+RUN for p in scrapling semgrep bandit git-dumper arjun uro; do \
+      pipx install "$p" || pip3 install --break-system-packages "$p" \
+        || echo "WARN: pipx prefetch of $p failed (installable at runtime)"; \
+    done
+
+# paramspider — the real tool is GitHub-only (PyPI `paramspider` is an empty
+# 1.3 kB stub with no CLI), so install straight from the repo.
+RUN pipx install "git+https://github.com/devanshbatham/paramspider.git" \
+    || echo "WARN: paramspider prefetch failed (installable at runtime)"
+
+# Ruby (Rails SAST) — best-effort.
+RUN gem install --no-document brakeman || echo "WARN: brakeman prefetch failed (installable at runtime)"
+
+# trufflehog — no clean `go install` (its go.mod uses replace directives), so
+# pull the official release binary into /usr/local/bin.
+RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+      | sh -s -- -b /usr/local/bin \
+    || echo "WARN: trufflehog prefetch failed (installable at runtime)"
+
+# GitHub CLI (gh) — not in the Kali apt index, so add GitHub's official repo.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+         > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/* \
+    || echo "WARN: gh prefetch failed (installable at runtime)"
+
+# CMSmap — git-cloned CMS scanner; expose a `cmsmap` wrapper on PATH.
+RUN git clone --depth 1 https://github.com/Dionach/CMSmap /opt/CMSmap \
+    && (pip3 install --break-system-packages -r /opt/CMSmap/requirements.txt 2>/dev/null || true) \
+    && printf '#!/bin/sh\nexec python3 /opt/CMSmap/cmsmap.py "$@"\n' > /usr/local/bin/cmsmap \
+    && chmod +x /usr/local/bin/cmsmap \
+    || echo "WARN: cmsmap prefetch failed (installable at runtime)"
 
 # Bake nuclei templates so first-run scans don't stall on a template fetch.
 RUN /root/go/bin/nuclei -update-templates >/dev/null 2>&1 || echo "WARN: nuclei template prefetch skipped"

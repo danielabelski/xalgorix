@@ -91,6 +91,31 @@ func TestCommandHelpers_ClassifyHeavyToolsAndPackages(t *testing.T) {
 	}
 }
 
+func TestResolvePackage_ExtendedToolCoverage(t *testing.T) {
+	// Every tool advertised in docs/tools.md that the engine is expected to
+	// auto-install must resolve to a non-empty package name; otherwise the
+	// reactive install path (extractMissingCommand → resolvePackage →
+	// installPackage) silently no-ops and the agent just sees "command not
+	// found". Regression guard for the coverage gap found on 2026-07-25 and
+	// for the auto-install mapping bugs #286/#288 (paramspider, arjun, x8, uro).
+	for _, tool := range []string{
+		// Go tools
+		"shuffledns", "gosec", "subjack", "gitleaks", "unfurl", "gron", "httprobe",
+		// Python (pipx) tools
+		"paramspider", "semgrep", "bandit", "git-dumper", "arjun", "uro",
+		// Rust (cargo)
+		"x8",
+		// Ruby (gem)
+		"brakeman",
+		// Distro packages (apt)
+		"findomain", "dirsearch", "gh",
+	} {
+		if pkg := resolvePackage(tool); pkg == "" {
+			t.Errorf("resolvePackage(%q) = %q; tool not auto-installable (missing from packageMap)", tool, "")
+		}
+	}
+}
+
 func TestNormalizeCommandForRequestRatePolicy_RewritesScannerFlags(t *testing.T) {
 	sc := scanctx.New("term-rate", t.TempDir())
 	sc.SetRequestRatePolicy(scanctx.RequestRatePolicy{MaxRPS: 3, Source: "custom instructions"})
