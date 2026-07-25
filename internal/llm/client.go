@@ -189,9 +189,20 @@ type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
 }
 
+// geminiGenerationConfig carries the per-request generation controls Gemini
+// accepts under "generationConfig". Without it Gemini applies its own
+// server-side defaults, ignoring the operator's configured max output tokens
+// (which truncates large tool calls such as report_vulnerability) and the
+// agent's per-role temperature overrides (e.g. the validator running at 0).
+type geminiGenerationConfig struct {
+	MaxOutputTokens int      `json:"maxOutputTokens,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+}
+
 type geminiRequest struct {
-	Contents          []geminiContent `json:"contents,omitempty"`
-	SystemInstruction *geminiContent  `json:"system_instruction,omitempty"`
+	Contents          []geminiContent         `json:"contents,omitempty"`
+	SystemInstruction *geminiContent          `json:"system_instruction,omitempty"`
+	GenerationConfig  *geminiGenerationConfig `json:"generationConfig,omitempty"`
 }
 
 type geminiCandidate struct {
@@ -819,6 +830,10 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 			if len(systemParts) > 0 {
 				gemReq.SystemInstruction = &geminiContent{Role: "user", Parts: systemParts}
 			}
+			gemReq.GenerationConfig = &geminiGenerationConfig{
+				MaxOutputTokens: c.maxOutputTokens(),
+				Temperature:     c.effectiveTemperature(),
+			}
 			body, _ = json.Marshal(gemReq)
 		} else if isAnthropic {
 			var systemPrompt string
@@ -1051,6 +1066,10 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 		gemReq := geminiRequest{Contents: contents}
 		if len(systemParts) > 0 {
 			gemReq.SystemInstruction = &geminiContent{Role: "user", Parts: systemParts}
+		}
+		gemReq.GenerationConfig = &geminiGenerationConfig{
+			MaxOutputTokens: c.maxOutputTokens(),
+			Temperature:     c.effectiveTemperature(),
 		}
 		body, err = json.Marshal(gemReq)
 		if err != nil {
