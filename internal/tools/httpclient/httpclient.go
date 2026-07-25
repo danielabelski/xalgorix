@@ -17,6 +17,7 @@ import (
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/proxy"
+	"github.com/xalgord/xalgorix/v4/internal/scanheaders"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
 
@@ -141,6 +142,11 @@ func executeWithContext(contextID string, args map[string]string) (tools.Result,
 			}
 		}
 	}
+
+	// Apply operator-configured scan/attribution headers (XALGORIX_SCAN_HEADERS
+	// / -H). Like session auth, they identify authorized scan traffic and are
+	// never allowed to override a header the caller set explicitly.
+	scanheaders.Apply(req.Header, config.Get().ScanHeaders)
 
 	// Blank overrides: DELETE the header so the request is sent with no such
 	// credential at all. Middleware/apps can treat an empty Authorization or

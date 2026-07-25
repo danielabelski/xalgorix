@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/xalgord/xalgorix/v4/internal/scanheaders"
 )
 
 // Config holds all Xalgorix configuration.
@@ -101,6 +103,17 @@ type Config struct {
 	// (real endpoints + params + example bodies) and harvests any auth material,
 	// turning a blind black-box scan into an informed one. XALGORIX_SCAN_CONTEXT.
 	ScanContext string
+
+	// ScanHeaders are operator-supplied custom HTTP headers ("Name: value")
+	// injected into all TARGET-facing scan traffic to identify an authorized
+	// Xalgorix run: the agent's HTTP client and, via their -H flag, bundled
+	// tools (httpx, nuclei). Built-in equivalent of Nuclei's -H/-header. Bug-
+	// bounty programs often require such a header (e.g. "X-Bug-Bounty: user");
+	// it also lets a target's WAF/SOC allow-list the scan. Never attached to
+	// non-target destinations (LLM APIs, notifications, the dashboard).
+	// XALGORIX_SCAN_HEADERS (';'/newline-separated) and/or
+	// XALGORIX_SCAN_HEADERS_FILE (one per line); repeatable -H on the CLI.
+	ScanHeaders []string
 
 	// Per-scan resource budgets with graceful early-stopping (MAPTA §2.7/§3.3).
 	// A scan halts cleanly (keeping findings already reported) once any cap is
@@ -294,6 +307,7 @@ func load() *Config {
 		OOBDisable:          envOrBool("XALGORIX_OOB_DISABLE", false),
 		SourceRepo:          envOr("XALGORIX_SOURCE_REPO", ""),
 		ScanContext:         envOr("XALGORIX_SCAN_CONTEXT", ""),
+		ScanHeaders:         loadScanHeaders(),
 		MaxToolCalls:        envOrInt("XALGORIX_MAX_TOOL_CALLS", 0),
 		MaxDurationSec:      envOrInt("XALGORIX_MAX_DURATION", 0),
 		MaxTokens:           envOrInt("XALGORIX_MAX_TOKENS", 0),
@@ -548,6 +562,24 @@ func maybeEmitMigrationWarning(cwd, dataDir string, suppressed bool) {
 		"(matched %q). The default data directory has changed in this "+
 		"release to %s. To keep writing to the legacy location, run with "+
 		"XALGORIX_DATA_DIR=%s", cwd, found, dataDir, cwd)
+}
+
+// loadScanHeaders assembles the operator-configured scan/attribution headers
+// from XALGORIX_SCAN_HEADERS (';'/newline-separated) and an optional
+// XALGORIX_SCAN_HEADERS_FILE (one "Name: value" per line), de-duplicated with
+// the env entries taking precedence. A missing/unreadable file is a non-fatal
+// warning so a scan still runs (just without the file's headers).
+func loadScanHeaders() []string {
+	env := scanheaders.Parse(os.Getenv("XALGORIX_SCAN_HEADERS"))
+	var fromFile []string
+	if path := strings.TrimSpace(os.Getenv("XALGORIX_SCAN_HEADERS_FILE")); path != "" {
+		hs, err := scanheaders.ParseFile(path)
+		if err != nil {
+			log.Printf("[config] Warning: XALGORIX_SCAN_HEADERS_FILE %q: %v", path, err)
+		}
+		fromFile = hs
+	}
+	return scanheaders.Merge(env, fromFile)
 }
 
 func envOr(key, fallback string) string {

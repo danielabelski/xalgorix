@@ -959,6 +959,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 						contextID = a.scanCtx.ID
 					}
 					normalized, note := terminal.NormalizeCommandForRequestRatePolicy(contextID, command)
+					normalized = terminal.InjectScanHeadersIntoCommand(normalized)
 					if normalized != command {
 						updatedArgs := make(map[string]string, len(tc.Args))
 						for k, v := range tc.Args {

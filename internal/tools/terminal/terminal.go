@@ -1346,6 +1346,7 @@ func runShellInternal(contextID string, command string) (string, int) {
 
 	// Compute timeout based on command type
 	cleanCmd, ratePolicyNotice := NormalizeCommandForRequestRatePolicy(contextID, command)
+	cleanCmd = InjectScanHeadersIntoCommand(cleanCmd)
 	timeout := computeTimeout(cleanCmd)
 	if timeout > hardMaxTimeout {
 		timeout = hardMaxTimeout

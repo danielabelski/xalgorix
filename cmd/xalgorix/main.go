@@ -19,6 +19,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/proxy"
 	"github.com/xalgord/xalgorix/v4/internal/resources"
+	"github.com/xalgord/xalgorix/v4/internal/scanheaders"
 	"github.com/xalgord/xalgorix/v4/internal/tui"
 	"github.com/xalgord/xalgorix/v4/internal/web"
 )
@@ -228,6 +229,9 @@ func main() {
 	if args.bind != "" {
 		cfg.BindAddr = args.bind
 	}
+	if len(args.headers) > 0 {
+		cfg.ScanHeaders = scanheaders.Merge(args.headers, cfg.ScanHeaders)
+	}
 
 	// Web UI mode — no target or API config required at launch
 	if args.webUI {
@@ -283,6 +287,7 @@ func main() {
 type cliArgs struct {
 	targets     []string
 	instruction string
+	headers     []string
 	model       string
 	source      string // --source: git URL or local path for code-first scans
 	codeScan    string // --code-scan: "review" or "provision"
@@ -313,6 +318,11 @@ func parseArgs() cliArgs {
 			if i+1 < len(osArgs) {
 				i++
 				args.instruction = osArgs[i]
+			}
+		case "--header", "-H":
+			if i+1 < len(osArgs) {
+				i++
+				args.headers = append(args.headers, osArgs[i])
 			}
 		case "--source", "-s":
 			if i+1 < len(osArgs) {
@@ -368,6 +378,8 @@ func parseArgs() cliArgs {
 				args.targets = append(args.targets, strings.TrimPrefix(osArgs[i], "--target="))
 			} else if strings.HasPrefix(osArgs[i], "--instruction=") {
 				args.instruction = strings.TrimPrefix(osArgs[i], "--instruction=")
+			} else if strings.HasPrefix(osArgs[i], "--header=") {
+				args.headers = append(args.headers, strings.TrimPrefix(osArgs[i], "--header="))
 			} else if strings.HasPrefix(osArgs[i], "--source=") {
 				args.source = strings.TrimPrefix(osArgs[i], "--source=")
 			} else if strings.HasPrefix(osArgs[i], "--code-scan=") {
@@ -411,6 +423,7 @@ func printUsage() {
 	fmt.Println("CLI Flags:")
 	fmt.Println("  -t, --target <url>        Target URL, IP, or local path (repeatable)")
 	fmt.Println("  -i, --instruction <text>  Custom instructions for the agent")
+	fmt.Println("  -H, --header <Name: value>  Identifying header on all target traffic (repeatable)")
 	fmt.Println("  -s, --source <repo|path>  Codebase to scan (git URL or local path)")
 	fmt.Println("      --code-scan <mode>    Code-first scan: 'review' (SAST, no target)")
 	fmt.Println("                            or 'provision' (build+run source, then DAST)")
@@ -446,6 +459,8 @@ func printUsage() {
 	fmt.Println("  XALGORIX_API_KEY           API key")
 	fmt.Println("  XALGORIX_API_BASE          API base URL")
 	fmt.Println("  XALGORIX_MAX_ITERATIONS    Max iterations (0 = unlimited)")
+	fmt.Println("  XALGORIX_SCAN_HEADERS      Identifying header(s) for target traffic; ';' or newline separated")
+	fmt.Println("  XALGORIX_SCAN_HEADERS_FILE File of headers, one 'Name: value' per line")
 	fmt.Println()
 }
 
