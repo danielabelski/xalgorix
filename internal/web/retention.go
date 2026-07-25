@@ -99,6 +99,34 @@ func scanReferenceTime(rec ScanRecord) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// runningInstanceIDs returns the set of instance IDs whose scan is actually in
+// flight (Status "running"/"paused"). Retention uses it so it never deletes a
+// live scan's directory.
+//
+// It reads each instance's Status under inst.mu (the lock its writers hold).
+// The previous snapshot treated EVERY non-nil instance as running, but
+// completed instances are never removed from s.instances (and
+// rebuildInstancesFromDisk repopulates them for every on-disk scan at startup),
+// so scanIsRunning returned true for essentially every scan that ever existed —
+// silently turning the whole retention feature into a no-op.
+func (s *Server) runningInstanceIDs() map[string]bool {
+	running := make(map[string]bool)
+	s.instancesMu.RLock()
+	defer s.instancesMu.RUnlock()
+	for id, inst := range s.instances {
+		if inst == nil {
+			continue
+		}
+		inst.mu.RLock()
+		active := instanceIsActive(inst.Status)
+		inst.mu.RUnlock()
+		if active {
+			running[id] = true
+		}
+	}
+	return running
+}
+
 // pruneExpiredScans deletes scan directories whose reference time is
 // older than `days` days. It is safe to call repeatedly and never
 // touches reserved/system directories under dataDir (anything outside a
@@ -125,14 +153,7 @@ func (s *Server) pruneExpiredScans(days int) int {
 
 	// Snapshot the set of currently-running instance IDs so we never
 	// delete a scan that is mid-flight.
-	running := make(map[string]bool)
-	s.instancesMu.Lock()
-	for id, inst := range s.instances {
-		if inst != nil {
-			running[id] = true
-		}
-	}
-	s.instancesMu.Unlock()
+	running := s.runningInstanceIDs()
 
 	entries := s.findAllScans()
 	removed := 0
