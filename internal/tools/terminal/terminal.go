@@ -1620,6 +1620,7 @@ func installPackage(pkg string) string {
 	// Special handling for Cargo (Rust) tools
 	cargoTools := map[string]string{
 		"feroxbuster": "feroxbuster",
+		"findomain":   "findomain",
 	}
 
 	// Special handling for Go-installed tools
