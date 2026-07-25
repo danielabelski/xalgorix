@@ -21,6 +21,25 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools/terminal"
 )
 
+// configureProcessGroupKill starts cmd in its own process group and installs a
+// Cancel that SIGKILLs the whole group when the context is canceled/times out.
+//
+// Without this, exec.CommandContext's default cancel sends SIGKILL only to the
+// direct python3 PID. Because the child runs in a new process group (Setpgid),
+// any grandchild the script spawns (subprocess.Popen/os.system/fork) survives
+// as an orphan and keeps the inherited stdout/stderr pipes open, so cmd.Wait()
+// blocks well past the timeout. Killing the negative PID (the whole group)
+// reaps those orphans and lets Wait() return. Mirrors internal/tools/terminal.
+func configureProcessGroupKill(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return os.ErrProcessDone
+	}
+}
+
 // Register adds the python_action tool to the registry.
 func Register(r *tools.Registry) {
 	r.Register(&tools.Tool{
@@ -112,7 +131,7 @@ func executePythonForContext(contextID string, args map[string]string) (tools.Re
 	// at cmd.Dir, which is now guaranteed to be sc.ScanDir or
 	// cfg.WorkspaceRoot — both Allow_List descendants. That satisfies R8.8.
 	cmd.Env = pythonWorkspaceEnv(cmd.Dir)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	configureProcessGroupKill(cmd)
 
 	stdout := iolimit.New(1 << 20)
 	stderr := iolimit.New(1 << 19)
