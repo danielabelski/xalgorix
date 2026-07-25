@@ -1,8 +1,8 @@
 module github.com/xalgord/xalgorix/v4
 
-go 1.25
+go 1.26
 
-toolchain go1.25.11
+toolchain go1.26.5
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10

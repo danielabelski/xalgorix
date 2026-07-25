@@ -1,6 +1,6 @@
 version: "2"
 run:
-  go: "1.25"
+  go: "1.26"
   modules-download-mode: readonly
   tests: true
 output:
@@ -65,6 +65,24 @@ linters:
         # construction is reviewed in the terminal/python tool packages and
         # gated by the scope guard, not by static analysis here.
         - G204
+        # The rules below are new in the gosec bundle shipped with
+        # golangci-lint v2.12.2; none of them ran under the previous v2.5.0
+        # pin. They are excluded so this toolchain bump stays source-change
+        # free (per review on #298) and lint enforcement stays equivalent to
+        # the prior baseline. Triage in a dedicated follow-up.
+        #   Experimental taint-analysis series (noisy on an LLM-driven pentest
+        #   agent that deliberately constructs commands/paths from model input):
+        - G702 # command injection via taint analysis
+        - G703 # path traversal via taint analysis
+        - G705 # XSS via taint analysis
+        - G706 # log injection via taint analysis
+        #   Newer heuristic rules (some may be worth fixing later; kept out of
+        #   this toolchain-only PR):
+        - G117 # marshaled struct field matches secret pattern (auth store persists API keys by design)
+        - G118 # goroutine uses context.Background/TODO while request-scoped ctx available
+        - G120 # unbounded form parsing in HTTP handlers
+        - G122 # filepath.Walk/WalkDir callback uses race-prone path
+        - G124 # http.Cookie missing/insecure Secure/HttpOnly/SameSite
     govet:
       disable:
         - fieldalignment
@@ -105,6 +123,11 @@ linters:
     staticcheck:
       checks:
         - all
+        # QF1012 (stylistic quickfix: WriteString(fmt.Sprintf(...)) -> Fprintf)
+        # is newly surfaced by the staticcheck bundle in golangci-lint v2.12.2;
+        # it did not run under the prior v2.5.0 pin. Deferred like the gosec
+        # rules above to keep this a toolchain-only change (per review on #298).
+        - "-QF1012"
   exclusions:
     generated: lax
     rules:
