@@ -461,7 +461,8 @@ export interface EnvironmentVariableSetting {
     | "secret"
     | "number"
     | "boolean"
-    | "select";
+    | "select"
+    | "multiselect";
   options?: string[];
   sensitive: boolean;
   requiresRestart: boolean;

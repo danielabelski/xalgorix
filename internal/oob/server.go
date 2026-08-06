@@ -82,12 +82,73 @@ func Generate() (callbackURL, token string, err error) {
 	return interactshGenerate()
 }
 
-// Poll returns interactions for a token from whichever backend is active.
+// Poll returns interactions for a token from whichever backend is active,
+// filtered to the interaction protocols the operator allows via
+// XALGORIX_OOB_INTERACTIONS (blank = all: dns, http, smtp).
 func Poll(token string) []Interaction {
+	var hits []Interaction
 	if selfHosted() {
-		return selfHostedPoll(token)
+		hits = selfHostedPoll(token)
+	} else {
+		hits = interactshPoll(token)
 	}
-	return interactshPoll(token)
+	return applyProtocolFilter(hits, parseAllowedProtocols(config.Get().OOBInteractions))
+}
+
+// parseAllowedProtocols turns an XALGORIX_OOB_INTERACTIONS value into the set of
+// allowed protocol names. A nil result means "allow everything" (the default),
+// so an unset/blank value preserves the historical behavior of treating any
+// DNS, HTTP or SMTP callback as proof. "https" is folded into "http". A value
+// that names no valid protocol also yields nil — an operator typo must never
+// silently drop every callback (use XALGORIX_OOB_DISABLE to turn OOB off).
+func parseAllowedProtocols(raw string) map[string]bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	set := map[string]bool{}
+	for _, p := range strings.Split(raw, ",") {
+		switch strings.ToLower(strings.TrimSpace(p)) {
+		case "http", "https":
+			set["http"] = true
+		case "dns":
+			set["dns"] = true
+		case "smtp":
+			set["smtp"] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// filterableProtocols are the only protocols XALGORIX_OOB_INTERACTIONS selects
+// between. Anything else interactsh can report (ldap, smb, ftp, responder, or a
+// protocol we don't recognize yet) is always kept: those are independent proof
+// channels — LDAP is the primary one for JNDI/Log4Shell — that a DNS/HTTP/SMTP
+// selector was never meant to suppress. An interaction with a blank protocol is
+// kept for the same reason.
+var filterableProtocols = map[string]bool{"dns": true, "http": true, "smtp": true}
+
+// applyProtocolFilter drops interactions whose protocol the operator excluded.
+// A nil allow-set is a pass-through (all protocols allowed), and protocols
+// outside filterableProtocols are never dropped.
+func applyProtocolFilter(in []Interaction, allow map[string]bool) []Interaction {
+	if allow == nil {
+		return in
+	}
+	out := make([]Interaction, 0, len(in))
+	for _, it := range in {
+		proto := strings.ToLower(strings.TrimSpace(it.Protocol))
+		if proto == "https" {
+			proto = "http"
+		}
+		if !filterableProtocols[proto] || allow[proto] {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // PublicBaseURL returns the operator-configured public callback base, trimmed

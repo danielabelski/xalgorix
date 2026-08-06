@@ -127,6 +127,13 @@ type Config struct {
 	InteractshToken  string
 	OOBDisable       bool
 
+	// OOBInteractions restricts which out-of-band interaction PROTOCOLS count as
+	// a callback (proof). Comma-separated subset of dns,http,smtp; empty = all
+	// three (the historical default). Use it to suppress DNS-only false
+	// positives from cloud infra (e.g. AWS resolvers) by allowing only http
+	// (and/or smtp). "http" also matches https. XALGORIX_OOB_INTERACTIONS.
+	OOBInteractions string
+
 	// SourceRepo enables whitebox / source-assisted assessment: the agent
 	// reads the target's source code and reasons code → dangerous sink →
 	// exploit against the live target. Accepts a Git URL (shallow-cloned into
@@ -350,6 +357,7 @@ func load() *Config {
 		InteractshServer:      envOr("XALGORIX_INTERACTSH_SERVER", ""),
 		InteractshToken:       envOr("XALGORIX_INTERACTSH_TOKEN", ""),
 		OOBDisable:            envOrBool("XALGORIX_OOB_DISABLE", false),
+		OOBInteractions:       envOr("XALGORIX_OOB_INTERACTIONS", ""),
 		SourceRepo:            envOr("XALGORIX_SOURCE_REPO", ""),
 		ScanContext:           envOr("XALGORIX_SCAN_CONTEXT", ""),
 		ScanHeaders:           loadScanHeaders(),

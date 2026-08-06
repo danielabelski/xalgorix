@@ -145,8 +145,9 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_TARGET_AUTH", Label: "Target auth (authenticated scanning)", Category: "Runtime", Description: "Authenticated-session credentials for the target so the agent tests post-auth surface (IDOR/BOLA, privilege escalation, business logic). One 'Header-Name: value' per line or separated by ';'. e.g. 'Cookie: session=abc; Authorization: Bearer xyz'. Auto-applied to http_request.", Placeholder: "Cookie: session=...; Authorization: Bearer ...", InputType: "text", Sensitive: true, RequiresRestart: true},
 		{Key: "XALGORIX_SCAN_HEADERS", Label: "Scan headers (attribution)", Category: "Runtime", Description: "Identifying header(s) added to ALL target-facing scan traffic (agent HTTP client + httpx/nuclei via -H) so an authorized Xalgorix run is attributable in the target's logs and can be allow-listed by its WAF/SOC. Bug-bounty programs often require one, e.g. 'X-Bug-Bounty: <handle>'. One 'Header-Name: value' per entry, separated by ';'. Never attached to LLM APIs, notifications, or the dashboard.", Placeholder: "X-Bug-Bounty: ulises2k; X-Scan-ID: engagement-42", InputType: "text", RequiresRestart: true},
 		{Key: "XALGORIX_SCAN_HEADERS_FILE", Label: "Scan headers file", Category: "Runtime", Description: "Path to a file of scan/attribution headers, one 'Name: value' per line ('#' comments and blank lines ignored). Merged with XALGORIX_SCAN_HEADERS; the inline value wins on a name clash.", Placeholder: "/path/to/scan-headers.txt", InputType: "path", RequiresRestart: true},
-		{Key: "XALGORIX_OOB_PUBLIC_URL", Label: "OOB callback URL", Category: "Runtime", Description: "Public address targets can reach for out-of-band verification of blind vulns (blind SSRF/RCE/XSS/XXE), e.g. https://oob.example.com. Enables the oob_callback tool. Leave blank to disable OOB.", Placeholder: "https://oob.example.com", InputType: "url", RequiresRestart: true},
-		{Key: "XALGORIX_OOB_PORT", Label: "OOB listener port", Category: "Runtime", Description: "Local port the OOB callback listener binds (0.0.0.0). Expose/reverse-proxy it to the OOB callback URL above.", Placeholder: "8888", InputType: "number", RequiresRestart: true},
+		{Key: "XALGORIX_OOB_PUBLIC_URL", Label: "OOB callback URL", Category: "OOB", Description: "Public address targets can reach for out-of-band verification of blind vulns (blind SSRF/RCE/XSS/XXE), e.g. https://oob.example.com. Enables the self-hosted oob_callback listener. Leave blank to use the zero-config interactsh backend.", Placeholder: "https://oob.example.com", InputType: "url", RequiresRestart: true},
+		{Key: "XALGORIX_OOB_PORT", Label: "OOB listener port", Category: "OOB", Description: "Local port the OOB callback listener binds (0.0.0.0). Expose/reverse-proxy it to the OOB callback URL above.", Placeholder: "8888", InputType: "number", RequiresRestart: true},
+		{Key: "XALGORIX_OOB_INTERACTIONS", Label: "OOB interaction types", Category: "OOB", Description: "Which out-of-band interaction types count as a callback (proof). All selected = default (any DNS/HTTP/SMTP hit is proof). Deselect DNS to suppress DNS-only false positives from cloud infra (e.g. AWS resolvers that merely resolve the callback host). HTTP also covers HTTPS. Other interactsh channels (LDAP for JNDI/Log4Shell, SMB, FTP) are always kept. Note the self-hosted listener (OOB callback URL) only ever reports HTTP(S), so a DNS-only selection suppresses all of its callbacks.", DefaultValue: "dns,http,smtp", InputType: "multiselect", Options: []string{"dns", "http", "smtp"}, RequiresRestart: true},
 		{Key: "XALGORIX_SOURCE_REPO", Label: "Whitebox source (repo/path)", Category: "Runtime", Description: "Enable whitebox / source-assisted assessment. A Git URL (shallow-cloned) or a local directory path to the target's source. Activates the code_search tool and source→sink→exploit methodology — where RCE, injection, and secret-exposure bugs are found.", Placeholder: "https://github.com/org/app.git", InputType: "text", RequiresRestart: true},
 		{Key: "GEMINI_API_KEY", Label: "Gemini web-search key", Category: "LLM", Description: "Optional Gemini key for web search enrichment.", Placeholder: "AIza...", InputType: "secret", Sensitive: true},
 
@@ -1114,6 +1115,8 @@ func normalizeEnvSettingValue(def envSettingDefinition, value string) (string, e
 		if len(def.Options) > 0 && !oneOf(value, def.Options) {
 			return "", fmt.Errorf("invalid value %q for %s", value, def.Key)
 		}
+	case "multiselect":
+		return normalizeMultiSelect(def, value)
 	case "number":
 		if _, err := strconv.ParseFloat(value, 64); err != nil {
 			return "", fmt.Errorf("%s must be a number", def.Key)
@@ -1165,6 +1168,36 @@ func normalizeEnvSettingValue(def envSettingDefinition, value string) (string, e
 		return strconv.Itoa(clampInt(parseIntSetting(value, 15), 1, 100)), nil
 	}
 	return value, nil
+}
+
+// normalizeMultiSelect validates and canonicalizes a comma-separated
+// multiselect value against def.Options: lowercased, de-duplicated, and
+// re-ordered to match def.Options. Selecting every option is the default, so
+// it collapses to "" (the env var stays unset). An empty selection likewise
+// yields "" — meaning "all/default" — so a value can never silently disable a
+// feature; use the dedicated disable flag for that.
+func normalizeMultiSelect(def envSettingDefinition, value string) (string, error) {
+	seen := map[string]bool{}
+	for _, part := range strings.Split(value, ",") {
+		p := strings.ToLower(strings.TrimSpace(part))
+		if p == "" {
+			continue
+		}
+		if len(def.Options) > 0 && !oneOf(p, def.Options) {
+			return "", fmt.Errorf("invalid value %q for %s", p, def.Key)
+		}
+		seen[p] = true
+	}
+	ordered := make([]string, 0, len(seen))
+	for _, opt := range def.Options {
+		if seen[opt] {
+			ordered = append(ordered, opt)
+		}
+	}
+	if len(ordered) == len(def.Options) {
+		return "", nil
+	}
+	return strings.Join(ordered, ","), nil
 }
 
 func valueOrDefault(value, fallback string) string {

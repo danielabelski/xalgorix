@@ -1636,6 +1636,49 @@ function EnvironmentControl({
     );
   }
 
+  if (variable.inputType === "multiselect") {
+    const options = variable.options ?? [];
+    // Empty value means "all" (the default), so render every option selected.
+    const selected =
+      value.trim() === ""
+        ? options.map((o) => o.toLowerCase())
+        : value
+            .split(",")
+            .map((v) => v.trim().toLowerCase())
+            .filter(Boolean);
+    const toggle = (option: string) => {
+      const lower = option.toLowerCase();
+      const set = new Set(selected);
+      if (set.has(lower)) {
+        if (set.size <= 1) return; // keep at least one selected
+        set.delete(lower);
+      } else {
+        set.add(lower);
+      }
+      const next = options
+        .map((o) => o.toLowerCase())
+        .filter((o) => set.has(o));
+      // All selected == default → persist as empty (unset).
+      onChange(next.length === options.length ? "" : next.join(","));
+    };
+    return (
+      <div className="flex flex-wrap gap-2 rounded-md border border-border bg-muted/30 p-1">
+        {options.map((option) => (
+          <Button
+            key={option}
+            type="button"
+            size="sm"
+            variant={selected.includes(option.toLowerCase()) ? "default" : "ghost"}
+            onClick={() => toggle(option)}
+            className="font-mono uppercase"
+          >
+            {option}
+          </Button>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <Input
       type={variable.inputType === "number" ? "number" : "text"}
