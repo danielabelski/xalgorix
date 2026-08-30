@@ -159,6 +159,7 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_TELEGRAM_BOT_TOKEN", Label: "Telegram bot token", Category: "Notifications", Description: "Bot token from @BotFather. Required to enable Telegram notifications.", Placeholder: "123456789:ABC-DEF...", InputType: "secret", Sensitive: true},
 		{Key: "XALGORIX_TELEGRAM_CHAT_ID", Label: "Telegram chat ID", Category: "Notifications", Description: "Target chat/channel ID. Numeric ID (e.g. -1001234567890) or @channelusername.", Placeholder: "-1001234567890", InputType: "text"},
 		{Key: "XALGORIX_TELEGRAM_MIN_SEVERITY", Label: "Telegram minimum severity", Category: "Notifications", Description: "Minimum severity sent to Telegram.", InputType: "select", Options: []string{"", "info", "low", "medium", "high", "critical"}},
+		{Key: "XALGORIX_NOTIFY_SCAN_COMPLETE", Label: "Notify on scan completion", Category: "Notifications", Description: "Send the \"Scan Finished\" summary (report ready / clean scan) to the configured channels after every scan. Off by default so only per-vulnerability alerts are sent.", DefaultValue: "false", InputType: "boolean"},
 
 		{Key: "AGENTMAIL_POD", Label: "AgentMail pod", Category: "AgentMail", Description: "AgentMail pod identifier.", Placeholder: "am_us_pod_47", InputType: "text"},
 		{Key: "AGENTMAIL_API_KEY", Label: "AgentMail API key", Category: "AgentMail", Description: "AgentMail API key for inbound email triage.", Placeholder: "ak_...", InputType: "secret", Sensitive: true},
@@ -825,6 +826,9 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 		case "XALGORIX_TELEGRAM_MIN_SEVERITY":
 			s.cfg.TelegramMinSeverity = value
 			s.telegramMinSeverity = strings.ToLower(strings.TrimSpace(value))
+		case "XALGORIX_NOTIFY_SCAN_COMPLETE":
+			s.cfg.NotifyScanComplete = parseBoolSetting(value, false)
+			s.notifyScanComplete = s.cfg.NotifyScanComplete
 		case "XALGORIX_USERNAME":
 			s.cfg.Username = value
 		case "XALGORIX_PASSWORD":
@@ -942,6 +946,8 @@ func (s *Server) envSettingValue(key string) string {
 		return s.cfg.TelegramChatID
 	case "XALGORIX_TELEGRAM_MIN_SEVERITY":
 		return s.cfg.TelegramMinSeverity
+	case "XALGORIX_NOTIFY_SCAN_COMPLETE":
+		return strconv.FormatBool(s.cfg.NotifyScanComplete)
 	case "XALGORIX_USERNAME":
 		return s.cfg.Username
 	case "XALGORIX_PASSWORD":

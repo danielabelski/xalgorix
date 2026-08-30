@@ -430,18 +430,25 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	if sess.genReport {
 		if p, err := s.generateReportAt(sess.record, sess.scanDir); err == nil {
 			log.Printf("PDF report saved: %s", p)
-			vulnCount := len(sess.record.Vulns)
-			if vulnCount > 0 {
-				desc := fmt.Sprintf("**Target:** %s\n**Vulnerabilities:** %d found\n**Completed at:** %s",
-					sess.target, vulnCount, time.Now().Format("15:04:05 MST"))
-				if s.telegramConfigured() {
-					s.sendTelegramWithFile(0x3b82f6, "✅ Scan Finished - Report Ready", desc, p)
-				}
-			} else {
-				desc := fmt.Sprintf("**Target:** %s\n**Result:** No vulnerabilities found (clean scan)\n**Completed at:** %s",
-					sess.target, time.Now().Format("15:04:05 MST"))
-				if s.telegramConfigured() {
-					s.sendTelegramWithFile(0x2dd4bf, "✅ Scan Finished - Clean Report", desc, p)
+			// Scan-completion summary ("Scan Finished") is opt-in via
+			// XALGORIX_NOTIFY_SCAN_COMPLETE (default off) so operators get only
+			// per-vulnerability alerts, not a summary after every scan (including
+			// clean scans). Per-finding notifications are sent separately in
+			// processEvent and are unaffected by this toggle.
+			if s.notifyScanComplete {
+				vulnCount := len(sess.record.Vulns)
+				if vulnCount > 0 {
+					desc := fmt.Sprintf("**Target:** %s\n**Vulnerabilities:** %d found\n**Completed at:** %s",
+						sess.target, vulnCount, time.Now().Format("15:04:05 MST"))
+					if s.telegramConfigured() {
+						s.sendTelegramWithFile(0x3b82f6, "✅ Scan Finished - Report Ready", desc, p)
+					}
+				} else {
+					desc := fmt.Sprintf("**Target:** %s\n**Result:** No vulnerabilities found (clean scan)\n**Completed at:** %s",
+						sess.target, time.Now().Format("15:04:05 MST"))
+					if s.telegramConfigured() {
+						s.sendTelegramWithFile(0x2dd4bf, "✅ Scan Finished - Clean Report", desc, p)
+					}
 				}
 			}
 			if sess.instanceID != "" {

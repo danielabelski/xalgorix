@@ -704,6 +704,7 @@ type Server struct {
 	telegramBotToken       string // XALGORIX_TELEGRAM_BOT_TOKEN (secret, never exposed via API)
 	telegramChatID         string // XALGORIX_TELEGRAM_CHAT_ID (numeric ID or @channelusername)
 	telegramMinSeverity    string // minimum severity to send to Telegram ("info", "low", "medium", "high", "critical")
+	notifyScanComplete     bool   // XALGORIX_NOTIFY_SCAN_COMPLETE - send the "Scan Finished" summary after every scan (default false)
 	rateLimiter            *RateLimiter
 	settingsMu             sync.Mutex
 	instances              map[string]*ScanInstance // concurrent scan instances
@@ -815,6 +816,7 @@ func NewServer(cfg *config.Config, port int) *Server {
 		telegramBotToken:       cfg.TelegramBotToken,
 		telegramChatID:         cfg.TelegramChatID,
 		telegramMinSeverity:    strings.ToLower(strings.TrimSpace(cfg.TelegramMinSeverity)),
+		notifyScanComplete:     cfg.NotifyScanComplete,
 		rateLimiter:            rl,
 		instances:              make(map[string]*ScanInstance),
 		dispatchReservations:   make(map[string]bool),

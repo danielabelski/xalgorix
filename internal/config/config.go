@@ -228,6 +228,11 @@ type Config struct {
 	TelegramChatID      string // XALGORIX_TELEGRAM_CHAT_ID - target chat/channel ID (numeric or @username)
 	TelegramMinSeverity string // XALGORIX_TELEGRAM_MIN_SEVERITY - minimum severity to notify
 
+	// Scan-completion summary notification.
+	// When false (default) the "Scan Finished" summary is suppressed and only
+	// per-vulnerability alerts are sent; set true to also get an end-of-scan summary.
+	NotifyScanComplete bool // XALGORIX_NOTIFY_SCAN_COMPLETE - send the "Scan Finished" summary after every scan
+
 	// Dashboard auth
 	Username     string // XALGORIX_USERNAME - dashboard login username
 	Password     string // XALGORIX_PASSWORD - dashboard login password (DEPRECATED: prefer PasswordHash)
@@ -424,6 +429,9 @@ func load() *Config {
 		TelegramBotToken:    envOr("XALGORIX_TELEGRAM_BOT_TOKEN", ""),
 		TelegramChatID:      envOr("XALGORIX_TELEGRAM_CHAT_ID", ""),
 		TelegramMinSeverity: envOr("XALGORIX_TELEGRAM_MIN_SEVERITY", ""),
+
+		// Scan-completion summary notification (opt-in; default off).
+		NotifyScanComplete: envOrBool("XALGORIX_NOTIFY_SCAN_COMPLETE", false),
 
 		// Dashboard auth
 		Username:     envOr("XALGORIX_USERNAME", ""),
