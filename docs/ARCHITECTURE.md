@@ -152,6 +152,7 @@ target + instruction
    → storage: atomic scan.json per scan dir
    → report.go / internal/reporting: branded PDF on demand
    → notify.go: Discord/Telegram lifecycle + finding notifications
+                 (completion summaries are opt-in)
 ```
 
 ## Persistence & isolation
@@ -180,6 +181,7 @@ Read from `~/.xalgorix.env` (and process env). Key variables:
 | `XALGORIX_OOB_*`, `XALGORIX_INTERACTSH_*` | out-of-band callback config |
 | `XALGORIX_DISCORD_WEBHOOK` / `_DISCORD_MIN_SEVERITY` | Discord notifications |
 | `XALGORIX_TELEGRAM_BOT_TOKEN` / `_CHAT_ID` / `_MIN_SEVERITY` | Telegram notifications |
+| `XALGORIX_NOTIFY_SCAN_COMPLETE` | Opt in to end-of-scan Discord/Telegram summaries (default `false`; per-vulnerability alerts are unaffected) |
 
 Secrets (password hash, bot token, API keys) are never returned by any API
 response — only a `*_configured` boolean is surfaced.
