@@ -142,6 +142,7 @@ export default function SettingsPage() {
     telegramBotToken: "",
     telegramChatId: "",
     telegramMinSeverity: "",
+    notifyScanComplete: false,
   });
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [envChanges, setEnvChanges] = useState<Record<string, string>>({});
@@ -205,7 +206,8 @@ export default function SettingsPage() {
     const telegramBotToken = envValue(environment.data, "XALGORIX_TELEGRAM_BOT_TOKEN");
     const telegramChatId = envValue(environment.data, "XALGORIX_TELEGRAM_CHAT_ID");
     const telegramMinSeverity = envValue(environment.data, "XALGORIX_TELEGRAM_MIN_SEVERITY");
-    setNotificationForm({ webhook, minSeverity, telegramBotToken, telegramChatId, telegramMinSeverity });
+    const notifyScanComplete = envValue(environment.data, "XALGORIX_NOTIFY_SCAN_COMPLETE") === "true";
+    setNotificationForm({ webhook, minSeverity, telegramBotToken, telegramChatId, telegramMinSeverity, notifyScanComplete });
   }, [environment.data]);
 
   useEffect(() => {
@@ -1095,6 +1097,7 @@ export default function SettingsPage() {
                         XALGORIX_TELEGRAM_BOT_TOKEN: notificationForm.telegramBotToken,
                         XALGORIX_TELEGRAM_CHAT_ID: notificationForm.telegramChatId,
                         XALGORIX_TELEGRAM_MIN_SEVERITY: notificationForm.telegramMinSeverity,
+                        XALGORIX_NOTIFY_SCAN_COMPLETE: notificationForm.notifyScanComplete ? "true" : "false",
                       });
                       setSavedNotifications(true);
                       setTimeout(() => setSavedNotifications(false), 2500);
@@ -1173,6 +1176,26 @@ export default function SettingsPage() {
                       </SelectContent>
                     </Select>
                   </div>
+                </div>
+                <Separator />
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="notify-scan-complete">Notify on scan completion</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Send the &quot;Scan Finished&quot; summary (report ready / clean scan) after every scan.
+                      Off by default — you only receive per-vulnerability alerts.
+                    </p>
+                  </div>
+                  <Switch
+                    id="notify-scan-complete"
+                    checked={notificationForm.notifyScanComplete}
+                    onCheckedChange={(checked) =>
+                      setNotificationForm({
+                        ...notificationForm,
+                        notifyScanComplete: checked,
+                      })
+                    }
+                  />
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Telegram is independent of Discord — configure one or both.
