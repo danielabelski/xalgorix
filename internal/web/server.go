@@ -700,10 +700,11 @@ type Server struct {
 	currentScanDir         string
 	currentScanID          string
 	discordWebhook         string
-	discordMinSeverity     string // minimum severity to send to Discord ("info", "low", "medium", "high", "critical")
-	telegramBotToken       string // XALGORIX_TELEGRAM_BOT_TOKEN (secret, never exposed via API)
-	telegramChatID         string // XALGORIX_TELEGRAM_CHAT_ID (numeric ID or @channelusername)
-	telegramMinSeverity    string // minimum severity to send to Telegram ("info", "low", "medium", "high", "critical")
+	discordMinSeverity     string      // minimum severity to send to Discord ("info", "low", "medium", "high", "critical")
+	telegramBotToken       string      // XALGORIX_TELEGRAM_BOT_TOKEN (secret, never exposed via API)
+	telegramChatID         string      // XALGORIX_TELEGRAM_CHAT_ID (numeric ID or @channelusername)
+	telegramMinSeverity    string      // minimum severity to send to Telegram ("info", "low", "medium", "high", "critical")
+	notifyScanComplete     atomic.Bool // XALGORIX_NOTIFY_SCAN_COMPLETE - send the "Scan Finished" summary after every scan (default false)
 	rateLimiter            *RateLimiter
 	settingsMu             sync.Mutex
 	instances              map[string]*ScanInstance // concurrent scan instances
@@ -835,6 +836,7 @@ func NewServer(cfg *config.Config, port int) *Server {
 		// admission select.
 		admissionWake: make(chan struct{}, 1),
 	}
+	srv.notifyScanComplete.Store(cfg.NotifyScanComplete)
 
 	// Wire postScanChatFn now that srv exists. The closure reads
 	// srv.catalog / srv.profiles at call time so the catalog

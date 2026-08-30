@@ -624,7 +624,7 @@ Most operational settings can be changed from the Web UI under Settings.
 | 🤝 Engagement    | Dashboard request rate limits                                       |
 | 🧠 LLM           | Model, API key, API base, reasoning effort, retries, max iterations |
 | 📬 AgentMail     | Pod and API key                                                     |
-| 🔔 Notifications | Discord webhook and minimum severity, Telegram bot token, chat ID, and minimum severity |
+| 🔔 Notifications | Discord webhook and minimum severity, Telegram bot token, chat ID, minimum severity, and opt-in scan-completion summaries |
 | 🕵️ Proxy         | Proxy URL, proxy file, rotation, TLS verification                   |
 | 🧱 Runtime       | Workspace, browser path, auto-install controls                      |
 | 🔐 Security      | Dashboard username, password, password hash, bind address           |
@@ -674,6 +674,7 @@ Some settings require a restart because they affect process startup or server bi
 | `XALGORIX_TELEGRAM_BOT_TOKEN`   | none    | Telegram bot token from @BotFather.      |
 | `XALGORIX_TELEGRAM_CHAT_ID`      | none    | Telegram chat/channel ID (numeric or @username). |
 | `XALGORIX_TELEGRAM_MIN_SEVERITY`| none    | Minimum severity sent to Telegram.      |
+| `XALGORIX_NOTIFY_SCAN_COMPLETE` | `false` | Send end-of-scan summaries to configured Discord/Telegram destinations. This is opt-in and does not affect per-vulnerability alerts. |
 | `CAIDO_PORT`                    | `0`     | Caido proxy port. `0` means auto-detect. |
 | `CAIDO_API_TOKEN`               | none    | Caido API token.                         |
 
