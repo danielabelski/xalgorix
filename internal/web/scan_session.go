@@ -435,7 +435,7 @@ func (s *Server) executeScanSession(sess *scanSession) {
 			// per-vulnerability alerts, not a summary after every scan (including
 			// clean scans). Per-finding notifications are sent separately in
 			// processEvent and are unaffected by this toggle.
-			if s.notifyScanComplete {
+			if s.notifyScanComplete.Load() {
 				vulnCount := len(sess.record.Vulns)
 				if vulnCount > 0 {
 					desc := fmt.Sprintf("**Target:** %s\n**Vulnerabilities:** %d found\n**Completed at:** %s",

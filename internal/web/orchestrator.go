@@ -551,8 +551,10 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		return
 	}
 
-	// Discord: scan finished — use instance's accumulated vuln count
-	// (don't read from inst.sctx.ID — it may point to a cleaned-up session context)
+	// Queue-level scan completion summary — use the instance's accumulated
+	// vulnerability count (don't read from inst.sctx.ID; it may point to a
+	// cleaned-up session context). The helper applies the same opt-in gate as
+	// the per-report Telegram notification.
 	vulnCount := 0
 	s.instancesMu.RLock()
 	if inst, ok := s.instances[instanceID]; ok {
@@ -561,20 +563,31 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		inst.mu.RUnlock()
 	}
 	s.instancesMu.RUnlock()
+	s.sendScanCompletionSummary(scanDiscordWebhook, totalTargets, vulnCount)
+
+	log.Printf("[INFO] runMultiScan main body complete")
+}
+
+// sendScanCompletionSummary sends the queue-level completion notification to
+// the configured Discord and Telegram channels. Completion notifications are
+// opt-in; per-finding alerts are sent elsewhere and are unaffected.
+func (s *Server) sendScanCompletionSummary(discordWebhook string, totalTargets, vulnCount int) {
+	if !s.notifyScanComplete.Load() {
+		return
+	}
+
 	if vulnCount > 0 {
 		desc := fmt.Sprintf("**Targets:** %d completed\n**Vulnerabilities:** %d found\n**Completed at:** %s", totalTargets, vulnCount, time.Now().Format("15:04:05 MST"))
-		s.sendDiscordTo(scanDiscordWebhook, 0x3b82f6, "✅ Scan Finished - Vulnerabilities Found", desc)
+		s.sendDiscordTo(discordWebhook, 0x3b82f6, "✅ Scan Finished - Vulnerabilities Found", desc)
 		if s.telegramConfigured() {
 			s.sendTelegram(0x3b82f6, "✅ Scan Finished - Vulnerabilities Found", desc)
 		}
 	} else {
-		s.sendDiscordTo(scanDiscordWebhook, 0x3b82f6, "✅ Scan Finished", fmt.Sprintf("**Targets:** %d completed\n**Vulnerabilities:** 0 found\n**Completed at:** %s", totalTargets, time.Now().Format("15:04:05 MST")))
+		s.sendDiscordTo(discordWebhook, 0x3b82f6, "✅ Scan Finished", fmt.Sprintf("**Targets:** %d completed\n**Vulnerabilities:** 0 found\n**Completed at:** %s", totalTargets, time.Now().Format("15:04:05 MST")))
 		if s.telegramConfigured() {
 			s.sendTelegram(0x3b82f6, "✅ Scan Finished", fmt.Sprintf("**Targets:** %d completed\n**Vulnerabilities:** 0 found\n**Completed at:** %s", totalTargets, time.Now().Format("15:04:05 MST")))
 		}
 	}
-
-	log.Printf("[INFO] runMultiScan main body complete")
 }
 
 // ────────────────────────────────────────────────────────

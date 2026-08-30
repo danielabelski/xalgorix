@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
 )
@@ -18,7 +20,7 @@ func TestNotifyScanComplete_DefaultsOff(t *testing.T) {
 	if s.cfg.NotifyScanComplete {
 		t.Fatalf("cfg.NotifyScanComplete should default to false")
 	}
-	if s.notifyScanComplete {
+	if s.notifyScanComplete.Load() {
 		t.Fatalf("runtime notifyScanComplete should default to false")
 	}
 }
@@ -38,8 +40,8 @@ func TestEnvironmentSettings_AppliesNotifyScanComplete(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("environment POST code = %d body=%s", rr.Code, rr.Body.String())
 	}
-	if !s.cfg.NotifyScanComplete || !s.notifyScanComplete {
-		t.Fatalf("notify scan complete not applied: cfg=%v runtime=%v", s.cfg.NotifyScanComplete, s.notifyScanComplete)
+	if !s.cfg.NotifyScanComplete || !s.notifyScanComplete.Load() {
+		t.Fatalf("notify scan complete not applied: cfg=%v runtime=%v", s.cfg.NotifyScanComplete, s.notifyScanComplete.Load())
 	}
 
 	rr = httptest.NewRecorder()
@@ -62,5 +64,52 @@ func TestEnvironmentSettings_AppliesNotifyScanComplete(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("XALGORIX_NOTIFY_SCAN_COMPLETE missing from settings GET response")
+	}
+}
+
+// TestSendScanCompletionSummary_RespectsOptIn proves the actual queue-level
+// notification path stays silent by default and reaches both configured
+// channels only after the operator opts in.
+func TestSendScanCompletionSummary_RespectsOptIn(t *testing.T) {
+	var discordHits atomic.Int32
+	discord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		discordHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer discord.Close()
+
+	telegram := newTelegramStubServer(t)
+	s := newTestServer(t, &config.Config{RateLimitRequests: 60, RateLimitWindow: 60})
+	s.telegramBotToken = "123456789:ABC-DEF"
+	s.telegramChatID = "-1001234567890"
+	previousTelegramBase := swapTelegramAPIBaseForTest(telegram.srv.URL)
+	defer swapTelegramAPIBaseForTest(previousTelegramBase)
+
+	// Default/off: neither channel receives a completion summary.
+	s.notifyScanComplete.Store(false)
+	s.sendScanCompletionSummary(discord.URL, 1, 0)
+	time.Sleep(100 * time.Millisecond)
+	telegram.mu.Lock()
+	telegramHits := telegram.hits
+	telegram.mu.Unlock()
+	if got := discordHits.Load(); got != 0 || telegramHits != 0 {
+		t.Fatalf("completion summary sent while disabled: discord=%d telegram=%d", got, telegramHits)
+	}
+
+	// Opted in: both configured channels receive exactly one summary.
+	s.notifyScanComplete.Store(true)
+	s.sendScanCompletionSummary(discord.URL, 1, 0)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		telegram.mu.Lock()
+		telegramHits = telegram.hits
+		telegram.mu.Unlock()
+		if discordHits.Load() == 1 && telegramHits == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := discordHits.Load(); got != 1 || telegramHits != 1 {
+		t.Fatalf("completion summary not sent after opt-in: discord=%d telegram=%d", got, telegramHits)
 	}
 }

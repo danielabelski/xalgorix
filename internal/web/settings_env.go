@@ -827,8 +827,9 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.TelegramMinSeverity = value
 			s.telegramMinSeverity = strings.ToLower(strings.TrimSpace(value))
 		case "XALGORIX_NOTIFY_SCAN_COMPLETE":
-			s.cfg.NotifyScanComplete = parseBoolSetting(value, false)
-			s.notifyScanComplete = s.cfg.NotifyScanComplete
+			enabled := parseBoolSetting(value, false)
+			s.cfg.NotifyScanComplete = enabled
+			s.notifyScanComplete.Store(enabled)
 		case "XALGORIX_USERNAME":
 			s.cfg.Username = value
 		case "XALGORIX_PASSWORD":
@@ -947,7 +948,7 @@ func (s *Server) envSettingValue(key string) string {
 	case "XALGORIX_TELEGRAM_MIN_SEVERITY":
 		return s.cfg.TelegramMinSeverity
 	case "XALGORIX_NOTIFY_SCAN_COMPLETE":
-		return strconv.FormatBool(s.cfg.NotifyScanComplete)
+		return strconv.FormatBool(s.notifyScanComplete.Load())
 	case "XALGORIX_USERNAME":
 		return s.cfg.Username
 	case "XALGORIX_PASSWORD":
