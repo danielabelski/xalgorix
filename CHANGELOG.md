@@ -1,5 +1,49 @@
 # Changelog
 
+## [v4.6.5](https://github.com/xalgord/xalgorix/releases/tag/v4.6.5) — Opt-in scan-completion notifications (2026-08-30)
+
+### Added
+- **Completion-summary control for Discord and Telegram.** `XALGORIX_NOTIFY_SCAN_COMPLETE` lets operators opt in to queue-level and report-level scan-completion summaries. It defaults to `false`; per-vulnerability alerts are unchanged.
+
+### Fixed
+- **Race-safe live notification updates.** Runtime setting changes are synchronized, and regression coverage verifies both enabled and disabled delivery paths.
+
+### Documentation
+- Documented the new setting in the README and architecture guide and regenerated the embedded Web UI assets.
+
+## [v4.6.4](https://github.com/xalgord/xalgorix/releases/tag/v4.6.4) — macOS ARM64 and multi-architecture images (2026-08-29)
+
+### Added
+- Added native macOS ARM64 release support and multi-architecture container images.
+
+## [v4.6.3](https://github.com/xalgord/xalgorix/releases/tag/v4.6.3) — Token usage and hosted-cost guidance (2026-08-27)
+
+### Added
+- The CLI now reports LLM token usage when a scan ends and explains which model costs are covered by the hosted service.
+
+### Documentation
+- Added a direct comparison of self-hosted and hosted Xalgorix, including operational responsibilities and cost tradeoffs.
+
+## [v4.6.2](https://github.com/xalgord/xalgorix/releases/tag/v4.6.2) — MiniMax native web search (2026-08-26)
+
+### Added
+- MiniMax-backed scans now use MiniMax's native `web_search` capability.
+
+## [v4.6.1](https://github.com/xalgord/xalgorix/releases/tag/v4.6.1) — Evidence integrity hardening (2026-08-24)
+
+### Fixed
+- Reporting rejects fabricated or unreachable non-findings and no longer treats a description as proof of exploitation.
+
+## [v4.6.0](https://github.com/xalgord/xalgorix/releases/tag/v4.6.0) — Brand refresh and UX milestone (2026-08-23)
+
+### Added
+- Replaced the legacy opaque mark with a transparent vector logo and regenerated the favicon, dashboard, login, and README assets.
+- Added persisted Light, Dark, and System dashboard themes with no-flash startup behavior.
+- Added multi-file Postman uploads so a collection and environment can be supplied together, with variables and authentication resolved into the seeded attack surface.
+
+### Compatibility
+- No breaking changes; existing installations can upgrade in place.
+
 ## [Unreleased] — Provider model selector
 
 ### Added
