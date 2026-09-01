@@ -110,6 +110,33 @@ func TestFinalizeXSSVerdictNotConfirmed(t *testing.T) {
 	}
 }
 
+func TestFinalizeXSSVerdictConfirmsConsoleAndDOMSignals(t *testing.T) {
+	// verify_xss now accepts dialog, console, and DOM-marker execution oracles.
+	// Each flows through the same sink + verdict + ledger path, so a signal of
+	// any kind carrying the nonce confirms XSS and records evidence.
+	for _, kind := range []string{"console:log", "console:error", "dom:marker"} {
+		t.Run(kind, func(t *testing.T) {
+			ctxID := "xss-kind-" + strings.ReplaceAll(kind, ":", "-")
+			sc := scanctx.New(ctxID, "")
+			scanctx.Activate(sc)
+			defer scanctx.Deactivate(ctxID)
+
+			signals := []ExecSignal{{Kind: kind, Message: "prefix XV-kind-9 suffix"}}
+			res := finalizeXSSVerdict(ctxID, "https://app/search?q=1", "XV-kind-9", "q", signals)
+			if ok, _ := res.Metadata["xss_confirmed"].(bool); !ok {
+				t.Fatalf("expected confirmed for kind %s, got metadata %#v (%s)", kind, res.Metadata, res.Output)
+			}
+			all := sc.Ledger.All()
+			if len(all) != 1 || all[0].VulnClass != "xss" {
+				t.Fatalf("expected 1 xss hypothesis for kind %s, got %d", kind, len(all))
+			}
+			if len(all[0].Evidence) != 1 {
+				t.Fatalf("expected one evidence entry for kind %s", kind)
+			}
+		})
+	}
+}
+
 func TestVerifyXSSErrorPaths(t *testing.T) {
 	ctxID := "xss-err-" + t.Name()
 

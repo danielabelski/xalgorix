@@ -40,14 +40,27 @@ func verifyXSS(ctxID, rawURL, nonce, parameter string) (tools.Result, error) {
 		_ = s.page.Timeout(10 * time.Second).WaitStable(time.Second)
 	}
 
-	// Dialogs fire asynchronously during/after load; poll a short window until
-	// the nonce matches or the deadline elapses, then decide on what we saw.
+	// Dialogs and console messages fire asynchronously during/after load; poll a
+	// short window until the nonce matches (a dialog or console signal) or the
+	// deadline elapses.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, ok := matchExecNonce(execSignalsFor(ctxID), nonce); ok {
 			break
 		}
 		time.Sleep(150 * time.Millisecond)
+	}
+
+	// DOM-marker fallback: some payloads prove execution by mutating the DOM
+	// (e.g. document.title=nonce or window.name=nonce) rather than firing a
+	// dialog or logging to the console. If nothing matched yet, read those
+	// markers once and record a signal when the nonce is present.
+	if _, ok := matchExecNonce(execSignalsFor(ctxID), nonce); !ok && s.page != nil {
+		if res, err := s.page.Timeout(5 * time.Second).Eval(`() => [document.title, window.name, (window.__xss || "")].join("\u0001")`); err == nil {
+			if v := res.Value.String(); strings.Contains(strings.ToLower(v), strings.ToLower(nonce)) {
+				recordExecSignal(ctxID, ExecSignal{Kind: "dom:marker", Message: v, At: time.Now()})
+			}
+		}
 	}
 
 	return finalizeXSSVerdict(ctxID, rawURL, nonce, parameter, execSignalsFor(ctxID)), nil
@@ -64,7 +77,7 @@ func finalizeXSSVerdict(ctxID, rawURL, nonce, parameter string, signals []ExecSi
 		if len(signals) > 0 {
 			msg += fmt.Sprintf(" %d unrelated dialog(s) did fire — check that your payload raises a dialog containing exactly this nonce.", len(signals))
 		} else {
-			msg += " The payload may be reflected but not executing (encoded/sanitized/CSP-blocked), or it uses a non-dialog sink. Try a dialog payload such as \"'><script>alert('" + nonce + "')</script>\"."
+			msg += " The payload may be reflected but not executing (encoded/sanitized/CSP-blocked). Try an execution oracle carrying the nonce: a dialog (\"'><script>alert('" + nonce + "')</script>\"), a console call (console.log('" + nonce + "')), or a DOM marker (document.title='" + nonce + "')."
 		}
 		return tools.Result{Output: msg, Metadata: map[string]any{"xss_confirmed": false}}
 	}
