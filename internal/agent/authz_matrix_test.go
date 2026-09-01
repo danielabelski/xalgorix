@@ -9,6 +9,7 @@ import (
 
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
+	"github.com/xalgord/xalgorix/v4/internal/tools/httpclient"
 )
 
 // authzTestServer returns a server with a /broken endpoint (no authorization
@@ -140,5 +141,69 @@ func TestAuthzMatrixNeedsTwoIdentities(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "at least two identities") {
 		t.Fatalf("expected a two-identities-required message, got:\n%s", res.Output)
+	}
+}
+
+// TestAuthzIdentitiesUsesIngestedSessionAsRoleA verifies that when no operator
+// account is configured, the scan's ingested authenticated session (registered
+// via httpclient.SetSessionAuth, e.g. by ingest_har) becomes role A.
+func TestAuthzIdentitiesUsesIngestedSessionAsRoleA(t *testing.T) {
+	ag := &Agent{scanCtx: scanctx.New("authz-session-"+t.Name(), ""), ctx: context.Background()}
+	httpclient.SetSessionAuth(ag.scanCtx.ID, map[string]string{"Authorization": "Bearer SESSION"})
+	defer httpclient.SetSessionAuth(ag.scanCtx.ID, nil)
+
+	ids := ag.authzIdentities()
+	if len(ids) != 2 {
+		t.Fatalf("expected role-a (from ingested session) + anonymous, got %d identities: %+v", len(ids), ids)
+	}
+	if ids[0].role != "role-a" || ids[0].headers["Authorization"] != "Bearer SESSION" {
+		t.Fatalf("expected role-a carrying the ingested session, got %+v", ids[0])
+	}
+	if ids[1].role != "anonymous" || ids[1].headers != nil {
+		t.Fatalf("expected anonymous with no headers, got %+v", ids[1])
+	}
+}
+
+// TestAuthzIdentitiesPrefersOperatorAuthOverSession verifies deterministic
+// precedence: a configured operator account is role A even when an ingested
+// session also exists, and the session is not double-added.
+func TestAuthzIdentitiesPrefersOperatorAuthOverSession(t *testing.T) {
+	ag := &Agent{targetAuth: "Authorization: Bearer OPERATOR", scanCtx: scanctx.New("authz-prec-"+t.Name(), ""), ctx: context.Background()}
+	httpclient.SetSessionAuth(ag.scanCtx.ID, map[string]string{"Authorization": "Bearer SESSION"})
+	defer httpclient.SetSessionAuth(ag.scanCtx.ID, nil)
+
+	ids := ag.authzIdentities()
+	if len(ids) != 2 {
+		t.Fatalf("expected role-a (operator) + anonymous, got %d identities: %+v", len(ids), ids)
+	}
+	if ids[0].role != "role-a" || ids[0].headers["Authorization"] != "Bearer OPERATOR" {
+		t.Fatalf("expected role-a to use the operator account, got %+v", ids[0])
+	}
+}
+
+// TestAuthzMatrixRunsWithIngestedSession is the end-to-end proof: with only an
+// ingested session (no operator accounts), the matrix runs and flags /broken —
+// anonymous receives the same owner record as the authenticated session.
+func TestAuthzMatrixRunsWithIngestedSession(t *testing.T) {
+	srv := authzTestServer()
+	defer srv.Close()
+	ag := newAuthzAgent(t, true)
+	ag.targetAuth = ""
+	ag.targetAuthB = ""
+	httpclient.SetSessionAuth(ag.scanCtx.ID, map[string]string{"Authorization": "Bearer AAA"})
+	defer httpclient.SetSessionAuth(ag.scanCtx.ID, nil)
+
+	res, err := ag.authzMatrixTool(map[string]string{"url": srv.URL + "/broken", "parameter": "id"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(res.Output, "at least two identities") {
+		t.Fatalf("expected the matrix to run with an ingested session, got:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "likely broken access control") {
+		t.Fatalf("expected a broken-access-control verdict, got:\n%s", res.Output)
+	}
+	if got, _ := res.Metadata["recorded_hypotheses"].(int); got != 1 {
+		t.Fatalf("expected 1 recorded hypothesis (anonymous vs ingested role A), got %v", res.Metadata["recorded_hypotheses"])
 	}
 }

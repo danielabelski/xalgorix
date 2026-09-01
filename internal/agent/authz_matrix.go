@@ -49,7 +49,7 @@ type authzResult struct {
 func (a *Agent) registerAuthzMatrixTool(reg *tools.Registry) {
 	reg.Register(&tools.Tool{
 		Name:        "authz_matrix",
-		Description: "Test access control by replaying ONE request as every configured identity — your primary session (role A), a second account (role B) if the scan has one, and anonymous (no credentials) — then report the differential. This is the definitive check for IDOR/BOLA (a second user reading role A's object) and auth bypass/BFLA (anonymous reaching a protected resource). Point it at a resource that SHOULD be restricted to role A (e.g. role A's own object by id); if a lower identity gets the same successful response, that is broken access control. Positive signals are recorded as role-scoped hypotheses in the ledger with the differential as proof.",
+		Description: "Test access control by replaying ONE request as every configured identity — your primary session (role A; from configured target auth, or a logged-in HAR registered via ingest_har), a second account (role B) if the scan has one, and anonymous (no credentials) — then report the differential. This is the definitive check for IDOR/BOLA (a second user reading role A's object) and auth bypass/BFLA (anonymous reaching a protected resource). Point it at a resource that SHOULD be restricted to role A (e.g. role A's own object by id); if a lower identity gets the same successful response, that is broken access control. Positive signals are recorded as role-scoped hypotheses in the ledger with the differential as proof.",
 		Parameters: []tools.Parameter{
 			{Name: "url", Description: "URL of the object/action under test, ideally one owned by/authorized for role A (e.g. https://app/api/orders/1042).", Required: true},
 			{Name: "method", Description: "HTTP method (default GET).", Required: false},
@@ -101,7 +101,7 @@ func (a *Agent) authzMatrixTool(args map[string]string) (tools.Result, error) {
 
 	identities := a.authzIdentities()
 	if len(identities) < 2 {
-		return tools.Result{Output: "authz_matrix needs at least two identities to compare, but this scan only has anonymous access configured. Provide a primary session (target auth) and ideally a second account so the matrix can reveal a cross-identity access-control difference."}, nil
+		return tools.Result{Output: "authz_matrix needs at least two identities to compare, but this scan only has anonymous access configured. Provide a primary session — configure target auth, or run ingest_har on a logged-in HAR to register one — and ideally a second account, so the matrix can reveal a cross-identity access-control difference."}, nil
 	}
 
 	var delay time.Duration
@@ -132,16 +132,35 @@ func (a *Agent) authzMatrixTool(args map[string]string) (tools.Result, error) {
 
 // authzIdentities returns the identities to test, highest privilege first.
 // Anonymous is always included; role A/B only when their credentials are set.
+//
+// Role A is the operator-configured primary account (a.targetAuth) when set;
+// otherwise it falls back to the scan's authenticated session — the credentials
+// registered by ingest_har from a logged-in HAR. Without that fallback an
+// authenticated HAR would seed IDOR/BOLA hypotheses but the matrix meant to
+// test them would have only anonymous access and refuse to run.
 func (a *Agent) authzIdentities() []authzIdentity {
 	var ids []authzIdentity
 	if hdrs := httpclient.ParseAuthHeaders(a.targetAuth); len(hdrs) > 0 {
 		ids = append(ids, authzIdentity{label: "primary session (role A)", role: "role-a", headers: hdrs})
+	} else if hdrs := a.sessionAuthHeaders(); len(hdrs) > 0 {
+		ids = append(ids, authzIdentity{label: "primary session (role A, ingested)", role: "role-a", headers: hdrs})
 	}
 	if hdrs := httpclient.ParseAuthHeaders(a.targetAuthB); len(hdrs) > 0 {
 		ids = append(ids, authzIdentity{label: "second account (role B)", role: "role-b", headers: hdrs})
 	}
 	ids = append(ids, authzIdentity{label: "anonymous", role: "anonymous", headers: nil})
 	return ids
+}
+
+// sessionAuthHeaders returns the authenticated-session headers registered for
+// this scan context (e.g. by ingest_har), or nil when none. This lets the
+// authorization matrix adopt an ingested session as role A when the operator
+// did not configure a separate primary account.
+func (a *Agent) sessionAuthHeaders() map[string]string {
+	if a.scanCtx == nil {
+		return nil
+	}
+	return httpclient.SessionAuthForContext(a.scanCtx.ID)
 }
 
 // analyzeAuthzMatrix compares each identity against the authorized baseline
