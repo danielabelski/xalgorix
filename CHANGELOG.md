@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — Authenticated-context ingestion from HAR
+## [v4.6.12](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.12) — Authenticated-context ingestion from HAR (2026-09-01)
 
 ### Added
 - **`ingest_har` starts a scan from a real logged-in session.** Point it at a HAR captured while authenticated and it (1) registers the session credentials it carries (Authorization / Cookie / API-key headers) so subsequent `http_request` and `authz_matrix` calls are authenticated, and (2) seeds the ledger with the HAR's authenticated endpoints — the prime IDOR/BOLA surface — as role-scoped (`role=authenticated`) authorization hypotheses for the specialist to work. A new `internal/har` parser extracts the exercised endpoints (static assets skipped), their query/body parameters, and the session headers, with host-scope filtering. This gives Xalgorix the authenticated business-logic surface that unauthenticated crawling never reaches.
