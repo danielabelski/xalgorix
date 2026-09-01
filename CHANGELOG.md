@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — Concurrent admission and restart recovery
+## [v4.6.6](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.6) — Concurrent admission and restart recovery (2026-09-01)
 
 ### Fixed
 - **Healthy scans could remain pending even above the configured instance cap.** The RAM admission model calculated how many *additional* scans fit in currently available memory, but compared that number as though it were the total concurrency ceiling. As running scans consumed RAM, the UI could report an impossible state such as six running with `Max 5`, and new work stayed pending despite `XALGORIX_MAX_INSTANCES=20`. Admission and resource telemetry now add the already-running instances back to remaining RAM headroom, while still enforcing the manual cap and critical RAM/disk safety floors. Newly admitted scans temporarily reserve their estimated slot until their allocations are reflected in host telemetry, so a burst of pending jobs cannot all spend the same RAM snapshot. The Instances resource card now shows total capacity, running instances, and available slots separately.
