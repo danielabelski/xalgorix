@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] — Out-of-band blind-vulnerability verification
+
+### Added
+- **`verify_oob` confirms blind vulnerabilities via the OAST oracle and records them in the ledger.** After minting a callback with `oob_callback` and planting it in a target-side payload, `verify_oob` polls the token and applies a class-aware verdict: SSRF requires an assessed non-scanner HTTP interaction, while blind RCE / command injection / XXE / SQL injection are confirmed by any genuine non-scanner callback (HTTP or a DNS lookup of the unique token). Confirmed results are recorded as role-scoped ledger evidence, giving Xalgorix a deterministic proof path for the classes that leave no in-band signal — directly targeting the blind-injection gap where autonomous scanners are weakest.
+
 ## [v4.6.9](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.9) — Broader XSS execution verification (console + DOM oracles) (2026-09-01)
 
 ### Added
