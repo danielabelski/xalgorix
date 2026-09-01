@@ -184,6 +184,7 @@ type ScanState struct {
 	SkillSuggestionFired bool            // prevents hookAutoSkillSuggester from firing more than once
 	DelegationAttempted  bool            // coordinator called spawn_agent/create_agent
 	DelegationNudgeFired bool            // multi-agent role decomposition nudge sent once
+	LedgerSeeded         bool            // hypothesis ledger seeded from the plan once
 }
 
 // NewScanState creates a zero-value ScanState with initialized maps.
@@ -375,11 +376,16 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnToolResult, hookResultRepeatTracker)
 	reg.Register(OnToolResult, hookReportVulnerabilityTracker)
 	reg.Register(OnFinishAttempt, hookFinishGatekeeper)
+	// Registered AFTER the gatekeeper so its coverage BlockReason wins when both
+	// block; this gate only adds the "proven-but-unreported" precision check.
+	reg.Register(OnFinishAttempt, hookLedgerFinishGate)
 	reg.Register(OnEmptyResponse, hookEmptyResponseHandler)
 	reg.Register(OnNoToolResponse, hookNoToolHandler)
 	reg.Register(OnIterationStart, hookDelegationCoordinator)
 	reg.Register(OnIterationStart, hookAutoSkillSuggester)
 	reg.Register(OnIterationStart, hookPlanner)
+	// Registered AFTER the planner so state.Plan exists when we seed the ledger.
+	reg.Register(OnIterationStart, hookLedgerSeed)
 	reg.Register(OnHealthyResponse, hookResetOnSuccess)
 }
 
@@ -1853,32 +1859,11 @@ func hookDelegationCoordinator(state *ScanState, args map[string]string) HookRes
 	}
 
 	state.DelegationNudgeFired = true
-	contextParts := []string{}
-	if len(state.DetectedTechs) > 0 {
-		techs := make([]string, 0, len(state.DetectedTechs))
-		for tech := range state.DetectedTechs {
-			techs = append(techs, tech)
-		}
-		sort.Strings(techs)
-		contextParts = append(contextParts, "detected stack: "+strings.Join(techs, ", "))
-	}
-	if len(state.DiscoveredEndpoints) > 0 {
-		end := minInt(4, len(state.DiscoveredEndpoints))
-		contextParts = append(contextParts, "representative surface: "+strings.Join(state.DiscoveredEndpoints[:end], ", "))
-	}
-	contextLine := ""
-	if len(contextParts) > 0 {
-		contextLine = "\nCurrent context: " + strings.Join(contextParts, "; ") + "."
-	}
-
-	return HookResult{Nudge: `🧭 MULTI-AGENT DECOMPOSITION: Recon is mature enough to split the assessment. Act as coordinator now: launch 2–3 NON-OVERLAPPING specialists with spawn_agent, each with a bounded hypothesis, assigned endpoints/components, required baseline/control, and expected proof.
-
-Recommended role split:
-1. Authorization & business logic — session state, role/account boundaries, multi-step workflow abuse.
-2. Injection & server-side behavior — SQL/NoSQL/template/command injection, SSRF/XXE, unsafe parsing, OOB proof.
-3. Source/data-flow or client/API specialist — trace attacker input to sensitive sinks when source is available; otherwise inspect JavaScript, hidden APIs, GraphQL/WebSocket, and parameter discovery.
-
-Do not delegate three generic scans or duplicate your own work. Continue coordinating while they run, incorporate every result with wait_agent/check_agent, independently verify candidates, and do not finish with an uncollected delegation.` + contextLine}
+	// The nudge is built from the deterministic specialist profiles and the
+	// shared ledger's schedulable hypotheses (see ledger_hooks.go), so the
+	// coordinator assigns disjoint, contract-bound work instead of three generic
+	// scans.
+	return HookResult{Nudge: buildDelegationNudge(state)}
 }
 
 // ── hookAutoSkillSuggester ───────────────────────────────────────────────────

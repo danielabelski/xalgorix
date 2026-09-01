@@ -110,6 +110,34 @@ graph also owns one shared resource ledger: duration begins at the root, token
 usage is aggregated across LLM clients, and agent iterations/tool calls are
 atomically reserved against the scan-wide caps.
 
+## Hypothesis/evidence ledger — `internal/scanctx` (`ledger.go`)
+
+The ledger is the scan's durable "global exploitation context": a typed graph of
+attack hypotheses and the evidence gathered for each. It lives on the shared
+`ScanContext` (so the coordinator and every specialist read/write the same
+graph), is deduplicated by normalized class/endpoint/parameter/role, is
+memory-bounded, and persists atomically to `<scanDir>/ledger.json` so it
+survives restart/resume. A hypothesis carries identity, preconditions, a
+baseline/control, confidence, a lifecycle status (`queued`, `testing`, `proven`,
+`rejected`, `blocked`, `exhausted`), the owning specialist, a next-best action,
+and append-only evidence; confirmed findings are referenced by their reporting
+ID rather than duplicated.
+
+The ledger drives orchestration rather than sitting beside it:
+
+- Once recon produces a plan, `hookLedgerSeed` seeds a hypothesis per candidate
+  vulnerability class so the graph is populated deterministically.
+- Delegation is ledger-driven: the coordinator assigns disjoint work to three
+  deterministic specialist profiles (authorization/business-logic,
+  injection/server-side, client/source), each with an explicit evidence
+  contract (baseline + concrete proof; out-of-band callbacks for blind classes;
+  browser-confirmed execution for XSS/DOM) and a stopping rule.
+- Agents record and consult the graph with `record_hypothesis`,
+  `add_hypothesis_evidence`, `update_hypothesis`, and `read_ledger`.
+- A precision finish-gate refuses to complete while a hypothesis is marked
+  proven but has no linked finding (bounded so it cannot deadlock), enforcing
+  verify-by-execution and precision over volume.
+
 ## Tooling — `internal/tools`
 
 `registry.go` is the tool surface presented to the model. Each subpackage is one

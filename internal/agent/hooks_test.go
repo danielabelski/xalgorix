@@ -1231,8 +1231,13 @@ func TestDelegationCoordinatorNudgesOnceAfterRecon(t *testing.T) {
 	state.DiscoveredEndpoints = []string{"/api/users", "/graphql"}
 
 	result := hookDelegationCoordinator(state, nil)
-	if result.Nudge == "" || !strings.Contains(result.Nudge, "Authorization & business logic") ||
-		!strings.Contains(result.Nudge, "nodejs") || !strings.Contains(result.Nudge, "/graphql") {
+	// The nudge is now ledger-driven and built from the deterministic specialist
+	// profiles, while still carrying the recon context (detected stack + surface).
+	if result.Nudge == "" ||
+		!strings.Contains(result.Nudge, "authz-logic") ||
+		!strings.Contains(result.Nudge, "read_ledger") ||
+		!strings.Contains(result.Nudge, "nodejs") ||
+		!strings.Contains(result.Nudge, "/graphql") {
 		t.Fatalf("unexpected delegation nudge: %q", result.Nudge)
 	}
 	if second := hookDelegationCoordinator(state, nil); second.Nudge != "" {

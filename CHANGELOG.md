@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased] — Evidence-driven orchestration (hypothesis/evidence ledger)
+
+### Added
+- **Durable, scan-shared hypothesis/evidence ledger.** A new typed ledger on the scan context records every attack hypothesis (vulnerability class, endpoint, parameter, role/data-flow, preconditions, baseline, confidence, status, and next action) with append-only evidence. It is deduplicated, memory-bounded, and persisted atomically to `ledger.json`, so the coordinator and every specialist read and write one shared graph that survives restart/resume. New agent tools `record_hypothesis`, `add_hypothesis_evidence`, `update_hypothesis`, and `read_ledger` operate on it.
+- **The ledger now drives scheduling.** Once reconnaissance produces a plan, the ledger is seeded with a hypothesis per candidate class. Delegation is ledger-driven: the coordinator assigns disjoint, contract-bound work to deterministic specialist profiles — authorization/business-logic, injection/server-side, and client/source — each carrying an explicit evidence contract (baseline + concrete proof; out-of-band callbacks for blind classes; browser-confirmed execution for XSS/DOM) and a stopping rule.
+
+### Fixed
+- **A scan could finish with proven work unreported.** A precision finish-gate now blocks completion while any hypothesis is marked proven but has no linked finding, requiring the agent to file it (and link the finding) or downgrade it. The gate is bounded so it can never deadlock a scan, and it complements the existing coverage gate rather than replacing it.
+
 ## [Unreleased] — Scan-scoped multi-agent assessments
 
 ### Added
