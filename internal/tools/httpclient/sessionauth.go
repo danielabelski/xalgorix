@@ -37,6 +37,13 @@ func SetSessionAuth(contextID string, headers map[string]string) {
 	sessionAuth[contextID] = cp
 }
 
+// SessionAuthForContext returns a copy of the registered session-auth headers
+// for a context (or nil). Exported for callers that register auth from an
+// external source (e.g. HAR ingestion) and want to confirm what was applied.
+func SessionAuthForContext(contextID string) map[string]string {
+	return getSessionAuth(contextID)
+}
+
 // getSessionAuth returns a copy of the auth headers for a context (or nil).
 func getSessionAuth(contextID string) map[string]string {
 	sessionAuthMu.RLock()

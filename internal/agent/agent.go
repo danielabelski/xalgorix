@@ -369,6 +369,11 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// request itself, so no scope gate is needed.
 	a.registerOOBVerifyTool(reg)
 
+	// Register HAR ingestion (ingest_har): turns a logged-in HAR into live
+	// authenticated scan context — registers session auth and seeds the ledger
+	// with authenticated-endpoint authorization hypotheses.
+	a.registerHARIngestTool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests
