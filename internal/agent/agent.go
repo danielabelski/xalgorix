@@ -1688,8 +1688,18 @@ func (a *Agent) prepareScanEnvironment() {
 					}
 				}
 			}
+			// Turn the parsed surface into schedulable ledger hypotheses so the
+			// uploaded context drives authz_matrix and the specialists, not just
+			// the text briefing. Idempotent (the ledger dedups), so sub-agents
+			// that also parse the context add nothing new.
+			seeded := a.seedLedgerFromSurface(res)
 			if a.scanContextBriefing != "" {
-				a.emit(Event{Type: "message", Content: fmt.Sprintf("🗺️ Attack surface seeded from context (%d endpoints).", len(res.Endpoints))})
+				msg := fmt.Sprintf("🗺️ Attack surface seeded from context (%d endpoints", len(res.Endpoints))
+				if seeded > 0 {
+					msg += fmt.Sprintf(", %d ledger hypotheses", seeded)
+				}
+				msg += ")."
+				a.emit(Event{Type: "message", Content: msg})
 			}
 		}
 	}
