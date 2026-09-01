@@ -219,6 +219,7 @@ ACTIONS:
   new_tab      — Open a new browser tab
   switch_tab   — Switch between tabs
   close        — Close browser
+  verify_xss   — CONFIRM an XSS payload actually executes in the browser. Navigate to a URL whose payload raises a dialog carrying a unique nonce (e.g. alert('XV-8f3a')) and pass nonce=XV-8f3a; returns confirmed only if that dialog fires. This is proof of execution, not reflection — use it before reporting XSS.
 
 SIGNUP/LOGIN WORKFLOW:
   1. launch url=https://target.com/signup
@@ -237,6 +238,8 @@ SIGNUP/LOGIN WORKFLOW:
 			{Name: "selector", Description: "CSS selector or semantic @eX ID from snapshot (for click/type/submit/wait/iframe/get_html/select)", Required: false},
 			{Name: "text", Description: "Text to type (for type), option value (for select), or cookie value (for set_cookie)", Required: false},
 			{Name: "code", Description: "JavaScript code to execute (for execute_js)", Required: false},
+			{Name: "nonce", Description: "Unique marker your XSS payload raises via alert()/confirm()/prompt() (for verify_xss). Execution is confirmed only if a dialog carrying this nonce fires.", Required: false},
+			{Name: "parameter", Description: "The injected parameter under test (for verify_xss), used to label the ledger hypothesis.", Required: false},
 			{Name: "direction", Description: "Scroll direction: up or down (for scroll)", Required: false},
 			{Name: "tab_id", Description: "Tab ID (for switch_tab)", Required: false},
 			{Name: "proxy", Description: "Proxy: 'caido', 'none', or proxy URL", Required: false},
@@ -530,14 +533,22 @@ func browserWaitContext(ctxID string) context.Context {
 	return context.Background()
 }
 
-// setupDialogHandler sets up auto-dismiss for JavaScript dialogs (alert/confirm/prompt)
-// on a page. Without this, calling alert() in headless Chrome blocks page.Eval() forever.
-// The dialog text is logged as proof of triggered XSS payloads.
-func setupDialogHandler(p *rod.Page) {
+// setupDialogHandler auto-dismisses JavaScript dialogs (alert/confirm/prompt)
+// on a page — without this, calling alert() in headless Chrome blocks
+// page.Eval() forever — AND records each dialog as an ExecSignal for the scan
+// context. A fired dialog is concrete proof that an injected payload EXECUTED
+// (not merely reflected), which the verify_xss action uses to confirm XSS.
+func setupDialogHandler(ctxID string, p *rod.Page) {
 	go p.EachEvent(func(e *proto.PageJavascriptDialogOpening) {
 		dialogType := string(e.Type)
 		msg := e.Message
 		log.Printf("[browser] Auto-dismissing JS %s dialog: %q", dialogType, msg)
+		recordExecSignal(ctxID, ExecSignal{
+			Kind:    "dialog:" + dialogType,
+			Message: msg,
+			URL:     e.URL,
+			At:      time.Now(),
+		})
 		_ = proto.PageHandleJavaScriptDialog{
 			Accept:     true,
 			PromptText: "",
@@ -605,8 +616,10 @@ func browserActionWithContext(ctxID string, args map[string]string) (tools.Resul
 		return switchTab(ctxID, args["tab_id"])
 	case "close":
 		return closeBrowser(ctxID)
+	case "verify_xss":
+		return verifyXSS(ctxID, args["url"], args["nonce"], args["parameter"])
 	default:
-		return tools.Result{}, fmt.Errorf("unknown browser action: %s. Available: launch, goto, snapshot, click, type, submit, scroll, screenshot, get_html, execute_js, get_cookies, set_cookie, save_session, load_session, list_sessions, wait, select, fill_form, get_url, iframe, main_frame, extract_links, new_tab, switch_tab, close", command)
+		return tools.Result{}, fmt.Errorf("unknown browser action: %s. Available: launch, goto, snapshot, click, type, submit, scroll, screenshot, get_html, execute_js, get_cookies, set_cookie, save_session, load_session, list_sessions, wait, select, fill_form, get_url, iframe, main_frame, extract_links, new_tab, switch_tab, close, verify_xss", command)
 	}
 }
 
@@ -624,8 +637,9 @@ func launchBrowser(ctxID, rawURL, proxy string) (tools.Result, error) {
 	s.page = p
 
 	// Auto-dismiss JavaScript dialogs (alert/confirm/prompt) to prevent
-	// page.Eval() from blocking forever in headless mode during XSS testing.
-	setupDialogHandler(p)
+	// page.Eval() from blocking forever in headless mode during XSS testing,
+	// and record them as execution proof for verify_xss.
+	setupDialogHandler(ctxID, p)
 
 	// Set a realistic user agent for login flows
 	s.page.MustSetUserAgent(&proto.NetworkSetUserAgentOverride{
@@ -1504,7 +1518,7 @@ func newTab(ctxID, rawURL string) (tools.Result, error) {
 	s.page = p
 
 	// Auto-dismiss JavaScript dialogs on new tabs too
-	setupDialogHandler(p)
+	setupDialogHandler(ctxID, p)
 
 	if rawURL != "" {
 		err := p.Timeout(20 * time.Second).Navigate(rawURL)

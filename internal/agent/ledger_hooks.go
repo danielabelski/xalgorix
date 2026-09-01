@@ -59,7 +59,7 @@ var defaultSpecialistProfiles = []specialistProfile{
 		Role:             "authz-logic",
 		Focus:            "Authorization, access control, and business-logic abuse",
 		VulnClasses:      []string{"idor", "bola", "bfla", "privilege-escalation", "auth-bypass", "business-logic"},
-		EvidenceContract: "a baseline request as the legitimate role AND the same request as another/lower-privileged role, showing a concrete cross-role difference (cross-user/cross-tenant data or a state-changing action)",
+		EvidenceContract: "a baseline request as the legitimate role AND the same request as another/lower-privileged role, showing a concrete cross-role difference (cross-user/cross-tenant data or a state-changing action) — the authz_matrix tool produces this differential automatically across role A / role B / anonymous",
 		StoppingRule:     "stop once a cross-role difference is proven, or reject with the baseline when both roles behave identically across the object/action set",
 	},
 	{
@@ -73,7 +73,7 @@ var defaultSpecialistProfiles = []specialistProfile{
 		Role:             "client-source",
 		Focus:            "Client/API surface, and source-to-sink data flow when source is available",
 		VulnClasses:      []string{"xss", "dom-xss", "csrf", "open-redirect", "cors", "secret-exposure", "api-auth"},
-		EvidenceContract: "for XSS/DOM: browser-confirmed script execution (dialog fired or DOM mutation), not just reflection; for source review: an attacker-input→sensitive-sink path plus a live request that exercises it",
+		EvidenceContract: "for XSS/DOM: browser-confirmed script execution, not just reflection (confirm with browser_action command=verify_xss using a unique nonce); for source review: an attacker-input→sensitive-sink path plus a live request that exercises it",
 		StoppingRule:     "stop after browser-confirmed execution or a proven source-to-sink path; reject when output encoding / framework defenses demonstrably block the vector",
 	},
 }

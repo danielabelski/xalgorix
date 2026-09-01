@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] — Deep testing: authorization matrix + browser XSS verification
+
+### Added
+- **Multi-role authorization matrix (`authz_matrix`).** Replays a single request as every configured identity — the primary session (role A), a second account (role B) when the scan has one, and anonymous — and reports the access-control differential. When a lower-privileged identity receives the same successful response as the authorized one, that is broken access control (IDOR/BOLA for a second user, auth bypass/BFLA for anonymous). It enforces scope (never probes the operator's own machine) and the per-scan request-rate policy, and records role-scoped hypotheses with the differential as evidence in the shared ledger. This targets the authorization classes where autonomous scanners are weakest.
+- **Browser-backed XSS execution verification (`browser_action command=verify_xss`).** The headless browser now records JavaScript dialogs as execution signals; the new action navigates a payload that raises a dialog carrying a unique nonce and confirms XSS only when that dialog actually fires — proof of execution rather than mere reflection. Confirmed results are recorded as browser-confirmed XSS evidence in the ledger. This directly addresses the low XSS precision of reflection-only detection.
+- The injection/server-side and client/source specialist profiles now point at these tools in their evidence contracts, so specialists produce the required proof automatically.
+
 ## [Unreleased] — Evidence-driven orchestration (hypothesis/evidence ledger)
 
 ### Added
