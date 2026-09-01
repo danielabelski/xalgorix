@@ -350,6 +350,13 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// per-iteration nudge + the finish gate all consult the same plan.
 	a.registerPlanTools(reg)
 
+	// Register the durable hypothesis/evidence ledger tools (record_hypothesis,
+	// add_hypothesis_evidence, update_hypothesis, read_ledger). Unlike the plan
+	// (per-agent ScanState), the ledger lives on the shared ScanContext, so the
+	// coordinator and every delegated specialist read/write the same graph and
+	// it persists across restart/resume.
+	a.registerLedgerTools(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests

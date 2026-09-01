@@ -82,6 +82,11 @@ type ScanContext struct {
 	Notes    *NoteStore
 	Terminal *TerminalState
 	Browser  *BrowserState
+	// Ledger is the durable, scan-shared hypothesis/evidence graph. It is the
+	// one place the coordinator and every delegated specialist record and read
+	// attack hypotheses, evidence, and status, and it persists to
+	// <ScanDir>/ledger.json so it survives restart/resume.
+	Ledger *LedgerStore
 
 	// ctx/cancel for the scan's lifecycle
 	Ctx    context.Context
@@ -101,6 +106,7 @@ func New(id, scanDir string) *ScanContext {
 		Notes:    NewNoteStore(),
 		Terminal: NewTerminalState(),
 		Browser:  NewBrowserState(),
+		Ledger:   NewLedgerStore(),
 		Ctx:      ctx,
 		Cancel:   cancel,
 	}
