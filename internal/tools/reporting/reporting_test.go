@@ -4,6 +4,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
 
 func TestCheckFalsePositive_MissingHeaders(t *testing.T) {
@@ -829,6 +831,59 @@ func TestReportVuln_IndependentVerifierGate(t *testing.T) {
 			t.Fatalf("expected 1 vuln verified by heuristic fallback, got %d (%s)", len(vulns), res.Output)
 		}
 	})
+}
+
+func TestRegistryLocalVerifiersDoNotCrossWire(t *testing.T) {
+	ctx := "registry-local-verifier-isolation"
+	CleanupContext(ctx)
+	defer CleanupContext(ctx)
+
+	// A legacy context callback must not be consulted when an agent-local
+	// verifier was bound to the reporting tool.
+	SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+		t.Fatal("context-global verifier was called instead of registry-local verifier")
+		return VerificationVerdict{Inconclusive: true}
+	})
+
+	registryA := tools.NewRegistry()
+	registryA.SetScanContextID(ctx)
+	registryB := tools.NewRegistry()
+	registryB.SetScanContextID(ctx)
+
+	var callsA, callsB int
+	RegisterWithVerifier(registryA, func(VerificationRequest) VerificationVerdict {
+		callsA++
+		return VerificationVerdict{Confirmed: true, Reason: "agent A reproduced it"}
+	})
+	RegisterWithVerifier(registryB, func(VerificationRequest) VerificationVerdict {
+		callsB++
+		return VerificationVerdict{Reason: "agent B disproved it"}
+	})
+
+	argsA := validReportArgs()
+	argsA["title"] = "Agent A SQL injection"
+	argsA["endpoint"] = "https://example.com/api/a?id=1"
+	argsB := validReportArgs()
+	argsB["title"] = "Agent B SQL injection"
+	argsB["endpoint"] = "https://example.com/api/b?id=1"
+
+	resultA, err := registryA.Execute("report_vulnerability", argsA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultB, err := registryB.Execute("report_vulnerability", argsB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callsA != 1 || callsB != 1 {
+		t.Fatalf("local verifier calls = A:%d B:%d, want 1 each", callsA, callsB)
+	}
+	if _, ok := resultA.Metadata["vuln_id"]; !ok {
+		t.Fatalf("agent A finding was not persisted: %s", resultA.Output)
+	}
+	if !strings.Contains(resultB.Output, "REJECTED by independent verifier") {
+		t.Fatalf("agent B's rejecting verifier was not honored: %s", resultB.Output)
+	}
 }
 
 func TestCheckClaimConsistency(t *testing.T) {

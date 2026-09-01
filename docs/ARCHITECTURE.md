@@ -90,6 +90,26 @@ Guards keep the agent inside the authorized scope and the selected phases, and
 throttle to the requested request-rate policy. These are the safety boundaries
 that make an autonomous offensive agent safe to point at a target.
 
+## Multi-agent execution — `internal/tools/agentsgraph`
+
+A full assessment uses a coordinator plus up to three hypothesis-driven
+specialists. After reconnaissance, the coordinator divides the observed surface
+into non-overlapping roles (typically authorization/business logic,
+injection/server-side behavior, and source/data-flow or client/API analysis),
+continues its own work, and collects every child result before finishing.
+
+Every root scan owns one `agentsgraph.Graph`: its runner, worker semaphore,
+cancellation context, status, partial evidence, and final results are all
+scan-scoped. Descendants share that graph but cannot replace or stop it. This
+means concurrent scans cannot cross-wire agents or clear one another during
+cleanup. `spawn_agent`, `check_agent`, and `wait_agent` are always registered;
+the finish gate blocks while children are running or their results remain
+uncollected. Stopping a root cancels its descendants and cleanup waits briefly
+for them to unwind before persisting findings and deleting tool stores. The
+graph also owns one shared resource ledger: duration begins at the root, token
+usage is aggregated across LLM clients, and agent iterations/tool calls are
+atomically reserved against the scan-wide caps.
+
 ## Tooling — `internal/tools`
 
 `registry.go` is the tool surface presented to the model. Each subpackage is one
@@ -107,7 +127,10 @@ capability:
 
 Every reported vulnerability passes gates (valid method, mandatory
 exploitation proof, false-positive and claim-consistency checks, dedup,
-severity/CVSS normalization) and is handed to the independent Verifier. Each
+severity/CVSS normalization) and is handed to the reporting agent's independent
+Verifier. The verifier callback is registry-local, so parallel hunters use
+their own idle LLM client while blocked on their own report rather than
+cross-wiring a sibling's client. Each
 finding carries exactly one verification tag:
 
 - `verified` — the Verifier independently reproduced it.
@@ -147,7 +170,8 @@ Multiple targets are processed through the scan queue with resume support.
 ```
 target + instruction
    → web: create scan instance (own goroutine + scanctx)
-   → agent loop: reason → tool call → observe (events stream over WebSocket live)
+   → coordinator: recon → decompose hypotheses → parallel specialist agents
+   → each agent: reason → tool call → observe (events stream over WebSocket live)
    → reporting: gated + verified findings persisted to the scan record
    → storage: atomic scan.json per scan dir
    → report.go / internal/reporting: branded PDF on demand
@@ -159,7 +183,8 @@ target + instruction
 
 - `internal/storage` — atomic file writes (never a torn `scan.json`).
 - `internal/scanctx` — per-scan context keyed by ID; findings stores and the
-  Verifier are scoped to it, so concurrent scans are fully isolated.
+  delegation graph are scoped to it; each agent registry owns its verifier, so
+  concurrent scans and parallel specialists are isolated.
 - Each scan record (metadata, events, findings) is a `scan.json` under its own
   scan directory in the data dir; finished records are immutable and cached.
 

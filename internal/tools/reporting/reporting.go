@@ -140,10 +140,9 @@ var (
 	findingVerifierMu sync.RWMutex
 )
 
-// SetFindingVerifier installs the finding verifier for a specific scan context.
-// The agent package calls this so report_vulnerability validates before
-// persisting. Passing a nil verifier clears the entry for that context
-// (CLI/tests with no verifier fall back to the heuristic gates).
+// SetFindingVerifier installs a legacy scan-context verifier for callers that
+// use Register. Production agents use RegisterWithVerifier so each parallel
+// registry owns its callback. Passing nil clears the compatibility entry.
 func SetFindingVerifier(contextID string, v FindingVerifier) {
 	findingVerifierMu.Lock()
 	defer findingVerifierMu.Unlock()
@@ -256,10 +255,17 @@ func getStoreForContext(contextID string) *vulnStore {
 	return s
 }
 
-// Register adds reporting tools to the registry.
-// The registry is captured in the closure so tools resolve the correct
-// ScanContext via registry.GetScanContextID() instead of scanctx.Default().
+// Register adds reporting tools without an agent-local verifier. It is kept for
+// CLI/tests and falls back to the legacy scan-context verifier lookup.
 func Register(r *tools.Registry) {
+	RegisterWithVerifier(r, nil)
+}
+
+// RegisterWithVerifier binds an independent verifier to this exact registry.
+// This is required for multi-agent scans: each hunter blocks on and uses its
+// own LLM client while validating a report, so parallel agents never borrow a
+// busy sibling's verifier or overwrite a process-global callback.
+func RegisterWithVerifier(r *tools.Registry, verifier FindingVerifier) {
 	r.Register(&tools.Tool{
 		Name: "report_vulnerability",
 		Description: `Report a VERIFIED, EXPLOITABLE vulnerability with proof. CRITICAL RULES:
@@ -298,14 +304,13 @@ func Register(r *tools.Registry) {
 			{Name: "owasp", Description: "OWASP Top 10 (2021) category if known, e.g. A03 for Injection, A01 for Broken Access Control", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
-			return reportVulnForRegistry(r, args)
+			return reportVulnForRegistryWithVerifier(r, verifier, args)
 		},
 	})
 }
 
-// reportVulnForRegistry resolves the correct store via the registry's ScanContextID.
-func reportVulnForRegistry(reg *tools.Registry, args map[string]string) (tools.Result, error) {
-	return reportVulnWithContextID(reg.GetScanContextID(), args)
+func reportVulnForRegistryWithVerifier(reg *tools.Registry, verifier FindingVerifier, args map[string]string) (tools.Result, error) {
+	return reportVulnWithContextIDAndVerifier(reg.GetScanContextID(), verifier, args)
 }
 
 // reportVuln is the backward-compatible version using scanctx.Default().
@@ -316,6 +321,10 @@ func reportVuln(args map[string]string) (tools.Result, error) {
 }
 
 func reportVulnWithContextID(contextID string, args map[string]string) (tools.Result, error) {
+	return reportVulnWithContextIDAndVerifier(contextID, nil, args)
+}
+
+func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifier, args map[string]string) (tools.Result, error) {
 	severity := strings.ToLower(strings.TrimSpace(args["severity"]))
 	proof := strings.TrimSpace(args["exploitation_proof"])
 	method := strings.ToLower(strings.TrimSpace(args["verification_method"]))
@@ -474,7 +483,11 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// Only 'info' (advisory, non-exploitable) is exempt — requiresValidation is
 	// false for it — matching the Gate 2 proof requirement.
 	if requiresValidation {
-		if vf := getFindingVerifier(contextID); vf != nil {
+		vf := verifier
+		if vf == nil {
+			vf = getFindingVerifier(contextID)
+		}
+		if vf != nil {
 			verdict := vf(VerificationRequest{
 				Title:              title,
 				Severity:           severity,

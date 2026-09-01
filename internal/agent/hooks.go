@@ -182,6 +182,8 @@ type ScanState struct {
 	RedirectDetected     bool
 	DetectedTechs        map[string]bool // e.g. "php", "nodejs", "java"
 	SkillSuggestionFired bool            // prevents hookAutoSkillSuggester from firing more than once
+	DelegationAttempted  bool            // coordinator called spawn_agent/create_agent
+	DelegationNudgeFired bool            // multi-agent role decomposition nudge sent once
 }
 
 // NewScanState creates a zero-value ScanState with initialized maps.
@@ -375,6 +377,7 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnFinishAttempt, hookFinishGatekeeper)
 	reg.Register(OnEmptyResponse, hookEmptyResponseHandler)
 	reg.Register(OnNoToolResponse, hookNoToolHandler)
+	reg.Register(OnIterationStart, hookDelegationCoordinator)
 	reg.Register(OnIterationStart, hookAutoSkillSuggester)
 	reg.Register(OnIterationStart, hookPlanner)
 	reg.Register(OnHealthyResponse, hookResetOnSuccess)
@@ -417,6 +420,9 @@ func hookReportRetryGuard(state *ScanState, args map[string]string) HookResult {
 func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 	toolName := args["tool_name"]
 	state.UniqueToolsUsed[toolName] = true
+	if toolName == "spawn_agent" || toolName == "create_agent" {
+		state.DelegationAttempted = true
+	}
 
 	if toolName == "terminal_execute" {
 		state.TerminalCalls++
@@ -1832,6 +1838,47 @@ func isRefusal(response string) bool {
 		}
 	}
 	return false
+}
+
+// ── hookDelegationCoordinator ────────────────────────────────────────────────
+// Once the coordinator has enough reconnaissance to divide work intelligently,
+// prompt it to run distinct hypothesis-driven specialists in parallel. This is
+// deliberately a one-time nudge rather than unconditional auto-spawning: small
+// targets and tightly budgeted scans should retain control over provider cost.
+func hookDelegationCoordinator(state *ScanState, args map[string]string) HookResult {
+	if state == nil || state.DiscoveryMode || state.ReconOnlyMode ||
+		state.DelegationAttempted || state.DelegationNudgeFired ||
+		!state.ReconDone || state.Iteration < 5 {
+		return HookResult{}
+	}
+
+	state.DelegationNudgeFired = true
+	contextParts := []string{}
+	if len(state.DetectedTechs) > 0 {
+		techs := make([]string, 0, len(state.DetectedTechs))
+		for tech := range state.DetectedTechs {
+			techs = append(techs, tech)
+		}
+		sort.Strings(techs)
+		contextParts = append(contextParts, "detected stack: "+strings.Join(techs, ", "))
+	}
+	if len(state.DiscoveredEndpoints) > 0 {
+		end := minInt(4, len(state.DiscoveredEndpoints))
+		contextParts = append(contextParts, "representative surface: "+strings.Join(state.DiscoveredEndpoints[:end], ", "))
+	}
+	contextLine := ""
+	if len(contextParts) > 0 {
+		contextLine = "\nCurrent context: " + strings.Join(contextParts, "; ") + "."
+	}
+
+	return HookResult{Nudge: `🧭 MULTI-AGENT DECOMPOSITION: Recon is mature enough to split the assessment. Act as coordinator now: launch 2–3 NON-OVERLAPPING specialists with spawn_agent, each with a bounded hypothesis, assigned endpoints/components, required baseline/control, and expected proof.
+
+Recommended role split:
+1. Authorization & business logic — session state, role/account boundaries, multi-step workflow abuse.
+2. Injection & server-side behavior — SQL/NoSQL/template/command injection, SSRF/XXE, unsafe parsing, OOB proof.
+3. Source/data-flow or client/API specialist — trace attacker input to sensitive sinks when source is available; otherwise inspect JavaScript, hidden APIs, GraphQL/WebSocket, and parameter discovery.
+
+Do not delegate three generic scans or duplicate your own work. Continue coordinating while they run, incorporate every result with wait_agent/check_agent, independently verify candidates, and do not finish with an uncollected delegation.` + contextLine}
 }
 
 // ── hookAutoSkillSuggester ───────────────────────────────────────────────────

@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] — Scan-scoped multi-agent assessments
+
+### Added
+- **Coordinator-led parallel specialists are enabled by default.** Full assessments now prompt the coordinator to split mature reconnaissance into two or three non-overlapping, hypothesis-driven roles (authorization/business logic, injection/server-side behavior, and source/data-flow or client/API analysis). `spawn_agent`, `check_agent`, and `wait_agent` are always available, and the root finish gate requires every running or completed delegation to be collected before the scan can finish.
+
+### Fixed
+- **Concurrent scans could cross-wire sub-agents.** The delegation runner, agent map, concurrency semaphore, stop flag, and cleanup path were process-global. Constructing another root or child overwrote the runner; cleanup could clear another live scan; streamed partial results used the internal agent ID instead of the coordinator-visible delegation ID; and reset did not cancel a child already inside `Run`. Each root now owns a cancellable `agentsgraph.Graph`, descendants share only that graph, worker slots are per scan, partial/final evidence uses one stable ID, and shutdown waits briefly for children before persisting and deleting scan stores.
+- **Parallel reports could borrow the wrong Verifier LLM client.** Verifiers were selected through one mutable callback per scan context, so a newly constructed child could replace the callback used by its siblings. `report_vulnerability` now captures the reporting agent's independent verifier in its own tool registry; parallel hunters block on their own verifier client and cannot overwrite or race a sibling's validation loop.
+- **Delegated agents multiplied per-scan resource caps.** Each child previously received fresh duration, iteration, token, and tool-call counters, so a coordinator plus three specialists could consume roughly four times the configured caps. The graph now shares one scan budget: the root starts the wall clock once, agent iterations and tool-call batches atomically reserve the remaining allowance, and token deltas aggregate across agent clients.
+
 ## [v4.6.7](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.7) — Manual instance capacity (2026-09-01)
 
 ### Fixed

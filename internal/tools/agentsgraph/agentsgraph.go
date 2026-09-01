@@ -1,296 +1,253 @@
-// Package agentsgraph provides multi-agent delegation tools with async spawning.
+// Package agentsgraph provides scan-scoped multi-agent delegation tools.
 package agentsgraph
 
 import (
+	"context"
 	"fmt"
 	"log"
-	"os"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
 
-const maxConcurrentAgents = 3
+const DefaultMaxConcurrentAgents = 3
 
-// AgentRunner is a function that runs a sub-agent. This breaks the import cycle
-// between agent and agentsgraph. The agent package injects this at registration time.
-type AgentRunner func(name string, targets []string, task string) (string, error)
+// AgentRunner runs one delegated agent. agentID is the graph ID exposed to the
+// coordinator; event forwarders use it to attach partial results to the right
+// delegation. Implementations must stop when ctx is canceled.
+type AgentRunner func(ctx context.Context, agentID, name string, targets []string, task string) (string, error)
 
-// subAgentState tracks an async sub-agent.
 type subAgentState struct {
 	ID          string
 	Name        string
 	Task        string
 	Targets     []string
-	Status      string // "running", "completed", "failed"
+	Status      string // running, completed, failed
 	StartedAt   time.Time
 	CompletedAt time.Time
 	Result      string
 	Error       string
-
-	// Partial results accumulated during execution
-	partialMu      sync.Mutex
-	partialResults []string
+	Observed    bool
+	Partial     []string
+	done        chan struct{}
+	doneOnce    sync.Once
 }
 
-var (
-	// runnerPtr holds the injected AgentRunner behind an atomic pointer.
-	// Register is called from agent.NewAgent, and multi-instance scans
-	// construct agents concurrently, so the runner must be installed and
-	// read atomically rather than through a plain shared var.
-	runnerPtr atomic.Pointer[AgentRunner]
+// Graph owns all delegation state for exactly one root scan. Nothing in this
+// type is package-global: concurrent scans therefore cannot overwrite each
+// other's runner, consume each other's semaphore slots, or clear each other's
+// results during cleanup.
+type Graph struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	runner    AgentRunner
+	maxAgents int
 
-	// Async sub-agent tracking
-	agentsMu     sync.Mutex
-	agentCounter int
-	agents       = make(map[string]*subAgentState)
+	mu      sync.Mutex
+	stopped bool
+	counter uint64
+	agents  map[string]*subAgentState
+	slots   chan struct{}
+	wg      sync.WaitGroup
+}
 
-	// Semaphore to limit concurrent sub-agents
-	agentSemaphore = make(chan struct{}, maxConcurrentAgents)
+// New creates a scan-scoped graph with the production concurrency limit.
+func New(parent context.Context, runner AgentRunner) *Graph {
+	return NewWithLimit(parent, DefaultMaxConcurrentAgents, runner)
+}
 
-	// Reset signal — when true, running goroutines should exit early
-	agentsStopped atomic.Bool
-)
-
-// setRunner atomically installs the injected sub-agent runner.
-func setRunner(fn AgentRunner) { runnerPtr.Store(&fn) }
-
-// currentRunner returns the installed sub-agent runner, or nil if none has
-// been registered yet. The atomic load pairs with setRunner's store so a
-// tool callback fetching the runner never races a concurrent Register.
-func currentRunner() AgentRunner {
-	if p := runnerPtr.Load(); p != nil {
-		return *p
+// NewWithLimit is exported for deterministic tests and advanced embedders.
+func NewWithLimit(parent context.Context, maxAgents int, runner AgentRunner) *Graph {
+	if parent == nil {
+		parent = context.Background()
 	}
-	return nil
+	if maxAgents <= 0 {
+		maxAgents = DefaultMaxConcurrentAgents
+	}
+	ctx, cancel := context.WithCancel(parent)
+	return &Graph{
+		ctx:       ctx,
+		cancel:    cancel,
+		runner:    runner,
+		maxAgents: maxAgents,
+		agents:    make(map[string]*subAgentState),
+		slots:     make(chan struct{}, maxAgents),
+	}
 }
 
-// Register adds multi-agent tools to the registry.
-// The agentRunner function is injected to break the import cycle.
-//
-// NOTE: Only synchronous create_agent is registered. Async tools (spawn_agent,
-// check_agent, wait_agent) are disabled — they cause zombie goroutines and
-// semaphore leaks that prevent the watchdog from detecting stuck scans.
-func Register(r *tools.Registry, agentRunner AgentRunner) {
-	setRunner(agentRunner)
-
-	// Synchronous sub-agent — blocks until completion
+// Register installs synchronous and asynchronous delegation tools. Async
+// delegation is always available: lifecycle safety comes from scan scoping and
+// cancellation, rather than an environment flag that silently contradicts the
+// coordinator prompt.
+func (g *Graph) Register(r *tools.Registry) {
 	r.Register(&tools.Tool{
 		Name:        "create_agent",
-		Description: "Create and run a sub-agent synchronously. Blocks until the sub-agent completes and returns its results. Use for delegating focused tasks like 'scan this endpoint for SQLi' or 'fuzz this API for IDOR'.",
+		Description: "Create and run a focused sub-agent synchronously. The call returns only after the delegated work completes.",
 		Parameters: []tools.Parameter{
-			{Name: "name", Description: "Name for the sub-agent (e.g. 'SQLi Scanner')", Required: true},
-			{Name: "task", Description: "Task description for the sub-agent", Required: true},
-			{Name: "target", Description: "Target URL/path for the sub-agent", Required: false},
+			{Name: "name", Description: "Short specialist role name", Required: true},
+			{Name: "task", Description: "Bounded task, expected evidence, and stopping condition", Required: true},
+			{Name: "target", Description: "Target URL/path for the specialist", Required: false},
 		},
-		Execute: createAgent,
+		Execute: g.createAgent,
 	})
 
-	// Async sub-agent tools are gated behind XALGORIX_ENABLE_ASYNC_AGENTS to prevent zombie goroutines & semaphore leaks
-	if os.Getenv("XALGORIX_ENABLE_ASYNC_AGENTS") == "true" {
-		r.Register(&tools.Tool{
-			Name:        "spawn_agent",
-			Description: "Spawn a sub-agent asynchronously and return an agent_id immediately. You can continue doing other work and use check_agent or wait_agent later to get results. Max 3 concurrent sub-agents allowed.",
-			Parameters: []tools.Parameter{
-				{Name: "name", Description: "Name for the sub-agent (e.g. 'Directory Brute-forcing')", Required: true},
-				{Name: "task", Description: "Task description for the sub-agent", Required: true},
-				{Name: "target", Description: "Target URL/path for the sub-agent", Required: false},
-			},
-			Execute: spawnAgent,
-		})
+	r.Register(&tools.Tool{
+		Name:        "spawn_agent",
+		Description: fmt.Sprintf("Spawn a focused sub-agent asynchronously. Returns an agent_id immediately; use check_agent or wait_agent to collect its result. At most %d delegated agents run at once.", g.maxAgents),
+		Parameters: []tools.Parameter{
+			{Name: "name", Description: "Short specialist role name", Required: true},
+			{Name: "task", Description: "Bounded task, expected evidence, and stopping condition", Required: true},
+			{Name: "target", Description: "Target URL/path for the specialist", Required: false},
+		},
+		Execute: g.spawnAgent,
+	})
 
-		r.Register(&tools.Tool{
-			Name:        "check_agent",
-			Description: "Check the status and partial results of an asynchronously spawned sub-agent.",
-			Parameters: []tools.Parameter{
-				{Name: "agent_id", Description: "The ID returned by spawn_agent", Required: true},
-			},
-			Execute: checkAgent,
-		})
+	r.Register(&tools.Tool{
+		Name:        "check_agent",
+		Description: "Check a delegated agent's status and recent partial evidence. A completed result is marked collected.",
+		Parameters: []tools.Parameter{
+			{Name: "agent_id", Description: "ID returned by spawn_agent", Required: true},
+		},
+		Execute: g.checkAgent,
+	})
 
-		r.Register(&tools.Tool{
-			Name:        "wait_agent",
-			Description: "Block and wait until a spawned sub-agent completes or fails.",
-			Parameters: []tools.Parameter{
-				{Name: "agent_id", Description: "The ID returned by spawn_agent", Required: true},
-				{Name: "timeout", Description: "Timeout in seconds to wait (default 600)", Required: false},
-			},
-			Execute: waitAgent,
-		})
+	r.Register(&tools.Tool{
+		Name:        "wait_agent",
+		Description: "Wait for a delegated agent to complete or fail, then collect its result.",
+		Parameters: []tools.Parameter{
+			{Name: "agent_id", Description: "ID returned by spawn_agent", Required: true},
+			{Name: "timeout", Description: "Seconds to wait (default 600, maximum 3600)", Required: false},
+		},
+		Execute: g.waitAgent,
+	})
+}
+
+func (g *Graph) validateArgs(args map[string]string) (string, string, []string, error) {
+	name := strings.TrimSpace(args["name"])
+	task := strings.TrimSpace(args["task"])
+	if name == "" || task == "" {
+		return "", "", nil, fmt.Errorf("name and task are required")
+	}
+	if g == nil || g.runner == nil {
+		return "", "", nil, fmt.Errorf("agent runner not initialized")
+	}
+	targets := []string{}
+	if target := strings.TrimSpace(args["target"]); target != "" {
+		targets = append(targets, target)
+	}
+	return name, task, targets, nil
+}
+
+func (g *Graph) tryAcquire() bool {
+	g.mu.Lock()
+	stopped := g.stopped
+	g.mu.Unlock()
+	if stopped || g.ctx.Err() != nil {
+		return false
+	}
+	select {
+	case g.slots <- struct{}{}:
+		return true
+	default:
+		return false
 	}
 }
 
-func createAgent(args map[string]string) (tools.Result, error) {
-	name := args["name"]
-	task := args["task"]
-	target := args["target"]
+func (g *Graph) release() { <-g.slots }
 
-	if name == "" || task == "" {
-		return tools.Result{}, fmt.Errorf("name and task are required")
+func (g *Graph) capacityResult(action string) tools.Result {
+	if g.ctx.Err() != nil {
+		return tools.Result{Output: "Cannot " + action + ": the parent scan is stopping."}
 	}
+	return tools.Result{Output: fmt.Sprintf("Cannot %s: %d/%d delegated agents are already running. Collect or wait for one before delegating more.\nRunning agents:\n%s", action, g.RunningCount(), g.maxAgents, g.listRunningAgents())}
+}
 
-	targets := []string{}
-	if target != "" {
-		targets = append(targets, target)
-	}
+func (g *Graph) nextID(prefix string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.counter++
+	return fmt.Sprintf("%s_%d_%d", prefix, g.counter, time.Now().UnixNano())
+}
 
-	run := currentRunner()
-	if run == nil {
-		return tools.Result{}, fmt.Errorf("agent runner not initialized")
-	}
-
-	start := time.Now()
-	summary, err := run(name, targets, task)
-	elapsed := time.Since(start)
-
+func (g *Graph) createAgent(args map[string]string) (tools.Result, error) {
+	name, task, targets, err := g.validateArgs(args)
 	if err != nil {
-		return tools.Result{
-			Output: fmt.Sprintf("Sub-agent '%s' failed after %s: %s", name, elapsed.Round(time.Second), err.Error()),
-		}, nil
+		return tools.Result{}, err
 	}
+	if !g.tryAcquire() {
+		return g.capacityResult("create agent"), nil
+	}
+	defer g.release()
 
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Sub-agent '%s' completed in %s\n", name, elapsed.Round(time.Second)))
-	b.WriteString(summary)
-
+	agentID := g.nextID("sync")
+	start := time.Now()
+	summary, runErr := g.runner(g.ctx, agentID, name, targets, task)
+	elapsed := time.Since(start)
+	if runErr != nil {
+		return tools.Result{Output: fmt.Sprintf("Sub-agent %q failed after %s: %s", name, elapsed.Round(time.Second), runErr)}, nil
+	}
 	return tools.Result{
-		Output: b.String(),
+		Output: fmt.Sprintf("Sub-agent %q completed in %s\n%s", name, elapsed.Round(time.Second), summary),
 		Metadata: map[string]any{
+			"agent_id":   agentID,
 			"agent_name": name,
 			"elapsed":    elapsed.Seconds(),
 		},
 	}, nil
 }
 
-// spawnAgent launches a sub-agent asynchronously and returns immediately.
-func spawnAgent(args map[string]string) (tools.Result, error) {
-	name := args["name"]
-	task := args["task"]
-	target := args["target"]
-
-	if name == "" || task == "" {
-		return tools.Result{}, fmt.Errorf("name and task are required")
+func (g *Graph) spawnAgent(args map[string]string) (tools.Result, error) {
+	name, task, targets, err := g.validateArgs(args)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if !g.tryAcquire() {
+		return g.capacityResult("spawn agent"), nil
 	}
 
-	run := currentRunner()
-	if run == nil {
-		return tools.Result{}, fmt.Errorf("agent runner not initialized")
-	}
-
-	targets := []string{}
-	if target != "" {
-		targets = append(targets, target)
-	}
-
-	// Check concurrent limit
-	agentsMu.Lock()
-	runningCount := 0
-	for _, a := range agents {
-		if a.Status == "running" {
-			runningCount++
-		}
-	}
-	agentsMu.Unlock()
-
-	if runningCount >= maxConcurrentAgents {
-		return tools.Result{
-			Output: fmt.Sprintf("❌ Cannot spawn agent: %d/%d sub-agents already running. Wait for one to finish or use check_agent/wait_agent first.\nRunning agents:\n%s",
-				runningCount, maxConcurrentAgents, listRunningAgents()),
-		}, nil
-	}
-
-	// Create agent state
-	agentsMu.Lock()
-	agentCounter++
-	agentID := fmt.Sprintf("sub_%d_%d", agentCounter, time.Now().Unix())
+	agentID := g.nextID("sub")
 	state := &subAgentState{
 		ID:        agentID,
 		Name:      name,
 		Task:      task,
-		Targets:   targets,
+		Targets:   append([]string(nil), targets...),
 		Status:    "running",
 		StartedAt: time.Now(),
+		done:      make(chan struct{}),
 	}
-	agents[agentID] = state
-	agentsMu.Unlock()
+	g.mu.Lock()
+	if g.stopped || g.ctx.Err() != nil {
+		g.mu.Unlock()
+		g.release()
+		return g.capacityResult("spawn agent"), nil
+	}
+	g.agents[agentID] = state
+	g.wg.Add(1)
+	g.mu.Unlock()
 
-	// Launch in background goroutine
 	go func() {
+		defer g.wg.Done()
+		defer g.release()
 		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[PANIC] spawnAgent goroutine panicked: %v\n%s", r, debug.Stack())
-				agentsMu.Lock()
-				state.Status = "failed"
-				state.Error = fmt.Sprintf("panic: %v", r)
-				state.CompletedAt = time.Now()
-				agentsMu.Unlock()
+			if recovered := recover(); recovered != nil {
+				log.Printf("[PANIC] delegated agent %s panicked: %v\n%s", agentID, recovered, debug.Stack())
+				g.complete(agentID, "", fmt.Errorf("panic: %v", recovered))
 			}
 		}()
-
-		// Check if reset was requested before acquiring slot
-		if agentsStopped.Load() {
-			agentsMu.Lock()
-			state.Status = "failed"
-			state.Error = "reset: parent scan session ended before agent could start"
-			state.CompletedAt = time.Now()
-			agentsMu.Unlock()
-			return
-		}
-
-		// Acquire semaphore slot (blocks until available)
-		select {
-		case agentSemaphore <- struct{}{}:
-			// Got slot
-		case <-time.After(30 * time.Second):
-			// Timeout — shouldn't happen normally
-			agentsMu.Lock()
-			state.Status = "failed"
-			state.Error = "timeout: could not acquire agent slot within 30s"
-			state.CompletedAt = time.Now()
-			agentsMu.Unlock()
-			return
-		}
-		defer func() { <-agentSemaphore }()
-
-		// Check stopped flag again after acquiring semaphore
-		if agentsStopped.Load() {
-			completedAt := time.Now()
-			agentsMu.Lock()
-			state.Status = "failed"
-			state.Error = "reset: parent scan session ended"
-			state.CompletedAt = completedAt
-			if s, ok := agents[agentID]; ok {
-				s.Status = "failed"
-				s.Error = "reset: parent scan session ended"
-				s.CompletedAt = completedAt
-			}
-			agentsMu.Unlock()
-			return
-		}
-
-		summary, err := run(name, targets, task)
-
-		agentsMu.Lock()
-		defer agentsMu.Unlock()
-
-		state.CompletedAt = time.Now()
-		if err != nil {
-			state.Status = "failed"
-			state.Error = err.Error()
-			state.Result = fmt.Sprintf("Sub-agent '%s' failed: %s", name, err.Error())
-		} else {
-			state.Status = "completed"
-			state.Result = summary
-		}
+		summary, runErr := g.runner(g.ctx, agentID, name, targets, task)
+		g.complete(agentID, summary, runErr)
 	}()
 
+	target := ""
+	if len(targets) > 0 {
+		target = targets[0]
+	}
 	return tools.Result{
-		Output: fmt.Sprintf("✅ Sub-agent '%s' spawned with ID: %s\nTask: %s\nTarget: %s\n\nUse check_agent(agent_id=%s) to poll for results, or wait_agent(agent_id=%s) to block until done.",
-			name, agentID, truncTask(task, 200), target, agentID, agentID),
+		Output: fmt.Sprintf("Sub-agent %q spawned with ID %s\nTask: %s\nTarget: %s\n\nContinue coordinating, then call wait_agent(agent_id=%s) before finishing.", name, agentID, truncTask(task, 200), target, agentID),
 		Metadata: map[string]any{
 			"agent_id":   agentID,
 			"agent_name": name,
@@ -299,27 +256,50 @@ func spawnAgent(args map[string]string) (tools.Result, error) {
 	}, nil
 }
 
-type agentSnapshot struct {
-	ID             string
-	Name           string
-	Task           string
-	Status         string
-	StartedAt      time.Time
-	CompletedAt    time.Time
-	Result         string
-	Error          string
-	PartialResults []string
+func (g *Graph) complete(agentID, summary string, runErr error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	state, ok := g.agents[agentID]
+	if !ok || state.Status != "running" {
+		return
+	}
+	state.CompletedAt = time.Now()
+	if runErr != nil {
+		state.Status = "failed"
+		state.Error = runErr.Error()
+		state.Result = summary
+	} else {
+		state.Status = "completed"
+		state.Result = summary
+	}
+	state.doneOnce.Do(func() { close(state.done) })
 }
 
-func snapshotAgent(agentID string) (agentSnapshot, bool) {
-	agentsMu.Lock()
-	defer agentsMu.Unlock()
-	state, exists := agents[agentID]
-	if !exists {
+type agentSnapshot struct {
+	ID          string
+	Name        string
+	Task        string
+	Status      string
+	StartedAt   time.Time
+	CompletedAt time.Time
+	Result      string
+	Error       string
+	Observed    bool
+	Partial     []string
+	done        <-chan struct{}
+}
+
+func (g *Graph) snapshot(agentID string, observeCompleted bool) (agentSnapshot, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	state, ok := g.agents[agentID]
+	if !ok {
 		return agentSnapshot{}, false
 	}
-
-	snap := agentSnapshot{
+	if observeCompleted && state.Status != "running" {
+		state.Observed = true
+	}
+	return agentSnapshot{
 		ID:          state.ID,
 		Name:        state.Name,
 		Task:        state.Task,
@@ -328,219 +308,248 @@ func snapshotAgent(agentID string) (agentSnapshot, bool) {
 		CompletedAt: state.CompletedAt,
 		Result:      state.Result,
 		Error:       state.Error,
-	}
-	state.partialMu.Lock()
-	snap.PartialResults = append([]string(nil), state.partialResults...)
-	state.partialMu.Unlock()
-	return snap, true
+		Observed:    state.Observed,
+		Partial:     append([]string(nil), state.Partial...),
+		done:        state.done,
+	}, true
 }
 
-// checkAgent returns status and partial results of a spawned sub-agent.
-func checkAgent(args map[string]string) (tools.Result, error) {
-	agentID := args["agent_id"]
+func (g *Graph) checkAgent(args map[string]string) (tools.Result, error) {
+	agentID := strings.TrimSpace(args["agent_id"])
 	if agentID == "" {
 		return tools.Result{}, fmt.Errorf("agent_id is required")
 	}
-
-	state, exists := snapshotAgent(agentID)
-	if !exists {
-		return tools.Result{
-			Output: fmt.Sprintf("❌ Agent '%s' not found.\n\nAvailable agents:\n%s", agentID, listAllAgents()),
-		}, nil
+	state, ok := g.snapshot(agentID, true)
+	if !ok {
+		return tools.Result{Output: fmt.Sprintf("Agent %q not found.\nAvailable agents:\n%s", agentID, g.listAllAgents())}, nil
 	}
+	return renderSnapshot(state), nil
+}
 
+func renderSnapshot(state agentSnapshot) tools.Result {
 	var b strings.Builder
 	elapsed := time.Since(state.StartedAt).Round(time.Second)
-
 	switch state.Status {
 	case "running":
-		b.WriteString(fmt.Sprintf("🔄 Agent '%s' (%s) — RUNNING for %s\n", state.Name, state.ID, elapsed))
-		b.WriteString(fmt.Sprintf("Task: %s\n", truncTask(state.Task, 150)))
-		if len(state.PartialResults) > 0 {
-			b.WriteString("\n--- Partial Results ---\n")
-			start := 0
-			if len(state.PartialResults) > 5 {
-				start = len(state.PartialResults) - 5
-			}
-			for _, pr := range state.PartialResults[start:] {
-				b.WriteString(pr + "\n")
-			}
+		fmt.Fprintf(&b, "Agent %q (%s) — RUNNING for %s\nTask: %s\n", state.Name, state.ID, elapsed, truncTask(state.Task, 150))
+		if len(state.Partial) == 0 {
+			b.WriteString("\n(No partial evidence yet.)\n")
 		} else {
-			b.WriteString("\n(No partial results yet — agent is still working)\n")
+			b.WriteString("\n--- Recent partial evidence ---\n")
+			start := 0
+			if len(state.Partial) > 5 {
+				start = len(state.Partial) - 5
+			}
+			for _, partial := range state.Partial[start:] {
+				b.WriteString(partial)
+				b.WriteByte('\n')
+			}
 		}
-
 	case "completed":
-		completedElapsed := state.CompletedAt.Sub(state.StartedAt).Round(time.Second)
-		b.WriteString(fmt.Sprintf("✅ Agent '%s' (%s) — COMPLETED in %s\n", state.Name, state.ID, completedElapsed))
-		b.WriteString("\n--- Results ---\n")
-		result := state.Result
-		if len(result) > 5000 {
-			result = result[:5000] + "\n... [truncated]"
-		}
-		b.WriteString(result)
-
+		elapsed = state.CompletedAt.Sub(state.StartedAt).Round(time.Second)
+		fmt.Fprintf(&b, "Agent %q (%s) — COMPLETED in %s\n\n--- Results ---\n%s", state.Name, state.ID, elapsed, truncTask(state.Result, 10000))
 	case "failed":
-		b.WriteString(fmt.Sprintf("❌ Agent '%s' (%s) — FAILED after %s\n", state.Name, state.ID, elapsed))
-		b.WriteString(fmt.Sprintf("Error: %s\n", state.Error))
+		if !state.CompletedAt.IsZero() {
+			elapsed = state.CompletedAt.Sub(state.StartedAt).Round(time.Second)
+		}
+		fmt.Fprintf(&b, "Agent %q (%s) — FAILED after %s\nError: %s", state.Name, state.ID, elapsed, state.Error)
 		if state.Result != "" {
-			b.WriteString("\n--- Partial Results ---\n")
-			b.WriteString(state.Result)
+			fmt.Fprintf(&b, "\n\n--- Partial results ---\n%s", truncTask(state.Result, 10000))
 		}
 	}
-
 	return tools.Result{
 		Output: b.String(),
 		Metadata: map[string]any{
-			"agent_id": agentID,
+			"agent_id": state.ID,
 			"status":   state.Status,
 			"elapsed":  elapsed.Seconds(),
 		},
-	}, nil
+	}
 }
 
-// waitAgent blocks until a sub-agent completes.
-func waitAgent(args map[string]string) (tools.Result, error) {
-	agentID := args["agent_id"]
+func (g *Graph) waitAgent(args map[string]string) (tools.Result, error) {
+	agentID := strings.TrimSpace(args["agent_id"])
 	if agentID == "" {
 		return tools.Result{}, fmt.Errorf("agent_id is required")
 	}
-
-	timeout := 600 // 10 minutes default
-	if t := args["timeout"]; t != "" {
-		_, _ = fmt.Sscanf(t, "%d", &timeout)
+	state, ok := g.snapshot(agentID, false)
+	if !ok {
+		return tools.Result{Output: fmt.Sprintf("Agent %q not found.\nAvailable agents:\n%s", agentID, g.listAllAgents())}, nil
+	}
+	if state.Status != "running" {
+		state, _ = g.snapshot(agentID, true)
+		return renderSnapshot(state), nil
 	}
 
-	state, exists := snapshotAgent(agentID)
-	if !exists {
+	timeout := 600 * time.Second
+	if raw := strings.TrimSpace(args["timeout"]); raw != "" {
+		seconds, err := strconv.Atoi(raw)
+		if err != nil || seconds < 0 {
+			return tools.Result{}, fmt.Errorf("timeout must be a non-negative number of seconds")
+		}
+		if seconds == 0 {
+			timeout = time.Hour
+		} else {
+			if seconds > 3600 {
+				seconds = 3600
+			}
+			timeout = time.Duration(seconds) * time.Second
+		}
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-state.done:
+		state, ok = g.snapshot(agentID, true)
+		if !ok {
+			return tools.Result{Output: fmt.Sprintf("Agent %q was removed before its result could be collected.", agentID)}, nil
+		}
+		return renderSnapshot(state), nil
+	case <-timer.C:
+		state, _ = g.snapshot(agentID, false)
 		return tools.Result{
-			Output: fmt.Sprintf("❌ Agent '%s' not found.\n\nAvailable agents:\n%s", agentID, listAllAgents()),
+			Output:   fmt.Sprintf("Timeout waiting for agent %q (%s) after %s. It is still running; use check_agent or wait_agent again.", state.Name, state.ID, time.Since(state.StartedAt).Round(time.Second)),
+			Metadata: map[string]any{"agent_id": agentID, "status": "timeout"},
 		}, nil
-	}
-
-	// If already done, return immediately
-	if state.Status != "running" {
-		return checkAgent(args)
-	}
-
-	// Poll until done or timeout
-	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
-	if timeout == 0 {
-		deadline = time.Now().Add(24 * time.Hour) // "forever"
-	}
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		state, exists = snapshotAgent(agentID)
-		if !exists {
-			return tools.Result{
-				Output: fmt.Sprintf("❌ Agent '%s' not found.\n\nAvailable agents:\n%s", agentID, listAllAgents()),
-			}, nil
+	case <-g.ctx.Done():
+		state, ok = g.snapshot(agentID, true)
+		if ok && state.Status != "running" {
+			return renderSnapshot(state), nil
 		}
-		if state.Status != "running" {
-			return checkAgent(args)
-		}
-		if time.Now().After(deadline) {
-			elapsed := time.Since(state.StartedAt).Round(time.Second)
-			return tools.Result{
-				Output: fmt.Sprintf("⏰ Timeout waiting for agent '%s' (%s) after %s. Agent is still running.\nUse check_agent to poll later, or wait_agent with a longer timeout.",
-					state.Name, state.ID, elapsed),
-				Metadata: map[string]any{
-					"agent_id": agentID,
-					"status":   "timeout",
-				},
-			}, nil
-		}
+		return tools.Result{Output: fmt.Sprintf("Parent scan stopped while waiting for agent %q.", agentID)}, nil
 	}
-	// unreachable — ticker.C never closes, but compiler requires a return
-	return tools.Result{}, nil
 }
 
-// AddPartialResult adds a partial result to a running sub-agent (called from agent event handler).
-func AddPartialResult(agentID string, result string) {
-	agentsMu.Lock()
-	state, exists := agents[agentID]
-	if !exists {
-		agentsMu.Unlock()
+// AddPartialResult attaches streaming evidence to the coordinator-visible ID.
+func (g *Graph) AddPartialResult(agentID, result string) {
+	if g == nil || strings.TrimSpace(result) == "" {
 		return
 	}
-	// Hold agentsMu while acquiring partialMu to prevent CleanupCompleted from freeing state
-	if state.Status != "running" {
-		agentsMu.Unlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	state, ok := g.agents[agentID]
+	if !ok || state.Status != "running" {
 		return
 	}
-	state.partialMu.Lock()
-	agentsMu.Unlock()
-
-	state.partialResults = append(state.partialResults, result)
-	if len(state.partialResults) > 50 {
-		state.partialResults = state.partialResults[len(state.partialResults)-50:]
+	state.Partial = append(state.Partial, result)
+	if len(state.Partial) > 50 {
+		state.Partial = append([]string(nil), state.Partial[len(state.Partial)-50:]...)
 	}
-	state.partialMu.Unlock()
 }
 
-// GetRunningCount returns the number of running sub-agents.
-func GetRunningCount() int {
-	agentsMu.Lock()
-	defer agentsMu.Unlock()
+// RunningCount returns the number of active delegated agents in this scan.
+func (g *Graph) RunningCount() int {
+	if g == nil {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	count := 0
-	for _, a := range agents {
-		if a.Status == "running" {
+	for _, state := range g.agents {
+		if state.Status == "running" {
 			count++
 		}
 	}
 	return count
 }
 
-// Reset clears ALL sub-agent state and signals running goroutines to exit.
-// Call this between scan sessions to prevent memory leaks.
-// Goroutines check agentsStopped flag and will exit early, releasing their
-// semaphore slots via the defer statement.
-func Reset() {
-	// Signal all running goroutines to stop
-	agentsStopped.Store(true)
-
-	agentsMu.Lock()
-	// Mark all running agents as failed so their state is correct
-	for _, a := range agents {
-		if a.Status == "running" {
-			a.Status = "failed"
-			a.Error = "reset: parent scan session ended"
-			a.CompletedAt = time.Now()
+// UncollectedCount returns completed/failed delegations whose final result has
+// not yet been read by check_agent or wait_agent.
+func (g *Graph) UncollectedCount() int {
+	if g == nil {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	count := 0
+	for _, state := range g.agents {
+		if state.Status != "running" && !state.Observed {
+			count++
 		}
 	}
-	// Clear the entire map to free memory
-	agents = make(map[string]*subAgentState)
-	agentCounter = 0
-	agentsMu.Unlock()
-
-	// Reset the stopped flag so new agents can spawn
-	agentsStopped.Store(false)
+	return count
 }
 
-// CleanupCompleted removes finished/failed sub-agents from the map to free memory.
-// Lighter alternative to Reset() — safe to call between subdomain scans.
-func CleanupCompleted() {
-	agentsMu.Lock()
-	defer agentsMu.Unlock()
-	for id, a := range agents {
-		if a.Status == "completed" || a.Status == "failed" {
-			delete(agents, id)
+// PendingSummary gives the coordinator actionable IDs for finish gating.
+func (g *Graph) PendingSummary() string {
+	if g == nil {
+		return ""
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var lines []string
+	for _, state := range g.agents {
+		switch {
+		case state.Status == "running":
+			lines = append(lines, fmt.Sprintf("- %s (%s): running — call wait_agent", state.Name, state.ID))
+		case !state.Observed:
+			lines = append(lines, fmt.Sprintf("- %s (%s): %s, result not collected — call check_agent", state.Name, state.ID, state.Status))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// Stop cancels this scan's delegated agents and unblocks all waiters. It never
+// touches any other scan graph. Runner implementations receive the cancellation
+// through their context and are expected to unwind promptly.
+func (g *Graph) Stop() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	if g.stopped {
+		g.mu.Unlock()
+		return
+	}
+	g.stopped = true
+	g.cancel()
+	now := time.Now()
+	for _, state := range g.agents {
+		if state.Status == "running" {
+			state.Status = "failed"
+			state.Error = "parent scan stopped"
+			state.CompletedAt = now
+			state.doneOnce.Do(func() { close(state.done) })
+		}
+	}
+	g.mu.Unlock()
+}
+
+// WaitStopped waits for delegated runner goroutines to unwind. It is mainly
+// useful for shutdown paths and race tests; normal scan cleanup may remain
+// non-blocking after calling Stop.
+func (g *Graph) WaitStopped(timeout time.Duration) bool {
+	if g == nil {
+		return true
+	}
+	if timeout <= 0 {
+		g.wg.Wait()
+		return true
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if len(g.slots) == 0 {
+			return true
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			return len(g.slots) == 0
 		}
 	}
 }
 
-// helpers
-
-func listRunningAgents() string {
-	agentsMu.Lock()
-	defer agentsMu.Unlock()
+func (g *Graph) listRunningAgents() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	var b strings.Builder
-	for _, a := range agents {
-		if a.Status == "running" {
-			elapsed := time.Since(a.StartedAt).Round(time.Second)
-			b.WriteString(fmt.Sprintf("  - %s (%s): %s — running for %s\n", a.Name, a.ID, truncTask(a.Task, 80), elapsed))
+	for _, state := range g.agents {
+		if state.Status == "running" {
+			fmt.Fprintf(&b, "  - %s (%s): %s — %s\n", state.Name, state.ID, truncTask(state.Task, 80), time.Since(state.StartedAt).Round(time.Second))
 		}
 	}
 	if b.Len() == 0 {
@@ -549,13 +558,12 @@ func listRunningAgents() string {
 	return b.String()
 }
 
-func listAllAgents() string {
-	agentsMu.Lock()
-	defer agentsMu.Unlock()
+func (g *Graph) listAllAgents() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	var b strings.Builder
-	for _, a := range agents {
-		elapsed := time.Since(a.StartedAt).Round(time.Second)
-		b.WriteString(fmt.Sprintf("  - %s (%s): %s [%s] — %s\n", a.Name, a.ID, truncTask(a.Task, 80), a.Status, elapsed))
+	for _, state := range g.agents {
+		fmt.Fprintf(&b, "  - %s (%s): %s [%s]\n", state.Name, state.ID, truncTask(state.Task, 80), state.Status)
 	}
 	if b.Len() == 0 {
 		return "  (none)"
@@ -563,9 +571,9 @@ func listAllAgents() string {
 	return b.String()
 }
 
-func truncTask(s string, max int) string {
-	if len(s) > max {
-		return s[:max] + "..."
+func truncTask(value string, max int) string {
+	if len(value) > max {
+		return value[:max] + "..."
 	}
-	return s
+	return value
 }
