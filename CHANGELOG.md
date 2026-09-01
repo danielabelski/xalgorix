@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] — Broader XSS execution verification (console + DOM oracles)
+
+### Added
+- **`verify_xss` now confirms execution via console calls and DOM markers, not just dialogs.** The headless browser captures `console.*` API output as execution signals, and the verifier also reads DOM markers (`document.title` / `window.name`) after navigation. A payload can therefore prove execution by firing a dialog, by logging the nonce to the console (useful when a filter strips `alert()`), or by mutating a DOM marker to the nonce — extending confirmed XSS coverage to non-dialog and DOM-only sinks while keeping the same "proof of execution, not reflection" bar.
+
 ## [v4.6.8](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.8) — Evidence-driven multi-agent assessments (2026-09-01)
 
 Scan-scoped parallel specialists coordinated by a durable hypothesis/evidence ledger, plus deep-testing tools for the vulnerability classes autonomous scanners are weakest at (broken authorization, XSS).

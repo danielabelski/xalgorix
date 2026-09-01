@@ -219,7 +219,7 @@ ACTIONS:
   new_tab      — Open a new browser tab
   switch_tab   — Switch between tabs
   close        — Close browser
-  verify_xss   — CONFIRM an XSS payload actually executes in the browser. Navigate to a URL whose payload raises a dialog carrying a unique nonce (e.g. alert('XV-8f3a')) and pass nonce=XV-8f3a; returns confirmed only if that dialog fires. This is proof of execution, not reflection — use it before reporting XSS.
+  verify_xss   — CONFIRM an XSS payload actually executes in the browser (proof of execution, not reflection). Navigate to a URL whose payload emits a unique nonce and pass nonce=<that value>; confirmed only if the nonce is observed executing. Three oracles are accepted: a JS dialog (alert/confirm/prompt('XV-8f3a')), a console call (console.log('XV-8f3a')) — useful when a filter strips alert — or a DOM marker (document.title='XV-8f3a' or window.name='XV-8f3a') for DOM-only sinks. Use before reporting XSS.
 
 SIGNUP/LOGIN WORKFLOW:
   1. launch url=https://target.com/signup
@@ -238,7 +238,7 @@ SIGNUP/LOGIN WORKFLOW:
 			{Name: "selector", Description: "CSS selector or semantic @eX ID from snapshot (for click/type/submit/wait/iframe/get_html/select)", Required: false},
 			{Name: "text", Description: "Text to type (for type), option value (for select), or cookie value (for set_cookie)", Required: false},
 			{Name: "code", Description: "JavaScript code to execute (for execute_js)", Required: false},
-			{Name: "nonce", Description: "Unique marker your XSS payload raises via alert()/confirm()/prompt() (for verify_xss). Execution is confirmed only if a dialog carrying this nonce fires.", Required: false},
+			{Name: "nonce", Description: "Unique marker your XSS payload emits (for verify_xss) via a dialog (alert/confirm/prompt), console.log(), or a DOM marker (document.title / window.name). Execution is confirmed only if this nonce is observed executing.", Required: false},
 			{Name: "parameter", Description: "The injected parameter under test (for verify_xss), used to label the ledger hypothesis.", Required: false},
 			{Name: "direction", Description: "Scroll direction: up or down (for scroll)", Required: false},
 			{Name: "tab_id", Description: "Tab ID (for switch_tab)", Required: false},
@@ -556,6 +556,41 @@ func setupDialogHandler(ctxID string, p *rod.Page) {
 	})()
 }
 
+// setupConsoleHandler records console.* API calls (console.log/error/warn/…) as
+// ExecSignals for the scan context. Many XSS payloads prove execution without a
+// dialog — a filter may strip alert() while console.log() runs, and DOM/JS-sink
+// payloads commonly log a marker — so capturing the console broadens what
+// verify_xss can confirm as real execution (not mere reflection). The Runtime
+// domain is enabled explicitly so the events flow regardless of rod's lazy
+// enabling.
+func setupConsoleHandler(ctxID string, p *rod.Page) {
+	_ = proto.RuntimeEnable{}.Call(p)
+	go p.EachEvent(func(e *proto.RuntimeConsoleAPICalled) {
+		var parts []string
+		for _, arg := range e.Args {
+			if arg == nil {
+				continue
+			}
+			v := arg.Value.String()
+			if v == "" {
+				v = arg.Description
+			}
+			if v != "" {
+				parts = append(parts, v)
+			}
+		}
+		msg := strings.Join(parts, " ")
+		if strings.TrimSpace(msg) == "" {
+			return
+		}
+		recordExecSignal(ctxID, ExecSignal{
+			Kind:    "console:" + string(e.Type),
+			Message: msg,
+			At:      time.Now(),
+		})
+	})()
+}
+
 // browserActionForRegistry resolves the correct browser store via the registry's ScanContextID.
 func browserActionForRegistry(reg *tools.Registry, args map[string]string) (tools.Result, error) {
 	ctxID := reg.GetScanContextID()
@@ -640,6 +675,7 @@ func launchBrowser(ctxID, rawURL, proxy string) (tools.Result, error) {
 	// page.Eval() from blocking forever in headless mode during XSS testing,
 	// and record them as execution proof for verify_xss.
 	setupDialogHandler(ctxID, p)
+	setupConsoleHandler(ctxID, p)
 
 	// Set a realistic user agent for login flows
 	s.page.MustSetUserAgent(&proto.NetworkSetUserAgentOverride{
@@ -1517,8 +1553,9 @@ func newTab(ctxID, rawURL string) (tools.Result, error) {
 	s.currentTab = tabID
 	s.page = p
 
-	// Auto-dismiss JavaScript dialogs on new tabs too
+	// Auto-dismiss JavaScript dialogs on new tabs too, and capture console output
 	setupDialogHandler(ctxID, p)
+	setupConsoleHandler(ctxID, p)
 
 	if rawURL != "" {
 		err := p.Timeout(20 * time.Second).Navigate(rawURL)
