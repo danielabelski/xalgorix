@@ -357,6 +357,12 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// it persists across restart/resume.
 	a.registerLedgerTools(reg)
 
+	// Register the multi-role authorization matrix (authz_matrix). It replays a
+	// request as role A / role B / anonymous and records the access-control
+	// differential to the ledger. Agent-bound because it needs both configured
+	// account credentials, the scope config, and the ledger.
+	a.registerAuthzMatrixTool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests

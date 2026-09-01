@@ -138,6 +138,30 @@ The ledger drives orchestration rather than sitting beside it:
   proven but has no linked finding (bounded so it cannot deadlock), enforcing
   verify-by-execution and precision over volume.
 
+## Deep testing — authorization matrix & XSS verification
+
+Two capabilities give the specialists deterministic, evidence-producing tools
+for the vulnerability classes that are hardest to get right:
+
+- **`authz_matrix`** (`internal/agent/authz_matrix.go`) replays one request as
+  each configured identity — primary session (role A), a second account
+  (role B), and anonymous — using the exported `httpclient.SendRaw` primitive,
+  and compares the outcomes. A lower-privileged identity receiving the same
+  successful response as the authorized one is broken access control (IDOR/BOLA
+  horizontally, auth bypass/BFLA vertically). It enforces scope
+  (`scopeguard.IsLocalOrListener`) and the per-scan request-rate policy, and
+  records role-scoped ledger hypotheses (keyed by the ledger's `Role` dimension)
+  with the differential as evidence.
+- **`browser_action command=verify_xss`** (`internal/tools/browser`) turns the
+  headless browser's JavaScript dialogs into captured execution signals
+  (`execsignals.go`). The action navigates a payload that raises a dialog
+  carrying a unique nonce and confirms XSS only when that exact dialog fires —
+  execution proof, not reflection — recording browser-confirmed XSS evidence in
+  the ledger.
+
+Both tools feed the shared ledger, so their results flow through the same
+scheduling, verification, and precision finish-gate as everything else.
+
 ## Tooling — `internal/tools`
 
 `registry.go` is the tool surface presented to the model. Each subpackage is one
