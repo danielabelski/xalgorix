@@ -381,14 +381,22 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		gotSlot := false
 		s.instancesMu.Lock()
 		runningCount := 0
+		recentAdmissions := 0
+		now := time.Now()
 		for _, inst := range s.instances {
 			inst.mu.RLock()
 			if inst.Status == "running" {
 				runningCount++
+				if admissionMemoryUnreflected(inst.StartedAt, now) {
+					recentAdmissions++
+				}
 			}
 			inst.mu.RUnlock()
 		}
-		canAdmit, reason := resources.CanAdmitScan(runningCount)
+		canAdmit, reason := resources.CanAdmitScanWithReservations(
+			runningCount,
+			recentAdmissions,
+		)
 		instance.mu.Lock()
 		if canAdmit && instance.Status == "pending" {
 			instance.Status = "running"
@@ -408,10 +416,13 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		// signals collapse multiple near-simultaneous terminates into a
 		// single fair wakeup for the next waiter.
 		safe.IncAdmissionRefusal()
-		ceiling, _ := resources.EffectiveMaxInstances()
+		ceiling, _ := resources.EffectiveMaxInstancesForAdmission(
+			runningCount,
+			recentAdmissions,
+		)
 		level, _ := resources.CurrentLevel()
-		log.Printf("[admission] refused level=%s reason=%q ceiling=%d running=%d scan=%s",
-			level.String(), reason, ceiling, runningCount, instanceID)
+		log.Printf("[admission] refused level=%s reason=%q ceiling=%d running=%d recent_admissions=%d scan=%s",
+			level.String(), reason, ceiling, runningCount, recentAdmissions, instanceID)
 
 		// Park on the wake channel, the safety-net ticker, or shutdown.
 		select {

@@ -421,7 +421,7 @@ export default function OverviewPage() {
                 value={
                   resources ? (
                     <span className="capitalize">
-                      {resources.level} · max {resources.effective_max_instances}
+                      {resources.level} · capacity {resources.effective_max_instances}
                     </span>
                   ) : (
                     "—"

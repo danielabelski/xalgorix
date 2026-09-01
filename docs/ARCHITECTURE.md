@@ -176,6 +176,8 @@ Read from `~/.xalgorix.env` (and process env). Key variables:
 | `XALGORIX_PASSWORD` / `XALGORIX_PASSWORD_HASH` | dashboard auth |
 | `XALGORIX_DATA_DIR` | where scan records are stored |
 | `XALGORIX_MAX_ITERATIONS` / `_MAX_DURATION` / `_MAX_TOKENS` / `_MAX_TOOL_CALLS` | per-scan budgets |
+| `XALGORIX_MAX_INSTANCES` | optional hard cap on concurrent scan instances; live RAM headroom may admit fewer |
+| `XALGORIX_SCAN_MEMORY_BUDGET_MB` | estimated RAM required for each newly admitted scan (auto-scaled when unset) |
 | `XALGORIX_RATE_LIMIT_REQUESTS` / `_RATE_LIMIT_WINDOW` / `_RATE_RPS` / `_RATE_BURST` | request throttling |
 | `XALGORIX_PROXY_URL` / `_PROXY_FILE` / `_PROXY_ROTATION` | upstream proxying |
 | `XALGORIX_OOB_*`, `XALGORIX_INTERACTSH_*` | out-of-band callback config |
@@ -185,3 +187,13 @@ Read from `~/.xalgorix.env` (and process env). Key variables:
 
 Secrets (password hash, bot token, API keys) are never returned by any API
 response — only a `*_configured` boolean is surfaced.
+
+Scan admission treats the RAM-derived slot count as remaining headroom, then
+adds the instances already running to produce the total live capacity. This
+prevents current RAM use from being counted both in `MemAvailable` and again in
+the running-instance comparison. A scan admitted during the last 30 seconds
+also reserves one of those headroom slots while its agent and tool allocations
+catch up with the operating system's `MemAvailable` reading; this prevents
+concurrent pending waiters from reusing one snapshot. Critical RAM or disk
+pressure still admits no new work, and `XALGORIX_MAX_INSTANCES` remains the
+final hard ceiling.

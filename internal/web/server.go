@@ -598,6 +598,21 @@ type ScanInstance struct {
 // maxConcurrentInstances removed — replaced by dynamic resource-aware
 // admission via resources.CanAdmitScan(). See internal/resources/.
 
+// A newly admitted scan can take a short time to allocate its agent, browser,
+// and tool memory. Until then MemAvailable still looks unchanged, so treat its
+// RAM budget as reserved rather than allowing every pending waiter to spend the
+// same live headroom snapshot. After this window the OS reading is authoritative.
+const admissionMemoryReflectionWindow = 30 * time.Second
+
+func admissionMemoryUnreflected(startedAt string, now time.Time) bool {
+	started, err := time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		return false
+	}
+	age := now.Sub(started)
+	return age >= 0 && age < admissionMemoryReflectionWindow
+}
+
 type queueProgress struct {
 	ActiveTarget          string
 	ActiveScanDir         string
@@ -1847,9 +1862,10 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 //
 // With force=true (query param ?force=true or JSON body {"force":true}) the
 // restart is IMMEDIATE: it interrupts any in-flight scans/tools and restarts
-// right now. Interrupted scans are marked "stopped" (reason "server_restart")
-// when the process comes back and rebuilds instances from disk. Use force when
-// the scanner is wedged and would never reach idle on its own.
+// right now. Instances with durable queue state are reconstructed and resumed
+// when the process returns; only an orphan without resumable state becomes a
+// terminal stopped record. Use force when the scanner is wedged and would
+// never reach idle on its own.
 //
 // POST /api/restart            → { "status": "scheduled"|"already_pending", "idle": bool }
 // POST /api/restart?force=true → { "status": "restarting", "idle": bool, "forced": true }
@@ -1866,11 +1882,11 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[RESTART] /api/restart FORCE requested (idle=%v) — restarting immediately, interrupting any in-flight work", idle)
 		if s.discordWebhook != "" {
 			s.sendDiscord(0xff6b6b, "🔁 Xalgorix Force Restart",
-				"An immediate restart was requested. Xalgorix is restarting now; any in-flight scans are interrupted and marked stopped.")
+				"An immediate restart was requested. Xalgorix is restarting now; in-flight processes are interrupted and resumable queues will recover after startup.")
 		}
 		if s.telegramConfigured() {
 			s.sendTelegram(0xff6b6b, "🔁 Xalgorix Force Restart",
-				"An immediate restart was requested. Xalgorix is restarting now; any in-flight scans are interrupted and marked stopped.")
+				"An immediate restart was requested. Xalgorix is restarting now; in-flight processes are interrupted and resumable queues will recover after startup.")
 		}
 		// Prevent an already-scheduled idle watcher from also firing.
 		s.restartWhenIdle.Store(true)
@@ -2255,6 +2271,17 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		inst.mu.RUnlock()
 	}
 	s.instancesMu.RUnlock()
+	runningInstances := 0
+	recentAdmissions := 0
+	now := time.Now()
+	for _, inst := range instances {
+		if strings.EqualFold(strings.TrimSpace(inst.Status), "running") {
+			runningInstances++
+			if admissionMemoryUnreflected(inst.StartedAt, now) {
+				recentAdmissions++
+			}
+		}
+	}
 
 	// Sort: running first, then by start time descending
 	sort.Slice(instances, func(i, j int) bool {
@@ -2340,7 +2367,14 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	// Include resource stats so the UI can explain why scans are pending
 	stats := resources.GetStats()
 	level, _ := resources.CurrentLevel()
-	effectiveMax, reason := resources.EffectiveMaxInstances()
+	effectiveMax, reason := resources.EffectiveMaxInstancesForAdmission(
+		runningInstances,
+		recentAdmissions,
+	)
+	availableInstanceSlots := effectiveMax - runningInstances
+	if availableInstanceSlots < 0 {
+		availableInstanceSlots = 0
+	}
 	capacity := resources.Capacity()
 	response := map[string]any{
 		"instances": instances,
@@ -2363,6 +2397,9 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			"max_instances":            effectiveMax,
 			"manual_max_instances":     resources.MaxInstances(),
 			"effective_max_instances":  effectiveMax,
+			"running_instances":        runningInstances,
+			"unreflected_admissions":   recentAdmissions,
+			"available_instance_slots": availableInstanceSlots,
 			"active_tool_leases":       capacity.ActiveToolLeases,
 			"active_heavy_tool_leases": capacity.ActiveHeavyToolLeases,
 			"heavy_tool_slots":         capacity.HeavyToolSlots,
