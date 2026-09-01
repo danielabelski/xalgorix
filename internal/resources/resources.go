@@ -109,8 +109,10 @@ var (
 	diskCautionMB  = envInt64("XALGORIX_DISK_CAUTION_MB", 2048)  // 2 GB
 	diskCriticalMB = envInt64("XALGORIX_DISK_CRITICAL_MB", 1024) // 1 GB
 
-	// Optional manual ceiling on concurrent instances. By default there is no
-	// static instance limit; live RAM headroom computes the ceiling.
+	// Optional operator-defined concurrent instance capacity. When set, this is
+	// authoritative for scan admission; when unset, live RAM headroom computes
+	// the capacity automatically. Tool execution remains resource-throttled in
+	// either mode.
 	manualMaxInstances = envOptionalInt("XALGORIX_MAX_INSTANCES")
 
 	// Estimated load-average budget consumed by one heavy terminal tool.
@@ -300,9 +302,12 @@ func currentLevelForStats(stats SystemStats) (Level, string) {
 //     and tool output) and is otherwise not a slot multiplier.
 //
 // Algorithm:
-//   - Compute RAM slots from available RAM and per-instance memory budget.
-//   - If free disk is below the critical threshold, admit nothing.
-//   - Apply XALGORIX_MAX_INSTANCES only when explicitly configured.
+//   - If XALGORIX_MAX_INSTANCES is explicitly configured, use it as the total
+//     instance capacity instead of the RAM-derived estimate.
+//   - Otherwise compute RAM slots from available RAM and per-instance memory
+//     budget.
+//   - If free disk is below the critical threshold, admit nothing new in
+//     either mode.
 func EffectiveMaxInstances() (int, string) {
 	stats := GetStats()
 	return effectiveMaxInstancesForRunningStats(stats, 0, admissionReason(stats))
@@ -394,20 +399,25 @@ func effectiveMaxInstancesForAdmissionStats(
 		availableSlots = 0
 	}
 	effective := runningCount + availableSlots
+	capacityMode := "adaptive"
+	if manualMaxInstances > 0 {
+		// Setting XALGORIX_MAX_INSTANCES is an explicit operator decision about
+		// how many scan coordinators this host should admit. Do not silently
+		// replace it with a smaller RAM estimate; the tool-lease layer still
+		// throttles memory/CPU-heavy subprocesses under pressure.
+		effective = manualMaxInstances
+		capacityMode = "manual"
+	}
 	if !diskHasHeadroom(stats) {
 		// Existing work may continue, but no new scan may be admitted while the
 		// disk is below the hard safety floor.
 		effective = runningCount
 	}
 
-	if manualMaxInstances > 0 && effective > manualMaxInstances {
-		effective = manualMaxInstances
-	}
-
-	detail := fmt.Sprintf("%s; running=%d, ram_headroom_slots=%d, unreflected_admissions=%d, available_slots=%d, total_ceiling=%d, scan_budget=%dMB",
-		reason, runningCount, ramHeadroomSlots, unreflectedAdmissions, availableSlots, effective, perInstanceMemoryBudgetMB())
+	detail := fmt.Sprintf("%s; capacity_mode=%s, running=%d, ram_headroom_slots=%d, unreflected_admissions=%d, available_slots=%d, total_ceiling=%d, scan_budget=%dMB",
+		reason, capacityMode, runningCount, ramHeadroomSlots, unreflectedAdmissions, availableSlots, effective, perInstanceMemoryBudgetMB())
 	if manualMaxInstances > 0 {
-		detail += fmt.Sprintf(", manual_cap=%d", manualMaxInstances)
+		detail += fmt.Sprintf(", manual_capacity=%d", manualMaxInstances)
 	}
 	return effective, detail
 }

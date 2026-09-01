@@ -157,7 +157,7 @@ func TestEffectiveMaxInstancesUsesDynamicResourceCapacity(t *testing.T) {
 	manualMaxInstances = 3
 	got, _ = effectiveMaxInstancesForStats(stats, "OK")
 	if got != 3 {
-		t.Fatalf("manual cap dynamic instances = %d, want 3", got)
+		t.Fatalf("manual capacity instances = %d, want 3", got)
 	}
 
 	manualMaxInstances = 0
@@ -186,7 +186,7 @@ func TestEffectiveMaxInstancesAddsExistingRunsToRemainingHeadroom(t *testing.T) 
 	scanOverheadMB = 256
 	scanMemoryBudgetMB = 1280
 	ramCriticalMB = 2800
-	manualMaxInstances = 20
+	manualMaxInstances = 0
 
 	// Mirrors the production failure: six scans are already running and
 	// current free RAM can safely launch another five. The total ceiling is
@@ -200,14 +200,51 @@ func TestEffectiveMaxInstancesAddsExistingRunsToRemainingHeadroom(t *testing.T) 
 	manualMaxInstances = 8
 	got, _ = effectiveMaxInstancesForRunningStats(stats, 6, "OK")
 	if got != 8 {
-		t.Fatalf("manual cap total instances = %d, want 8", got)
+		t.Fatalf("manual capacity total instances = %d, want 8", got)
 	}
 
 	stats.MemAvailableMB = 2000
 	manualMaxInstances = 20
 	got, _ = effectiveMaxInstancesForRunningStats(stats, 6, "RAM critical")
+	if got != 20 {
+		t.Fatalf("manual capacity under RAM pressure = %d, want 20", got)
+	}
+
+	stats.DiskFreeMB = 500
+	got, _ = effectiveMaxInstancesForRunningStats(stats, 6, "RAM critical; Disk critical")
 	if got != 6 {
-		t.Fatalf("critical RAM ceiling = %d, want existing 6 with no new admission", got)
+		t.Fatalf("critical disk ceiling = %d, want existing 6 with no new admission", got)
+	}
+}
+
+func TestExplicitMaxInstancesOverridesAdaptiveHeadroom(t *testing.T) {
+	oldBudget := scanMemoryBudgetMB
+	oldOverhead := scanOverheadMB
+	oldCriticalRAM := ramCriticalMB
+	oldCriticalDisk := diskCriticalMB
+	oldManualCap := manualMaxInstances
+	t.Cleanup(func() {
+		scanMemoryBudgetMB = oldBudget
+		scanOverheadMB = oldOverhead
+		ramCriticalMB = oldCriticalRAM
+		diskCriticalMB = oldCriticalDisk
+		manualMaxInstances = oldManualCap
+	})
+
+	scanMemoryBudgetMB = 2048
+	scanOverheadMB = 256
+	ramCriticalMB = 2800
+	diskCriticalMB = 1024
+	manualMaxInstances = 20
+	stats := SystemStats{MemTotalMB: 23500, MemAvailableMB: 2000, DiskFreeMB: 100000}
+
+	got, detail := effectiveMaxInstancesForAdmissionStats(stats, 5, 3, "RAM critical")
+	if got != 20 {
+		t.Fatalf("manual capacity = %d, want 20; %s", got, detail)
+	}
+	if !strings.Contains(detail, "capacity_mode=manual") ||
+		!strings.Contains(detail, "manual_capacity=20") {
+		t.Fatalf("manual capacity detail missing mode/value: %s", detail)
 	}
 }
 
@@ -229,7 +266,7 @@ func TestEffectiveMaxInstancesReservesUnreflectedAdmissions(t *testing.T) {
 	scanOverheadMB = 256
 	scanMemoryBudgetMB = 1280
 	ramCriticalMB = 2800
-	manualMaxInstances = 20
+	manualMaxInstances = 0
 	stats := SystemStats{MemTotalMB: 23500, MemAvailableMB: 9200, DiskFreeMB: 100000}
 
 	// Five pending goroutines can consume the five-slot headroom exactly once.

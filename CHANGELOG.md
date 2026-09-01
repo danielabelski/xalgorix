@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Explicit instance capacity was still reduced by adaptive RAM admission.** When `XALGORIX_MAX_INSTANCES` is set, it now defines the authoritative number of concurrent scan instances instead of acting only as an upper bound on a smaller RAM-derived estimate. Adaptive RAM admission remains the default when the variable is unset, heavy tools remain resource-throttled, and the critical disk floor still blocks new work.
+
 ## [v4.6.6](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.6) — Concurrent admission and restart recovery (2026-09-01)
 
 ### Fixed
