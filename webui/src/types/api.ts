@@ -187,6 +187,9 @@ export interface InstancesResponse {
     max_instances: number;
     manual_max_instances: number;
     effective_max_instances: number;
+    running_instances?: number;
+    unreflected_admissions?: number;
+    available_instance_slots?: number;
     active_tool_leases?: number;
     active_heavy_tool_leases?: number;
     heavy_tool_slots?: number;

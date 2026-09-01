@@ -281,8 +281,13 @@ func currentLevelForStats(stats SystemStats) (Level, string) {
 	return level, strings.Join(reasons, "; ")
 }
 
-// EffectiveMaxInstances computes the live concurrency ceiling from current
-// RAM headroom. CPU and disk are intentionally NOT slot inputs:
+// EffectiveMaxInstances computes how many scan slots current RAM headroom can
+// support when no instances are already running. Callers that already own scan
+// slots must use EffectiveMaxInstancesForRunning so those live instances are
+// not counted once through runningCount and a second time through the reduced
+// MemAvailable reading.
+//
+// CPU and disk are intentionally NOT slot inputs:
 //
 //   - CPU saturation throttles scans (kernel time-slices, scans complete
 //     more slowly) but never crashes them. Gating new scans on CPU only
@@ -300,7 +305,38 @@ func currentLevelForStats(stats SystemStats) (Level, string) {
 //   - Apply XALGORIX_MAX_INSTANCES only when explicitly configured.
 func EffectiveMaxInstances() (int, string) {
 	stats := GetStats()
-	return effectiveMaxInstancesForStats(stats, admissionReason(stats))
+	return effectiveMaxInstancesForRunningStats(stats, 0, admissionReason(stats))
+}
+
+// EffectiveMaxInstancesForRunning returns the current total scan ceiling for
+// a scheduler that already has runningCount admitted instances. The RAM model
+// measures *remaining* headroom, so the existing instances must be added back
+// before comparing the result with runningCount. The previous implementation
+// compared runningCount directly with the remaining-headroom slot count; as
+// scans consumed memory the reported "maximum" could shrink below the number
+// already running (for example six running with "Max 5") and strand otherwise
+// admissible work in pending forever.
+func EffectiveMaxInstancesForRunning(runningCount int) (int, string) {
+	stats := GetStats()
+	return effectiveMaxInstancesForAdmissionStats(stats, runningCount, 0, admissionReason(stats))
+}
+
+// EffectiveMaxInstancesForAdmission is the scheduler-facing capacity model.
+// unreflectedAdmissions is the number of just-started instances whose planned
+// memory has not necessarily appeared in MemAvailable yet. Reserving one RAM
+// slot for each prevents a burst of pending goroutines from all spending the
+// same headroom snapshot before their agents and tools have allocated memory.
+func EffectiveMaxInstancesForAdmission(
+	runningCount int,
+	unreflectedAdmissions int,
+) (int, string) {
+	stats := GetStats()
+	return effectiveMaxInstancesForAdmissionStats(
+		stats,
+		runningCount,
+		unreflectedAdmissions,
+		admissionReason(stats),
+	)
 }
 
 // admissionReason returns the human-readable rationale string for admission
@@ -330,18 +366,46 @@ func admissionReason(stats SystemStats) string {
 }
 
 func effectiveMaxInstancesForStats(stats SystemStats, reason string) (int, string) {
-	ramSlots := memoryInstanceCapacity(stats)
-	effective := ramSlots
+	return effectiveMaxInstancesForAdmissionStats(stats, 0, 0, reason)
+}
+
+func effectiveMaxInstancesForRunningStats(stats SystemStats, runningCount int, reason string) (int, string) {
+	return effectiveMaxInstancesForAdmissionStats(stats, runningCount, 0, reason)
+}
+
+func effectiveMaxInstancesForAdmissionStats(
+	stats SystemStats,
+	runningCount int,
+	unreflectedAdmissions int,
+	reason string,
+) (int, string) {
+	if runningCount < 0 {
+		runningCount = 0
+	}
+	if unreflectedAdmissions < 0 {
+		unreflectedAdmissions = 0
+	}
+	if unreflectedAdmissions > runningCount {
+		unreflectedAdmissions = runningCount
+	}
+	ramHeadroomSlots := memoryInstanceCapacity(stats)
+	availableSlots := ramHeadroomSlots - unreflectedAdmissions
+	if availableSlots < 0 {
+		availableSlots = 0
+	}
+	effective := runningCount + availableSlots
 	if !diskHasHeadroom(stats) {
-		effective = 0
+		// Existing work may continue, but no new scan may be admitted while the
+		// disk is below the hard safety floor.
+		effective = runningCount
 	}
 
 	if manualMaxInstances > 0 && effective > manualMaxInstances {
 		effective = manualMaxInstances
 	}
 
-	detail := fmt.Sprintf("%s; ram_slots=%d, scan_budget=%dMB",
-		reason, ramSlots, perInstanceMemoryBudgetMB())
+	detail := fmt.Sprintf("%s; running=%d, ram_headroom_slots=%d, unreflected_admissions=%d, available_slots=%d, total_ceiling=%d, scan_budget=%dMB",
+		reason, runningCount, ramHeadroomSlots, unreflectedAdmissions, availableSlots, effective, perInstanceMemoryBudgetMB())
 	if manualMaxInstances > 0 {
 		detail += fmt.Sprintf(", manual_cap=%d", manualMaxInstances)
 	}
@@ -506,7 +570,14 @@ func configureGoRuntimeLimits(totalMB int64) {
 // Layer 1: admission control. Uses EffectiveMaxInstances for a live,
 // resource-aware concurrency ceiling instead of a fixed number.
 func CanAdmitScan(runningCount int) (bool, string) {
-	effMax, reason := EffectiveMaxInstances()
+	return CanAdmitScanWithReservations(runningCount, 0)
+}
+
+// CanAdmitScanWithReservations applies the live capacity model while reserving
+// RAM for instances admitted recently enough that their memory may not yet be
+// reflected in the operating system's MemAvailable reading.
+func CanAdmitScanWithReservations(runningCount int, unreflectedAdmissions int) (bool, string) {
+	effMax, reason := EffectiveMaxInstancesForAdmission(runningCount, unreflectedAdmissions)
 
 	if effMax <= 0 {
 		return false, fmt.Sprintf("dynamic limit: resources unavailable (%s)", reason)

@@ -168,6 +168,86 @@ func TestEffectiveMaxInstancesUsesDynamicResourceCapacity(t *testing.T) {
 	}
 }
 
+func TestEffectiveMaxInstancesAddsExistingRunsToRemainingHeadroom(t *testing.T) {
+	oldLimit := HeavyToolMemLimitBytes
+	oldOverhead := scanOverheadMB
+	oldBudget := scanMemoryBudgetMB
+	oldCriticalRAM := ramCriticalMB
+	oldManualCap := manualMaxInstances
+	t.Cleanup(func() {
+		HeavyToolMemLimitBytes = oldLimit
+		scanOverheadMB = oldOverhead
+		scanMemoryBudgetMB = oldBudget
+		ramCriticalMB = oldCriticalRAM
+		manualMaxInstances = oldManualCap
+	})
+
+	HeavyToolMemLimitBytes = 0
+	scanOverheadMB = 256
+	scanMemoryBudgetMB = 1280
+	ramCriticalMB = 2800
+	manualMaxInstances = 20
+
+	// Mirrors the production failure: six scans are already running and
+	// current free RAM can safely launch another five. The total ceiling is
+	// therefore eleven, not five.
+	stats := SystemStats{MemTotalMB: 23500, MemAvailableMB: 9200, DiskFreeMB: 100000}
+	got, detail := effectiveMaxInstancesForRunningStats(stats, 6, "OK")
+	if got != 11 {
+		t.Fatalf("total instances = %d, want 11 (6 running + 5 headroom); %s", got, detail)
+	}
+
+	manualMaxInstances = 8
+	got, _ = effectiveMaxInstancesForRunningStats(stats, 6, "OK")
+	if got != 8 {
+		t.Fatalf("manual cap total instances = %d, want 8", got)
+	}
+
+	stats.MemAvailableMB = 2000
+	manualMaxInstances = 20
+	got, _ = effectiveMaxInstancesForRunningStats(stats, 6, "RAM critical")
+	if got != 6 {
+		t.Fatalf("critical RAM ceiling = %d, want existing 6 with no new admission", got)
+	}
+}
+
+func TestEffectiveMaxInstancesReservesUnreflectedAdmissions(t *testing.T) {
+	oldLimit := HeavyToolMemLimitBytes
+	oldOverhead := scanOverheadMB
+	oldBudget := scanMemoryBudgetMB
+	oldCriticalRAM := ramCriticalMB
+	oldManualCap := manualMaxInstances
+	t.Cleanup(func() {
+		HeavyToolMemLimitBytes = oldLimit
+		scanOverheadMB = oldOverhead
+		scanMemoryBudgetMB = oldBudget
+		ramCriticalMB = oldCriticalRAM
+		manualMaxInstances = oldManualCap
+	})
+
+	HeavyToolMemLimitBytes = 0
+	scanOverheadMB = 256
+	scanMemoryBudgetMB = 1280
+	ramCriticalMB = 2800
+	manualMaxInstances = 20
+	stats := SystemStats{MemTotalMB: 23500, MemAvailableMB: 9200, DiskFreeMB: 100000}
+
+	// Five pending goroutines can consume the five-slot headroom exactly once.
+	// Incrementing runningCount before RSS catches up must not manufacture five
+	// fresh slots on every admission attempt.
+	for admitted := 0; admitted <= 5; admitted++ {
+		got, detail := effectiveMaxInstancesForAdmissionStats(
+			stats,
+			6+admitted,
+			admitted,
+			"OK",
+		)
+		if got != 11 {
+			t.Fatalf("after %d recent admissions ceiling = %d, want 11; %s", admitted, got, detail)
+		}
+	}
+}
+
 func TestToolCapacityHonorsCPUAndMemoryHeadroom(t *testing.T) {
 	oldLimit := HeavyToolMemLimitBytes
 	oldCriticalRAM := ramCriticalMB
