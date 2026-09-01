@@ -363,6 +363,12 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// account credentials, the scope config, and the ledger.
 	a.registerAuthzMatrixTool(reg)
 
+	// Register the out-of-band blind-vulnerability verifier (verify_oob). It
+	// polls the OAST oracle for a planted token and records blind-execution
+	// proof to the ledger. Agent-bound for ledger access; makes no outbound
+	// request itself, so no scope gate is needed.
+	a.registerOOBVerifyTool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests
