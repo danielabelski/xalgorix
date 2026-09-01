@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — Auto-link reported findings to their ledger hypothesis
+## [v4.6.11](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.11) — Auto-link reported findings to their ledger hypothesis (2026-09-01)
 
 ### Added
 - **`report_vulnerability` accepts an optional `hypothesis_id`.** When the agent reports a finding that proves a ledger hypothesis (its id comes straight from `authz_matrix` / `verify_xss` / `verify_oob` / `record_hypothesis`), the finding is linked to that hypothesis and the hypothesis is marked proven on a successful report — closing the loop the precision finish-gate enforces without a separate `add_hypothesis_evidence` call. The link is deterministic (the agent names the exact id, no fuzzy matching) and best-effort: an empty or unknown id is a silent no-op, so it can never fail a valid report.
