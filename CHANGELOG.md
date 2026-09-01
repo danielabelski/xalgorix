@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — Ingested session drives the authorization matrix
+## [v4.6.13](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.13) — Ingested session drives the authorization matrix (2026-09-01)
 
 ### Changed
 - **An ingested authenticated session now powers `authz_matrix` directly.** When a scan's credentials come from a logged-in HAR (`ingest_har`) rather than a separately configured operator account, `authz_matrix` now adopts that session as role A. Previously the HAR seeded IDOR/BOLA hypotheses but the matrix meant to test them saw only anonymous access and refused to run — so the authenticated surface never got exercised. Role A is the operator account when one is configured (unchanged, deterministic precedence) and otherwise the ingested session, closing the loop from `ingest_har` → session auth → cross-identity access-control testing.
