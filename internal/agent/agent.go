@@ -175,6 +175,15 @@ type Agent struct {
 	// history when a scan is resumed/restarted across server restarts.
 	initialIter    int
 	resumeBriefing string
+
+	// agentGraph is shared by every agent delegated from this root, but owned
+	// by the root scan only. The graph itself is scan-scoped, so concurrent
+	// scans cannot overwrite runners or consume one another's worker slots.
+	agentGraph       *agentsgraph.Graph
+	ownsAgentGraph   bool
+	delegatedAgentID string
+	scanBudget       *scanBudget
+	lastBudgetTokens int
 }
 
 // AgentOption configures optional behavior on a *Agent. The
@@ -197,6 +206,27 @@ func WithLLMClient(c *llm.Client) AgentOption {
 	return func(a *Agent) {
 		if c != nil {
 			a.client = c
+		}
+	}
+}
+
+// withAgentGraph makes a delegated agent join its root scan's graph. It is
+// intentionally package-private: only the root runner should construct graph
+// children, and delegated agents must never stop or replace the shared graph.
+func withAgentGraph(graph *agentsgraph.Graph, budget *scanBudget, agentID string) AgentOption {
+	return func(a *Agent) {
+		a.agentGraph = graph
+		a.scanBudget = budget
+		a.delegatedAgentID = agentID
+	}
+}
+
+// withParentContext makes a delegated agent's LLM and tool loop cancel when
+// its root graph is stopped.
+func withParentContext(parent context.Context) AgentOption {
+	return func(a *Agent) {
+		if parent != nil {
+			a.ctx = parent
 		}
 	}
 }
@@ -271,7 +301,6 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// NOTE: playwright.Register removed — it registered the same "browser_action" name
 	// and overwrote the enhanced rod browser with a weaker curl-based stub.
 	notes.Register(reg)
-	reporting.Register(reg)
 	finish.Register(reg)
 	python.Register(reg)
 	websearch.Register(reg)
@@ -310,6 +339,9 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	for _, opt := range opts {
 		opt(a)
 	}
+	if a.scanBudget == nil {
+		a.scanBudget = newScanBudget()
+	}
 
 	// Register the structural planner tools (build_plan / update_plan). These
 	// mutate a.state.Plan, so they're registered after the agent exists. They
@@ -318,78 +350,110 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// per-iteration nudge + the finish gate all consult the same plan.
 	a.registerPlanTools(reg)
 
+	// Register the durable hypothesis/evidence ledger tools (record_hypothesis,
+	// add_hypothesis_evidence, update_hypothesis, read_ledger). Unlike the plan
+	// (per-agent ScanState), the ledger lives on the shared ScanContext, so the
+	// coordinator and every delegated specialist read/write the same graph and
+	// it persists across restart/resume.
+	a.registerLedgerTools(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests
 	a.client.SetContext(a.ctx)
 
-	agentsgraph.Register(reg, func(subName string, targets []string, task string) (string, error) {
-		subEvents := make(chan Event, 256)
-		// Sub-agents inherit the parent's localGuard rather than re-deriving
-		// it. The listener identity is a per-process invariant — every
-		// agent in the graph consults the same bind:port — so propagating
-		// the parent's Config keeps the Local_Or_Listener_Host rule
-		// uniform across the agent tree (Requirement 3.4).
-		subAgent := NewAgent(cfg, subName, subEvents, a.localGuard, sctx)
-		subAgent.SetPhaseRestrictions(a.allowedPhases)
-		subAgent.SetActivityPolicy(a.reconMode, a.scanIntensity, a.activityHosts)
-		// Propagate per-scan auth/source overrides so the sub-agent's prompt
-		// guidance and secret redaction match the parent (tool access is
-		// already shared via the scan-context-keyed stores).
-		subAgent.SetTargetAuth(a.targetAuth)
-		subAgent.SetTargetAuthSecondary(a.targetAuthB)
-		subAgent.SetSourceRepo(a.sourceRepo)
-		subAgent.SetScanContext(a.scanContext)
-		subAgent.SetCodeScanMode(a.codeScanMode)
-		if a.discoveryMode {
-			subAgent.SetDiscoveryMode(true)
-		}
-		var results strings.Builder
-		done := make(chan struct{})
-		// Sub-agent event-forwarder is a long-lived streaming consumer.
-		// Wrap with safe.Go so a panic during forwarding (e.g. on a
-		// closed parent channel) is logged and counted instead of
-		// taking down the parent agent. The inner `defer close(done)`
-		// runs during fn's unwind even on panic, so the parent's
-		// `<-done` rendezvous still completes.
-		safe.Go("agent.subagent_stream", a.scanCtx.ID, func() {
-			defer close(done)
-			for evt := range subEvents {
-				// Forward partial results to sub-agent state
-				if evt.Type == "tool_result" && evt.ToolResult.Output != "" {
-					partial := fmt.Sprintf("[%s] %s", evt.ToolName, truncStr(evt.ToolResult.Output, 200))
-					results.WriteString(partial)
-					results.WriteByte('\n')
-					agentsgraph.AddPartialResult(subAgent.ID, partial)
-				}
-				if evt.Type == "finished" {
-					results.WriteString("\nCompleted: ")
-					results.WriteString(truncStr(evt.Content, 500))
-					results.WriteString("\n")
-				}
-				// Also forward events to parent for UI visibility
-				if a.events != nil {
-					parentEvt := evt
-					parentEvt.AgentID = subAgent.ID
-					safeSend(a.events, parentEvt, 0)
-				}
+	if a.agentGraph == nil {
+		a.ownsAgentGraph = true
+		a.agentGraph = agentsgraph.New(a.ctx, func(ctx context.Context, agentID, subName string, targets []string, task string) (string, error) {
+			subEvents := make(chan Event, 256)
+			// All descendants join this root's graph and inherit its cancellation
+			// context. Creating a child therefore cannot overwrite another scan's
+			// runner or leave an uncancellable worker behind.
+			subAgent := NewAgent(cfg, subName, subEvents, a.localGuard, sctx,
+				withParentContext(ctx), withAgentGraph(a.agentGraph, a.scanBudget, agentID))
+			subAgent.SetPhaseRestrictions(a.allowedPhases)
+			subAgent.SetActivityPolicy(a.reconMode, a.scanIntensity, a.activityHosts)
+			subAgent.SetTargetAuth(a.targetAuth)
+			subAgent.SetTargetAuthSecondary(a.targetAuthB)
+			subAgent.SetSourceRepo(a.sourceRepo)
+			subAgent.SetScanContext(a.scanContext)
+			subAgent.SetCodeScanMode(a.codeScanMode)
+			if a.discoveryMode {
+				subAgent.SetDiscoveryMode(true)
 			}
-		})
-		subAgent.Run(targets, task)
-		close(subEvents)
-		<-done
-		return results.String(), nil
-	})
 
-	// Install the independent finding verifier for THIS scan context (keyed by
-	// scan-context ID so concurrent scans never cross-wire). Every medium+
-	// candidate finding from this agent (or any sub-agent sharing the context)
-	// is re-tested by a.verifyFinding before being persisted. The verifier
-	// builds its own restricted, read-only registry, so it never recurses
-	// through report_vulnerability.
-	reporting.SetFindingVerifier(sctx.ID, a.verifyFinding)
+			var results strings.Builder
+			var delegatedErr error
+			done := make(chan struct{})
+			safe.Go("agent.subagent_stream", a.scanCtx.ID, func() {
+				defer close(done)
+				for evt := range subEvents {
+					if evt.Type == "tool_result" && evt.ToolResult.Output != "" {
+						partial := fmt.Sprintf("[%s] %s", evt.ToolName, truncStr(evt.ToolResult.Output, 200))
+						results.WriteString(partial)
+						results.WriteByte('\n')
+						a.agentGraph.AddPartialResult(agentID, partial)
+					}
+					if evt.Type == "finished" {
+						results.WriteString("\nCompleted: ")
+						results.WriteString(truncStr(evt.Content, 500))
+						results.WriteString("\n")
+						if evt.Aborted {
+							delegatedErr = fmt.Errorf("delegated agent aborted: %s", valueOr(evt.AbortReason, evt.Content))
+						}
+					}
+					if a.events != nil {
+						parentEvt := evt
+						parentEvt.AgentID = agentID
+						safeSend(a.events, parentEvt, 0)
+					}
+				}
+			})
+			// These defers also run if Agent.Run panics and the graph's panic
+			// boundary recovers it, so the event-forwarder cannot become a zombie.
+			defer subAgent.Stop()
+			streamClosed := false
+			defer func() {
+				if !streamClosed {
+					close(subEvents)
+					<-done
+				}
+			}()
+			subAgent.Run(targets, task)
+			close(subEvents)
+			<-done
+			streamClosed = true
+			return results.String(), delegatedErr
+		})
+	}
+	a.agentGraph.Register(reg)
+
+	// A coordinator cannot silently finish while delegated evidence is still
+	// running or has not been collected. Descendants skip this gate because the
+	// root coordinator is responsible for collecting the whole graph.
+	if a.ownsAgentGraph {
+		a.hooks.Register(OnFinishAttempt, a.delegatedWorkFinishGate)
+	}
+
+	// Bind verification to THIS registry/agent. Parallel hunters can now report
+	// concurrently without borrowing another agent's LLM client or overwriting a
+	// scan-context-global verifier callback.
+	reporting.RegisterWithVerifier(reg, a.verifyFinding)
 
 	return a
+}
+
+func (a *Agent) delegatedWorkFinishGate(_ *ScanState, _ map[string]string) HookResult {
+	if a == nil || a.agentGraph == nil {
+		return HookResult{}
+	}
+	if running := a.agentGraph.RunningCount(); running > 0 {
+		return HookResult{Block: true, BlockReason: fmt.Sprintf("%d delegated agent(s) are still running. Collect their evidence before finishing:\n%s", running, a.agentGraph.PendingSummary())}
+	}
+	if pending := a.agentGraph.UncollectedCount(); pending > 0 {
+		return HookResult{Block: true, BlockReason: fmt.Sprintf("%d delegated result(s) have not been collected. Read them before finishing:\n%s", pending, a.agentGraph.PendingSummary())}
+	}
+	return HookResult{}
 }
 
 // SetDiscoveryMode configures the agent to skip minimum iteration checks on finish.
@@ -712,6 +776,9 @@ func (a *Agent) Run(targets []string, instruction string) {
 		return
 	}
 	a.scanStart = time.Now()
+	if a.scanBudget != nil {
+		a.scanBudget.start()
+	}
 	// Wire per-scan auth + whitebox source here (in the scan goroutine) so a
 	// slow git clone never blocks scan creation or the HTTP handler.
 	a.prepareScanEnvironment()
@@ -763,15 +830,14 @@ func (a *Agent) Run(targets []string, instruction string) {
 
 	// Helper to get current token count
 	tokenCount := func() int {
-		_, _, total := a.client.GetTokens()
-		return total
+		return a.syncBudgetTokens()
 	}
 
 	// Running total of tool calls, for the optional resource budget.
 	toolCallsTotal := 0
 
 	iter := a.initialIter
-	for ; (a.maxIter == 0 || iter < a.maxIter) && !a.stopped.Load() && (a.ctx == nil || a.ctx.Err() == nil); iter++ {
+	for ; (a.scanBudget != nil || a.maxIter == 0 || iter < a.maxIter) && !a.stopped.Load() && (a.ctx == nil || a.ctx.Err() == nil); iter++ {
 		// Reset activity watchdog on each iteration — IMMEDIATELY, no delay
 		a.touchActivity()
 		a.state.Iteration = iter
@@ -782,6 +848,12 @@ func (a *Agent) Run(targets []string, instruction string) {
 		if over, why := a.overBudget(toolCallsTotal); over {
 			a.emit(Event{Type: "message", Content: fmt.Sprintf("⏱️ Resource budget reached (%s) — stopping and finalizing. Findings reported so far are preserved.", why), TotalTokens: tokenCount()})
 			a.emit(Event{Type: "finished", Content: fmt.Sprintf("Scan stopped: resource budget reached (%s).", why), TotalTokens: tokenCount()})
+			return
+		}
+		if a.scanBudget != nil && !a.scanBudget.reserveIteration(a.maxIter) {
+			reason := fmt.Sprintf("%d shared agent iterations ≥ scan cap %d", a.scanBudget.iterationCount(), a.maxIter)
+			a.emit(Event{Type: "message", Content: "⏱️ Resource budget reached (" + reason + ") — stopping and finalizing. Findings reported so far are preserved.", TotalTokens: tokenCount()})
+			a.emit(Event{Type: "finished", Content: "Scan stopped: resource budget reached (" + reason + ").", TotalTokens: tokenCount()})
 			return
 		}
 		if guardMsg := a.maybeCompletePassiveReconGuardAtIterationStart(iter); guardMsg != "" {
@@ -1025,18 +1097,28 @@ func (a *Agent) Run(targets []string, instruction string) {
 		// checked at iteration start, so a single response emitting many calls
 		// could otherwise blow past XALGORIX_MAX_TOOL_CALLS. Truncate the batch
 		// to the remaining allowance so the cap is honored precisely.
-		if a.cfg != nil && a.cfg.MaxToolCalls > 0 {
-			if remaining := a.cfg.MaxToolCalls - toolCallsTotal; remaining < len(toolCalls) {
-				if remaining < 0 {
-					remaining = 0
-				}
-				if len(toolCalls) > remaining {
-					a.emit(Event{Type: "message", Content: fmt.Sprintf("⏱️ Tool-call budget: executing %d of %d requested calls (cap %d reached).", remaining, len(toolCalls), a.cfg.MaxToolCalls), TotalTokens: tokenCount()})
-					toolCalls = toolCalls[:remaining]
-				}
+		requestedCalls := len(toolCalls)
+		allowedCalls := requestedCalls
+		maxToolCalls := 0
+		if a.cfg != nil {
+			maxToolCalls = a.cfg.MaxToolCalls
+		}
+		if a.scanBudget != nil {
+			allowedCalls = a.scanBudget.reserveToolCalls(requestedCalls, maxToolCalls)
+		} else if maxToolCalls > 0 {
+			remaining := maxToolCalls - toolCallsTotal
+			if remaining < 0 {
+				remaining = 0
+			}
+			if allowedCalls > remaining {
+				allowedCalls = remaining
 			}
 		}
-		toolCallsTotal += len(toolCalls)
+		if allowedCalls < requestedCalls {
+			a.emit(Event{Type: "message", Content: fmt.Sprintf("⏱️ Shared tool-call budget: executing %d of %d requested calls (scan cap %d reached).", allowedCalls, requestedCalls, maxToolCalls), TotalTokens: tokenCount()})
+			toolCalls = toolCalls[:allowedCalls]
+		}
+		toolCallsTotal += allowedCalls
 
 		// ── Persist the assistant turn ──
 		// When tool calls were parsed OR recovered, store a CANONICAL rendering
@@ -1309,12 +1391,25 @@ func (a *Agent) Stop() {
 	if a.cancel != nil {
 		a.cancel()
 	}
+	if a.ownsAgentGraph && a.agentGraph != nil {
+		a.agentGraph.Stop()
+	}
 
 	// NOTE: Do NOT call terminal.KillAllProcesses() or browser.CleanupBrowser()
 	// here — those are GLOBAL operations that kill processes across ALL instances.
 	// Per-instance cleanup is handled by sctx.Close() in sess.cleanup().
 	// The handleStop handler calls terminal.KillAllProcesses() directly for
 	// user-initiated "Stop All" operations.
+}
+
+// WaitForDelegatedAgents waits for this root's child runners to observe
+// cancellation and unwind. Cleanup uses a bounded wait before deleting shared
+// scan-context stores, preventing a late child from writing after persistence.
+func (a *Agent) WaitForDelegatedAgents(timeout time.Duration) bool {
+	if !a.ownsAgentGraph || a.agentGraph == nil {
+		return true
+	}
+	return a.agentGraph.WaitStopped(timeout)
 }
 
 // SendMessage injects an operator message into the running scan's
@@ -1651,16 +1746,28 @@ func (a *Agent) overBudget(toolCallsTotal int) (bool, string) {
 	if a.cfg == nil {
 		return false, ""
 	}
-	if a.cfg.MaxDurationSec > 0 && !a.scanStart.IsZero() {
-		if elapsed := time.Since(a.scanStart); elapsed >= time.Duration(a.cfg.MaxDurationSec)*time.Second {
+	if a.cfg.MaxDurationSec > 0 {
+		elapsed := time.Duration(0)
+		started := false
+		if a.scanBudget != nil {
+			elapsed, started = a.scanBudget.elapsed()
+		} else if !a.scanStart.IsZero() {
+			elapsed, started = time.Since(a.scanStart), true
+		}
+		if started && elapsed >= time.Duration(a.cfg.MaxDurationSec)*time.Second {
 			return true, fmt.Sprintf("time %s ≥ cap %ds", elapsed.Round(time.Second), a.cfg.MaxDurationSec)
 		}
 	}
-	if a.cfg.MaxToolCalls > 0 && toolCallsTotal >= a.cfg.MaxToolCalls {
-		return true, fmt.Sprintf("%d tool calls ≥ cap %d", toolCallsTotal, a.cfg.MaxToolCalls)
+	usedToolCalls := toolCallsTotal
+	if a.scanBudget != nil {
+		usedToolCalls = a.scanBudget.toolCallCount()
+	}
+	if a.cfg.MaxToolCalls > 0 && usedToolCalls >= a.cfg.MaxToolCalls {
+		return true, fmt.Sprintf("%d tool calls ≥ cap %d", usedToolCalls, a.cfg.MaxToolCalls)
 	}
 	if a.cfg.MaxTokens > 0 && a.client != nil {
-		if _, _, total := a.client.GetTokens(); total >= a.cfg.MaxTokens {
+		total := a.syncBudgetTokens()
+		if total >= a.cfg.MaxTokens {
 			return true, fmt.Sprintf("%d tokens ≥ cap %d", total, a.cfg.MaxTokens)
 		}
 	}

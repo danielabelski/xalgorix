@@ -40,7 +40,6 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/safe"
 	"github.com/xalgord/xalgorix/v4/internal/sandbox"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
-	"github.com/xalgord/xalgorix/v4/internal/tools/agentsgraph"
 	"github.com/xalgord/xalgorix/v4/internal/tools/browser"
 	"github.com/xalgord/xalgorix/v4/internal/tools/notes"
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
@@ -2902,6 +2901,21 @@ type scanSession struct {
 // cleanup tears down all per-session resources. Every sub-operation
 // has its own panic guard so cleanup NEVER panics upward.
 func (sess *scanSession) cleanup() {
+	// Stop the root and its scan-scoped delegation graph before closing tool
+	// stores or persisting findings. Otherwise a late child can report after
+	// the final merge, or access a terminal/browser context that cleanup has
+	// already destroyed. The wait is bounded so a broken external process can
+	// never stall server cleanup indefinitely.
+	if sess.agent != nil {
+		func() {
+			defer logRecover("cleanup.agent.stop")
+			sess.agent.Stop()
+			if !sess.agent.WaitForDelegatedAgents(5 * time.Second) {
+				log.Printf("[cleanup] delegated agents for session %s did not unwind within 5s", sess.id)
+			}
+		}()
+	}
+
 	// Deactivate and close the per-session ScanContext (if set).
 	// Close() calls Terminal.KillAll() and Browser.Close() internally,
 	// so no redundant calls are needed below.
@@ -2989,34 +3003,6 @@ func (sess *scanSession) cleanup() {
 		func() {
 			defer logRecover("cleanup.terminal.killAll")
 			terminal.KillAllProcesses()
-		}()
-	}
-
-	// Stop agent if still running
-	if sess.agent != nil {
-		func() {
-			defer logRecover("cleanup.agent.stop")
-			sess.agent.Stop()
-		}()
-	}
-
-	// Clear sub-agent state to prevent memory/goroutine leaks across scans.
-	// Only safe when this is the sole running scan — global reset would corrupt
-	// concurrent sessions.
-	sess.server.instancesMu.RLock()
-	runningCount := 0
-	for _, inst := range sess.server.instances {
-		inst.mu.RLock()
-		if inst.Status == "running" {
-			runningCount++
-		}
-		inst.mu.RUnlock()
-	}
-	sess.server.instancesMu.RUnlock()
-	if runningCount <= 1 {
-		func() {
-			defer logRecover("cleanup.agentsgraph.reset")
-			agentsgraph.Reset()
 		}()
 	}
 

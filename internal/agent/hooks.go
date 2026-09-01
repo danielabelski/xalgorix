@@ -182,6 +182,9 @@ type ScanState struct {
 	RedirectDetected     bool
 	DetectedTechs        map[string]bool // e.g. "php", "nodejs", "java"
 	SkillSuggestionFired bool            // prevents hookAutoSkillSuggester from firing more than once
+	DelegationAttempted  bool            // coordinator called spawn_agent/create_agent
+	DelegationNudgeFired bool            // multi-agent role decomposition nudge sent once
+	LedgerSeeded         bool            // hypothesis ledger seeded from the plan once
 }
 
 // NewScanState creates a zero-value ScanState with initialized maps.
@@ -373,10 +376,16 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnToolResult, hookResultRepeatTracker)
 	reg.Register(OnToolResult, hookReportVulnerabilityTracker)
 	reg.Register(OnFinishAttempt, hookFinishGatekeeper)
+	// Registered AFTER the gatekeeper so its coverage BlockReason wins when both
+	// block; this gate only adds the "proven-but-unreported" precision check.
+	reg.Register(OnFinishAttempt, hookLedgerFinishGate)
 	reg.Register(OnEmptyResponse, hookEmptyResponseHandler)
 	reg.Register(OnNoToolResponse, hookNoToolHandler)
+	reg.Register(OnIterationStart, hookDelegationCoordinator)
 	reg.Register(OnIterationStart, hookAutoSkillSuggester)
 	reg.Register(OnIterationStart, hookPlanner)
+	// Registered AFTER the planner so state.Plan exists when we seed the ledger.
+	reg.Register(OnIterationStart, hookLedgerSeed)
 	reg.Register(OnHealthyResponse, hookResetOnSuccess)
 }
 
@@ -417,6 +426,9 @@ func hookReportRetryGuard(state *ScanState, args map[string]string) HookResult {
 func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 	toolName := args["tool_name"]
 	state.UniqueToolsUsed[toolName] = true
+	if toolName == "spawn_agent" || toolName == "create_agent" {
+		state.DelegationAttempted = true
+	}
 
 	if toolName == "terminal_execute" {
 		state.TerminalCalls++
@@ -1832,6 +1844,26 @@ func isRefusal(response string) bool {
 		}
 	}
 	return false
+}
+
+// ── hookDelegationCoordinator ────────────────────────────────────────────────
+// Once the coordinator has enough reconnaissance to divide work intelligently,
+// prompt it to run distinct hypothesis-driven specialists in parallel. This is
+// deliberately a one-time nudge rather than unconditional auto-spawning: small
+// targets and tightly budgeted scans should retain control over provider cost.
+func hookDelegationCoordinator(state *ScanState, args map[string]string) HookResult {
+	if state == nil || state.DiscoveryMode || state.ReconOnlyMode ||
+		state.DelegationAttempted || state.DelegationNudgeFired ||
+		!state.ReconDone || state.Iteration < 5 {
+		return HookResult{}
+	}
+
+	state.DelegationNudgeFired = true
+	// The nudge is built from the deterministic specialist profiles and the
+	// shared ledger's schedulable hypotheses (see ledger_hooks.go), so the
+	// coordinator assigns disjoint, contract-bound work instead of three generic
+	// scans.
+	return HookResult{Nudge: buildDelegationNudge(state)}
 }
 
 // ── hookAutoSkillSuggester ───────────────────────────────────────────────────

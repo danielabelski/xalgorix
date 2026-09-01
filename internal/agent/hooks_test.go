@@ -1222,3 +1222,44 @@ func TestHookReportVulnerabilityTracker_CapsMalformedRecovery(t *testing.T) {
 		t.Fatalf("finish must be allowed after the repair limit, got: %s", res.BlockReason)
 	}
 }
+
+func TestDelegationCoordinatorNudgesOnceAfterRecon(t *testing.T) {
+	state := NewScanState()
+	state.Iteration = 8
+	state.ReconDone = true
+	state.DetectedTechs["nodejs"] = true
+	state.DiscoveredEndpoints = []string{"/api/users", "/graphql"}
+
+	result := hookDelegationCoordinator(state, nil)
+	// The nudge is now ledger-driven and built from the deterministic specialist
+	// profiles, while still carrying the recon context (detected stack + surface).
+	if result.Nudge == "" ||
+		!strings.Contains(result.Nudge, "authz-logic") ||
+		!strings.Contains(result.Nudge, "read_ledger") ||
+		!strings.Contains(result.Nudge, "nodejs") ||
+		!strings.Contains(result.Nudge, "/graphql") {
+		t.Fatalf("unexpected delegation nudge: %q", result.Nudge)
+	}
+	if second := hookDelegationCoordinator(state, nil); second.Nudge != "" {
+		t.Fatalf("delegation nudge repeated: %q", second.Nudge)
+	}
+}
+
+func TestDelegationCoordinatorSkipsDiscoveryAndExistingDelegation(t *testing.T) {
+	state := NewScanState()
+	state.Iteration = 8
+	state.ReconDone = true
+	state.DiscoveryMode = true
+	if result := hookDelegationCoordinator(state, nil); result.Nudge != "" {
+		t.Fatalf("discovery scan received delegation nudge: %q", result.Nudge)
+	}
+
+	state.DiscoveryMode = false
+	hookWorkTracker(state, map[string]string{"tool_name": "spawn_agent"})
+	if !state.DelegationAttempted {
+		t.Fatal("spawn_agent call did not mark delegation attempted")
+	}
+	if result := hookDelegationCoordinator(state, nil); result.Nudge != "" {
+		t.Fatalf("coordinator with an existing delegation was nudged again: %q", result.Nudge)
+	}
+}

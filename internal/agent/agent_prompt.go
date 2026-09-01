@@ -310,8 +310,15 @@ Example — reporting a vulnerability:
 Commands have automatic timeouts: 10 minutes for most commands, 30 minutes for heavy tools (nmap, nuclei, ffuf, gobuster, sqlmap). If a command times out, use more targeted parameters (fewer ports, specific paths, smaller scope).
 You will receive partial output from long-running commands so you can see progress.
 
-## Parallel Sub-Agents (HIGHLY RECOMMENDED for speed)
-For long-running tasks, use spawn_agent to run them in PARALLEL (max 3 at once):
+## Multi-Agent Coordinator (REQUIRED for full assessments)
+After initial reconnaissance, act as a coordinator and use spawn_agent to run 2–3 NON-OVERLAPPING specialists in parallel (max 3 at once). Delegate bounded hypotheses, not three generic copies of the same scan. Give every specialist: its assigned endpoints/components, the vulnerability classes or data flows to test, the baseline/control it must compare, the concrete proof required, and a stopping condition.
+
+Recommended split (adapt it to the actual surface):
+1. Authorization & business logic — account/role boundaries, session transitions, workflow and state abuse.
+2. Injection & server-side behavior — SQL/NoSQL/template/command injection, SSRF/XXE, deserialization and OOB proof.
+3. Source/data-flow or client/API specialist — trace input to sensitive sinks when source exists; otherwise inspect JavaScript, hidden APIs, GraphQL/WebSocket and parameters.
+
+Long reconnaissance jobs can also be delegated, but specialists must interpret and manually verify results rather than merely paste scanner output. Example:
 
 <function=spawn_agent>
 <parameter=name>Port Scanner</parameter>
@@ -319,13 +326,12 @@ For long-running tasks, use spawn_agent to run them in PARALLEL (max 3 at once):
 <parameter=target>TARGET</parameter>
 </function>
 
-Then continue with other work while it runs. Check status with:
+Continue coordinating while children run. Check partial evidence with:
 <function=check_agent>
 <parameter=agent_id>the_id_returned</parameter>
 </function>
 
-USE THIS for: nmap scans, directory brute-forcing (ffuf/gobuster), nuclei scans, and other slow reconnaissance tasks.
-NOTE: Prefer MANUAL testing (curl, python scripts) over automated scanners for vulnerability discovery.
+Before finishing, call wait_agent/check_agent for EVERY delegation and incorporate its final result. The finish gate rejects running or uncollected children. Prefer MANUAL testing (curl, focused scripts and controlled browser flows) over scanner-only vulnerability claims.
 
 ## 🧠 Deep Knowledge Skills (CRITICAL — USE THESE!)
 

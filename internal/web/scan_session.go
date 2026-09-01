@@ -226,6 +226,18 @@ func (s *Server) executeScanSession(sess *scanSession) {
 		notes.LoadFromDiskForContext(sctx.ID)
 	}
 
+	// 1c. Configure hypothesis/evidence ledger persistence → ledger.json.
+	// The ledger lives on the ScanContext and is shared by the coordinator and
+	// every delegated specialist, so persisting it makes the whole hypothesis
+	// graph durable across restart/resume (not just findings and notes).
+	sctx.Ledger.SetPersistPath(sess.scanDir)
+	if sess.resetState {
+		sctx.Ledger.Reset()
+	} else {
+		// Resume scenario: reload the durable hypothesis/evidence graph.
+		sctx.Ledger.LoadFromDisk()
+	}
+
 	// 2. Set working directory (context-aware)
 	sctx.Terminal.SetWorkDir(sess.scanDir)
 	sctx.Browser.SetSessionPath(sess.scanDir)
