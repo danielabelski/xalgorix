@@ -302,6 +302,7 @@ func RegisterWithVerifier(r *tools.Registry, verifier FindingVerifier) {
 			{Name: "fix", Description: "CONCRETE fix — ideally a minimal code/config patch or diff the developer can apply directly (e.g. replace string-concatenated SQL with a parameterized query, add the missing authorization check, HTML-escape the output). Include the file/function when known from source. This is what makes the report actionable.", Required: false},
 			{Name: "cwe_id", Description: "CWE identifier if known, e.g. CWE-79 for XSS, CWE-89 for SQLi, CWE-78 for command injection", Required: false},
 			{Name: "owasp", Description: "OWASP Top 10 (2021) category if known, e.g. A03 for Injection, A01 for Broken Access Control", Required: false},
+			{Name: "hypothesis_id", Description: "Optional ledger hypothesis id this finding proves (e.g. H-3 from record_hypothesis / authz_matrix / verify_xss / verify_oob). On success the finding is linked to that hypothesis and it is marked proven — this satisfies the finish gate without a separate add_hypothesis_evidence call.", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
 			return reportVulnForRegistryWithVerifier(r, verifier, args)
@@ -664,7 +665,16 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// MergeVulnsToContext at session finalization does not lose it.
 	promoteIfChildOfWildcard(contextID, vuln.ID)
 
+	// Close the evidence loop: if the agent named the ledger hypothesis this
+	// finding proves, link the finding to it and mark it proven, so the
+	// precision finish-gate sees the proven work as reported without requiring
+	// a separate add_hypothesis_evidence call. Best-effort; never blocks report.
+	ledgerNote := linkFindingToLedger(contextID, vuln.ID, strings.TrimSpace(args["hypothesis_id"]))
+
 	msg := fmt.Sprintf("✅ Vulnerability reported: [%s] %s (%s | CVSS %.1f) — Verified: %v", vuln.ID, vuln.Title, strings.ToUpper(vuln.Severity), vuln.CVSS, vuln.Verified)
+	if ledgerNote != "" {
+		msg += "\n" + ledgerNote
+	}
 	if verifierConfirmed {
 		msg += "\n✅ Independently CONFIRMED by the verifier."
 	} else if exploitProven {
@@ -684,6 +694,32 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		Output:   msg,
 		Metadata: map[string]any{"vuln_id": vuln.ID, "verified": vuln.Verified},
 	}, nil
+}
+
+// linkFindingToLedger links a persisted finding to the ledger hypothesis it
+// proves (when the agent supplied its id) and marks that hypothesis proven.
+// This closes the loop the precision finish-gate enforces. It is deterministic
+// (the agent names the exact hypothesis id — no fuzzy matching) and best-effort:
+// an empty or unknown id is a silent no-op so it can never fail a valid report.
+func linkFindingToLedger(contextID, findingID, hypID string) string {
+	hypID = strings.TrimSpace(hypID)
+	if hypID == "" || contextID == "" {
+		return ""
+	}
+	sc := scanctx.Get(contextID)
+	if sc == nil || sc.Ledger == nil {
+		return ""
+	}
+	if _, ok := sc.Ledger.Get(hypID); !ok {
+		return "" // unknown id (mistyped/foreign) — do not fabricate a link
+	}
+	sc.Ledger.AddEvidence(hypID, scanctx.Evidence{
+		Kind:      scanctx.EvidenceFindingRef,
+		FindingID: findingID,
+		Summary:   "Reported as finding " + findingID,
+	})
+	sc.Ledger.SetStatus(hypID, scanctx.HypothesisProven, "Reported as "+findingID)
+	return fmt.Sprintf("🔗 Linked to ledger hypothesis %s (marked proven).", hypID)
 }
 
 func duplicateResult(existing Vulnerability, msg string) tools.Result {
