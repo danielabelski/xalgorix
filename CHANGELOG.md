@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] — Uploaded context seeds the hypothesis ledger
+
+### Changed
+- **Uploaded scan-context artifacts now seed the hypothesis ledger, not just a briefing.** When a scan starts with an OpenAPI/Swagger spec, HAR, Postman collection, or Burp export, Xalgorix already parsed it into a normalized endpoint surface and registered any captured session — but the endpoints only appeared as a passive text briefing. They now also become bounded, role-scoped authorization hypotheses (the prime IDOR/BOLA surface) in the shared ledger, so the operator-supplied surface directly drives `authz_matrix` and the evidence-driven specialists instead of relying on the model to re-derive targets from prose. Role is `authenticated` when the artifact carried a live session, otherwise `anonymous`. Seeding is deduplicated (by class/endpoint/parameter/role) and bounded, so it never floods the scheduler or double-counts across sub-agents. This mirrors what `ingest_har` does mid-scan, now applied to every context upload at scan start.
+
 ## [v4.6.13](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.13) — Ingested session drives the authorization matrix (2026-09-01)
 
 ### Changed
