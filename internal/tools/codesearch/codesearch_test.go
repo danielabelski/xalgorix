@@ -282,3 +282,96 @@ func TestSinkScanBoundsPerClass(t *testing.T) {
 		t.Fatalf("maxPerClass=2 must bound rce matches, got %d", n)
 	}
 }
+
+func TestRoutePatternsAreValidRE2(t *testing.T) {
+	// Every framework route pattern must compile under Go's RE2 engine (it is
+	// recompiled in searchRouteMatches to extract method/path groups) and stay
+	// grep-ERE-safe so the grep fallback works when ripgrep is absent.
+	for _, rp := range routePatterns {
+		if _, err := regexp.Compile(rp.re); err != nil {
+			t.Errorf("route pattern %q does not compile: %v", rp.framework, err)
+		}
+	}
+}
+
+func TestRouteScanNoSource(t *testing.T) {
+	if _, err := RouteScan("ctx-routescan-missing", 60); err == nil {
+		t.Fatal("RouteScan must error when no source root is configured")
+	}
+}
+
+func TestRouteScanFindsRoutes(t *testing.T) {
+	const ctx = "ctx-routescan"
+	dir := t.TempDir()
+	// Flask: a generic @app.route (method ANY) and a @app.get method decorator.
+	flask := "from flask import Flask\napp = Flask(__name__)\n\n" +
+		"@app.route('/admin')\ndef admin():\n    return 'ok'\n\n" +
+		"@app.get('/users')\ndef users():\n    return 'ok'\n"
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte(flask), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Express: app.post method call (no decorator).
+	express := "const app = require('express')()\n" +
+		"app.post('/login', (req, res) => res.send('ok'))\n"
+	if err := os.WriteFile(filepath.Join(dir, "server.js"), []byte(express), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	SetSourceRoot(ctx, dir)
+	defer SetSourceRoot(ctx, "")
+
+	routes, err := RouteScan(ctx, 60)
+	if err != nil {
+		t.Fatalf("RouteScan: %v", err)
+	}
+	byPath := map[string]RouteMatch{}
+	for _, r := range routes {
+		byPath[r.Path] = r
+		if r.File == "" || filepath.IsAbs(r.File) {
+			t.Fatalf("RouteMatch.File must be source-root-relative, got %q", r.File)
+		}
+		if r.Line <= 0 {
+			t.Fatalf("RouteMatch.Line must be 1-based, got %d for %s", r.Line, r.Path)
+		}
+	}
+	admin, ok := byPath["/admin"]
+	if !ok {
+		t.Fatalf("expected /admin route, got %+v", routes)
+	}
+	if admin.File != "app.py" {
+		t.Fatalf("/admin should be in app.py, got %q", admin.File)
+	}
+	if users, ok := byPath["/users"]; !ok || users.Method != "GET" {
+		t.Fatalf("expected GET /users, got %+v (all: %+v)", users, routes)
+	}
+	login, ok := byPath["/login"]
+	if !ok || login.Method != "POST" {
+		t.Fatalf("expected POST /login, got %+v (all: %+v)", login, routes)
+	}
+	if login.File != "server.js" {
+		t.Fatalf("/login should be in server.js, got %q", login.File)
+	}
+}
+
+func TestRouteScanBounded(t *testing.T) {
+	const ctx = "ctx-routescan-bound"
+	dir := t.TempDir()
+	src := "from flask import Flask\napp = Flask(__name__)\n" +
+		"@app.get('/a')\ndef a():\n    return 1\n" +
+		"@app.get('/b')\ndef b():\n    return 1\n" +
+		"@app.get('/c')\ndef c():\n    return 1\n" +
+		"@app.get('/d')\ndef d():\n    return 1\n" +
+		"@app.get('/e')\ndef e():\n    return 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "many.py"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	SetSourceRoot(ctx, dir)
+	defer SetSourceRoot(ctx, "")
+
+	routes, err := RouteScan(ctx, 2)
+	if err != nil {
+		t.Fatalf("RouteScan: %v", err)
+	}
+	if len(routes) > 2 {
+		t.Fatalf("max=2 must bound routes, got %d", len(routes))
+	}
+}

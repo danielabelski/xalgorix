@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -312,6 +313,185 @@ func boundText(s string, max int) string {
 		return s[:max] + "…"
 	}
 	return s
+}
+
+// RouteMatch is one HTTP route declaration located in the target's source: the
+// method (uppercased, or "ANY" when the framework doesn't name it inline), the
+// declared path, the source-root-relative file, its 1-based line, and the
+// framework family that matched. It is the structured unit the agent turns into
+// a reachable-endpoint hypothesis and correlates with co-located sinks.
+type RouteMatch struct {
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+	File      string `json:"file"`
+	Line      int    `json:"line"`
+	Framework string `json:"framework"`
+}
+
+// routePattern is a framework-specific route-declaration matcher. Its regex is
+// deliberately kept ERE-safe (plain capturing groups, no (?:...) or (?i)) and
+// RE2-valid so it works with both ripgrep and the grep -E fallback and can be
+// recompiled in Go to pull the method/path capture groups. methodGroup is 0
+// when the framework does not name the method inline (Flask @route, Django
+// path()), in which case the method is reported as "ANY".
+type routePattern struct {
+	framework   string
+	re          string
+	methodGroup int
+	pathGroup   int
+}
+
+// routePatterns covers the common web frameworks. Each regex captures the
+// declared path (and the method when it is named inline) so RouteScan can hand
+// back a concrete METHOD + path an operator can request against the live
+// target. These are DISCOVERY aids — the agent still confirms the route is live
+// and reachable.
+var routePatterns = []routePattern{
+	// Flask/FastAPI/Starlette method decorators: @app.get("/x"), @router.post('/y')
+	{"flask/fastapi", `@[A-Za-z_][A-Za-z0-9_]*\.(get|post|put|patch|delete|options|head)\(['"]([^'"]+)`, 1, 2},
+	// Flask/Blueprint generic route: @app.route("/x"), @bp.route('/y')
+	{"flask", `@[A-Za-z_][A-Za-z0-9_]*\.route\(['"]([^'"]+)`, 0, 1},
+	// Express/Koa/Fastify: app.get("/x"), router.post('/y')
+	{"express", `\b[A-Za-z_][A-Za-z0-9_]*\.(get|post|put|patch|delete|all)\(['"]([^'"]+)`, 1, 2},
+	// Django urls: path("x/", ...), re_path(r'^x$', ...), url(r'^x', ...)
+	{"django", `\b(path|re_path|url)\(\s*r?['"]([^'"]+)`, 0, 2},
+	// Spring: @GetMapping("/x"), @RequestMapping(value="/y")
+	{"spring", `@(Get|Post|Put|Patch|Delete|Request)Mapping\(\s*(value\s*=\s*)?['"]([^'"]+)`, 1, 3},
+	// Go routers (gin/echo/chi/mux/net-http): r.GET("/x"), e.POST('/y'), mux.HandleFunc("/z")
+	{"go-router", `\b[A-Za-z_][A-Za-z0-9_]*\.(GET|POST|PUT|PATCH|DELETE|Handle|HandleFunc)\(['"]([^'"]+)`, 1, 2},
+	// Rails routes.rb: get "x", post 'y'
+	{"rails", `\b(get|post|put|patch|delete)\s+['"]([^'"]+)`, 1, 2},
+}
+
+// RouteScan runs every framework route-declaration pattern over the scan's
+// resolved source root and returns the discovered routes, deduplicated by
+// method+path+file:line and bounded to max total (default 60, hard cap 300). It
+// errors only when no whitebox source is configured for the scan.
+//
+// Like SinkScan this is the programmatic sibling of code_search: it hands the
+// agent the target's HTTP attack surface straight from the code — including
+// internal/admin routes a black-box crawler can't reach — so each route becomes
+// a reachable endpoint to test and a correlation anchor for co-located sinks.
+func RouteScan(contextID string, max int) ([]RouteMatch, error) {
+	root := getSourceRoot(contextID)
+	if root == "" {
+		return nil, fmt.Errorf("whitebox source not configured for scan %q", contextID)
+	}
+	if max <= 0 {
+		max = 60
+	}
+	if max > 300 {
+		max = 300
+	}
+	var out []RouteMatch
+	seen := make(map[string]bool)
+	for _, rp := range routePatterns {
+		if len(out) >= max {
+			break
+		}
+		ms, err := searchRouteMatches(root, rp, max)
+		if err != nil {
+			continue // this framework's search timed out; keep sweeping.
+		}
+		for _, m := range ms {
+			key := m.Method + " " + m.Path + " " + m.File + ":" + strconv.Itoa(m.Line)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, m)
+			if len(out) >= max {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// searchRouteMatches runs one framework's route regex over dir and returns the
+// structured route declarations it finds, preferring ripgrep and falling back
+// to grep -RnE. It reuses parseGrepLine to get file:line:text, then recompiles
+// the pattern in Go to pull the method/path capture groups out of the matched
+// line. Only a timeout is treated as an error (rg/grep exit 1 == no matches).
+func searchRouteMatches(dir string, rp routePattern, max int) ([]RouteMatch, error) {
+	if max <= 0 {
+		max = 60
+	}
+	re, err := regexp.Compile(rp.re)
+	if err != nil {
+		return nil, err
+	}
+	var cmd *exec.Cmd
+	if rg, err := exec.LookPath("rg"); err == nil {
+		cmd = exec.Command(rg, "--no-heading", "--line-number", "--color", "never", "-S",
+			"--max-count", strconv.Itoa(max), "-e", rp.re, dir)
+	} else {
+		cmd = exec.Command("grep", "-RnE", "--color=never", rp.re, dir)
+	}
+
+	done := make(chan struct{})
+	var out []byte
+	go func() {
+		out, _ = cmd.CombinedOutput() // exit 1 == no matches; tolerated
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return nil, fmt.Errorf("route search timed out")
+	}
+
+	matches := make([]RouteMatch, 0, max)
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		loc, ok := parseGrepLine(dir, line)
+		if !ok {
+			continue
+		}
+		groups := re.FindStringSubmatch(loc.Text)
+		if groups == nil {
+			continue
+		}
+		path := ""
+		if rp.pathGroup < len(groups) {
+			path = strings.TrimSpace(groups[rp.pathGroup])
+		}
+		if path == "" {
+			continue
+		}
+		method := "ANY"
+		if rp.methodGroup > 0 && rp.methodGroup < len(groups) {
+			method = normalizeMethod(groups[rp.methodGroup])
+		}
+		matches = append(matches, RouteMatch{
+			Method:    method,
+			Path:      path,
+			File:      loc.File,
+			Line:      loc.Line,
+			Framework: rp.framework,
+		})
+		if len(matches) >= max {
+			break
+		}
+	}
+	return matches, nil
+}
+
+// normalizeMethod uppercases a captured HTTP method verb; framework tokens that
+// don't denote a single method (Flask route, Express "all", Spring
+// RequestMapping, Go Handle/HandleFunc) collapse to "ANY".
+func normalizeMethod(raw string) string {
+	switch m := strings.ToUpper(strings.TrimSpace(raw)); m {
+	case "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD":
+		return m
+	default:
+		return "ANY"
+	}
 }
 
 func parseIntSafe(s string) (int, error) {

@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **`scan_source_routes` completes the source-to-runtime bridge: it gives source-discovered sinks a reachable HTTP path.** `scan_source_sinks` (v4.6.23) finds the dangerous code (a sink at `file:line`), but a `file:line` is not something the runtime tools can request. The new tool extracts HTTP route declarations from the attached source across the common frameworks (Flask/FastAPI, Django, Express, Spring, Go routers, Rails) and seeds each into the shared ledger as a hypothesis with a **real, reachable path** — including internal/admin routes a black-box crawler never reaches. It then correlates routes with sinks by handler-file co-location: a route whose file also contains a dangerous sink is seeded **class-typed** (by the worst sink class present) at higher confidence with a data-flow note linking the two, turning "there is an rce sink somewhere" into "`POST /admin/exec` reaches it — attack it." Uncorrelated routes seed as authz/attack-surface (`idor`) leads. Seeding is bounded (max 40 per sweep) and idempotent (dedup by vuln class + path), and the tool degrades to a black-box fallback when no source is configured. Specialists `claim_next_hypothesis` and request the route on the live target to prove the vuln.
+
 ## [v4.6.23](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.23) — Bridge whitebox source to runtime (scan_source_sinks) (2026-09-02)
 
 ### Added

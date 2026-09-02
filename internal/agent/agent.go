@@ -380,6 +380,13 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// evidence-driven loop can trace it to a reachable route and exploit it.
 	a.registerScanSourceSinksTool(reg)
 
+	// Register the second half of the bridge (scan_source_routes): extracts HTTP
+	// route declarations from the attached source and seeds each as a hypothesis
+	// with a REAL reachable path (Origin=source-route), correlating a route with
+	// dangerous sinks in the same handler file so the sink gets an attackable
+	// endpoint.
+	a.registerScanSourceRoutesTool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests
