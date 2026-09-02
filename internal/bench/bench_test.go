@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
@@ -98,26 +99,21 @@ func TestClassifyFinding(t *testing.T) {
 }
 
 func TestSolved(t *testing.T) {
-	// Match on class + exact endpoint.
-	f := []reporting.Vulnerability{{ID: "XALG-1", Title: "Reflected XSS", Endpoint: "https://h/search?q=x"}}
-	if ok, id := Solved("xss", "/search", f); !ok || id != "XALG-1" {
-		t.Fatalf("expected xss on /search to solve, got ok=%v id=%q", ok, id)
+	// Right class → solved (endpoint/path is not part of the criterion).
+	f := []reporting.Vulnerability{{ID: "XALG-1", Title: "Reflected XSS", Endpoint: "https://h/?q=x"}}
+	if ok, id := Solved("xss", f); !ok || id != "XALG-1" {
+		t.Fatalf("expected an xss finding to solve, got ok=%v id=%q", ok, id)
 	}
-	// IDOR reported on an object-id path matches the parent challenge endpoint.
-	f = []reporting.Vulnerability{{ID: "XALG-2", Title: "IDOR", Description: "insecure direct object", Endpoint: "/api/orders/1042"}}
-	if ok, _ := Solved("idor", "/api/orders", f); !ok {
-		t.Fatal("expected idor on /api/orders/1042 to match challenge endpoint /api/orders")
+	// Canonicalization: a BOLA finding solves the idor challenge.
+	if ok, _ := Solved("idor", []reporting.Vulnerability{{ID: "XALG-2", Title: "BOLA", Description: "broken object level authorization"}}); !ok {
+		t.Fatal("expected a BOLA finding to solve the idor challenge")
 	}
-	// Right class, wrong endpoint → not solved.
-	if ok, _ := Solved("xss", "/search", []reporting.Vulnerability{{Title: "Reflected XSS", Endpoint: "/other"}}); ok {
-		t.Fatal("xss on /other must not solve /search")
-	}
-	// Right endpoint, wrong class → not solved.
-	if ok, _ := Solved("xss", "/search", []reporting.Vulnerability{{Title: "SQL injection", Endpoint: "/search"}}); ok {
-		t.Fatal("sqli on /search must not solve an xss challenge")
+	// Wrong class → not solved.
+	if ok, _ := Solved("xss", []reporting.Vulnerability{{Title: "SQL injection in id"}}); ok {
+		t.Fatal("a sqli finding must not solve an xss challenge")
 	}
 	// No findings → not solved.
-	if ok, _ := Solved("xss", "/search", nil); ok {
+	if ok, _ := Solved("xss", nil); ok {
 		t.Fatal("no findings must not solve")
 	}
 }
@@ -182,5 +178,24 @@ func TestNewBuiltinChallengesExhibitVuln(t *testing.T) {
 	defer cmdi.Close()
 	if body := httpGet(t, cmdi.URL+"/ping?host=127.0.0.1%3Bid"); !strings.Contains(body, "uid=0(root)") {
 		t.Fatalf("cmdi did not execute the injected command: %q", body)
+	}
+}
+
+func TestRunWithTimeoutMarksTimedOut(t *testing.T) {
+	// A scan that blocks past the per-challenge deadline is stopped and marked
+	// timed out (and, with no findings, not solved).
+	blocking := func(ctx context.Context, _, _ string) ([]reporting.Vulnerability, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	card := RunWithTimeout(context.Background(), []Challenge{Builtin()[0]}, blocking, 50*time.Millisecond)
+	if len(card.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(card.Results))
+	}
+	if !card.Results[0].TimedOut {
+		t.Fatalf("expected the challenge to be marked timed out, got %+v", card.Results[0])
+	}
+	if card.Results[0].Solved {
+		t.Fatal("a timed-out scan with no findings must not be solved")
 	}
 }
