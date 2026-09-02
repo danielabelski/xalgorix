@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **A whitebox benchmark challenge that measures the source-to-runtime bridge end-to-end.** The benchmark harness could only measure black-box detection; the whitebox capability shipped over the last four releases (`scan_source_sinks`, `scan_source_routes`, `probe_hypothesis`, and auto-seeding at scan start) had no benchmark to prove it works. A `Challenge` can now carry a `SourceFiles` source tree, which the harness materializes to a temp directory and hands to the scan as the target's source repo (the real runner wires it via `SetSourceRepo`). The new `whitebox-cmdi` challenge is a small app whose command-injectable route is **not linked from any page** — black-box crawling cannot reach it, so solving it (class RCE) genuinely requires the bridge: scan the source, discover the route and the `os.popen` sink in the same file, probe it live, then exploit it. This is operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.26](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.26) — Auto-seed the ledger from whitebox source at scan start (2026-09-02)
 
 ### Changed

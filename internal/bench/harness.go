@@ -2,17 +2,21 @@ package bench
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
 
 // ScanFunc runs a full scan against target (the base URL of a challenge app)
-// under the given scan id, and returns the findings it produced. It is injected
+// under the given scan id, and returns the findings it produced. sourceDir is
+// the challenge's materialized whitebox source tree (the scan wires it as the
+// target's source repo), or "" for a pure black-box challenge. It is injected
 // so the harness stays free of the heavy, non-hermetic agent machinery: the
 // real implementation (cmd/xalgorix-bench) drives the LLM agent and makes live
 // calls, while tests pass a deterministic fake.
-type ScanFunc func(ctx context.Context, target, scanID string) ([]reporting.Vulnerability, error)
+type ScanFunc func(ctx context.Context, target, sourceDir, scanID string) ([]reporting.Vulnerability, error)
 
 // DefaultChallengeTimeout bounds how long a single challenge scan may run. A
 // scan against a trivial challenge app should finish quickly; without a bound a
@@ -44,6 +48,16 @@ func runOne(parent context.Context, c Challenge, scan ScanFunc, timeout time.Dur
 	srv := c.Start()
 	defer srv.Close()
 
+	// Materialize the whitebox source tree (if any) to a temp dir the scan can
+	// point its source repo at, and clean it up afterward.
+	sourceDir := ""
+	if len(c.SourceFiles) > 0 {
+		if dir, err := writeSourceFiles(c.SourceFiles); err == nil {
+			sourceDir = dir
+			defer func() { _ = os.RemoveAll(dir) }()
+		}
+	}
+
 	ctx := parent
 	if timeout > 0 {
 		var cancel context.CancelFunc
@@ -53,7 +67,7 @@ func runOne(parent context.Context, c Challenge, scan ScanFunc, timeout time.Dur
 
 	res := Result{Name: c.Name, Class: canonicalClass(c.Class)}
 	start := time.Now()
-	findings, err := scan(ctx, srv.URL, "bench-"+c.Name)
+	findings, err := scan(ctx, srv.URL, sourceDir, "bench-"+c.Name)
 	res.Elapsed = time.Since(start)
 	res.Findings = len(findings)
 	if ctx.Err() == context.DeadlineExceeded {
@@ -66,4 +80,25 @@ func runOne(parent context.Context, c Challenge, scan ScanFunc, timeout time.Dur
 	// have reported the vulnerability before the deadline.
 	res.Solved, res.MatchedFindingID = Solved(c.Class, findings)
 	return res
+}
+
+// writeSourceFiles materializes a challenge's whitebox source tree (relative
+// path → content) into a fresh temp directory, creating parent directories as
+// needed, and returns its path. The caller owns the directory and should remove
+// it when done.
+func writeSourceFiles(files map[string]string) (string, error) {
+	dir, err := os.MkdirTemp("", "xalgorix-bench-src-")
+	if err != nil {
+		return "", err
+	}
+	for rel, content := range files {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			return dir, err
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			return dir, err
+		}
+	}
+	return dir, nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -121,7 +123,7 @@ func TestSolved(t *testing.T) {
 func TestRunWithFakeScanFunc(t *testing.T) {
 	// Fake solves xss and idor, leaves open-redirect and error-sqli unsolved,
 	// and errors on nothing.
-	fake := func(_ context.Context, target, scanID string) ([]reporting.Vulnerability, error) {
+	fake := func(_ context.Context, target, _, scanID string) ([]reporting.Vulnerability, error) {
 		switch scanID {
 		case "bench-reflected-xss":
 			return []reporting.Vulnerability{{ID: "XALG-1", Title: "Reflected XSS in search", Endpoint: target + "/search"}}, nil
@@ -143,11 +145,15 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 	if byClass["xss"] != [2]int{1, 1} || byClass["idor"] != [2]int{1, 1} {
 		t.Fatalf("expected xss 1/1 and idor 1/1, got %v", byClass)
 	}
-	// Every other class is present but unsolved by this fake.
-	for _, c := range []string{"open_redirect", "sqli", "ssrf", "ssti", "lfi", "rce"} {
+	// Every other single-challenge class is present but unsolved by this fake.
+	for _, c := range []string{"open_redirect", "sqli", "ssrf", "ssti", "lfi"} {
 		if byClass[c] != [2]int{0, 1} {
 			t.Fatalf("expected %s 0/1, got %v", c, byClass[c])
 		}
+	}
+	// rce now has two challenges (cmdi + whitebox-cmdi), both unsolved here.
+	if byClass["rce"] != [2]int{0, 2} {
+		t.Fatalf("expected rce 0/2, got %v", byClass["rce"])
 	}
 }
 
@@ -184,7 +190,7 @@ func TestNewBuiltinChallengesExhibitVuln(t *testing.T) {
 func TestRunWithTimeoutMarksTimedOut(t *testing.T) {
 	// A scan that blocks past the per-challenge deadline is stopped and marked
 	// timed out (and, with no findings, not solved).
-	blocking := func(ctx context.Context, _, _ string) ([]reporting.Vulnerability, error) {
+	blocking := func(ctx context.Context, _, _, _ string) ([]reporting.Vulnerability, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -197,5 +203,64 @@ func TestRunWithTimeoutMarksTimedOut(t *testing.T) {
 	}
 	if card.Results[0].Solved {
 		t.Fatal("a timed-out scan with no findings must not be solved")
+	}
+}
+
+func TestWhiteboxChallengeExhibitsVuln(t *testing.T) {
+	wb := challengeByName(t, "whitebox-cmdi")
+
+	// The whitebox source carries the sink and the (unlinked) vulnerable route
+	// in the same file, so the source→route↔sink bridge can find it.
+	src, ok := wb.SourceFiles["app.py"]
+	if !ok {
+		t.Fatal("whitebox-cmdi must ship app.py source")
+	}
+	if !strings.Contains(src, "os.popen") || !strings.Contains(src, "/internal/run-check") {
+		t.Fatalf("app.py must contain the os.popen sink and the /internal/run-check route:\n%s", src)
+	}
+
+	srv := wb.Start()
+	defer srv.Close()
+
+	// The vulnerable route executes injected commands (shell metacharacter).
+	if body := httpGet(t, srv.URL+"/internal/run-check?host=127.0.0.1%3Bid"); !strings.Contains(body, "uid=0(root)") {
+		t.Fatalf("whitebox route did not execute the injected command: %q", body)
+	}
+	// A benign host does not.
+	if body := httpGet(t, srv.URL+"/internal/run-check?host=127.0.0.1"); strings.Contains(body, "uid=0(root)") {
+		t.Fatalf("benign host must not yield command output: %q", body)
+	}
+	// Health endpoint is benign.
+	if body := httpGet(t, srv.URL+"/healthz"); !strings.Contains(body, "ok") {
+		t.Fatalf("healthz should return ok, got %q", body)
+	}
+	// The index must NOT link the vulnerable route — black-box crawling can't
+	// reach it, so the win genuinely requires whitebox source discovery.
+	if body := httpGet(t, srv.URL+"/"); strings.Contains(body, "/internal/run-check") {
+		t.Fatalf("index must not link the vulnerable route (whitebox-only), got %q", body)
+	}
+}
+
+func TestHarnessMaterializesSourceFiles(t *testing.T) {
+	// Capture the sourceDir handed to each challenge's scan.
+	seen := map[string]string{}
+	fake := func(_ context.Context, _, sourceDir, scanID string) ([]reporting.Vulnerability, error) {
+		seen[scanID] = sourceDir
+		// While the scan runs, a whitebox challenge's source must exist on disk.
+		if sourceDir != "" {
+			if _, err := os.Stat(filepath.Join(sourceDir, "app.py")); err != nil {
+				t.Errorf("expected app.py in materialized source dir %q: %v", sourceDir, err)
+			}
+		}
+		return nil, nil
+	}
+
+	Run(context.Background(), Builtin(), fake)
+
+	if seen["bench-whitebox-cmdi"] == "" {
+		t.Fatal("whitebox-cmdi must receive a non-empty, materialized source dir")
+	}
+	if seen["bench-reflected-xss"] != "" {
+		t.Fatalf("a black-box challenge must receive an empty source dir, got %q", seen["bench-reflected-xss"])
 	}
 }

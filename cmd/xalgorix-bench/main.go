@@ -71,7 +71,7 @@ func filterChallenges(all []bench.Challenge, csv string) []bench.Challenge {
 // and returns the findings it produced. Mirrors the production scan wiring
 // (internal/web/scan_session.go) minus the dashboard plumbing.
 func realScan(instruction string) bench.ScanFunc {
-	return func(ctx context.Context, target, scanID string) ([]reporting.Vulnerability, error) {
+	return func(ctx context.Context, target, sourceDir, scanID string) ([]reporting.Vulnerability, error) {
 		cfg := config.Get()
 
 		scanDir := filepath.Join(os.TempDir(), "xalgorix-bench", scanID)
@@ -100,6 +100,13 @@ func realScan(instruction string) bench.ScanFunc {
 		ag := agent.NewAgent(cfg, "XalgorixBench", events, guard, sc)
 		ag.SetPhaseRestrictions(nil)
 		ag.SetActivityPolicy("active", "active", []string{target})
+		// Whitebox challenge: wire the materialized source tree so the scan can
+		// use the source-to-runtime bridge (auto-seed + scan_source_sinks/routes
+		// + probe_hypothesis), mirroring production's per-scan source repo.
+		if sourceDir != "" {
+			ag.SetSourceRepo(sourceDir)
+			fmt.Fprintf(os.Stderr, "  [bench] %s → source %s\n", scanID, sourceDir)
+		}
 
 		fmt.Fprintf(os.Stderr, "  [bench] %s → %s\n", scanID, target)
 		// Run the (blocking) scan in a goroutine so the harness's per-challenge
