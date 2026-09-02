@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] — Precision: dedup object-ID variants before verification
+
+### Changed
+- **Findings that are the same bug across different object IDs are now recognized as one.** Duplicate detection compared endpoints literally, so `/orders/1042`, `/orders/2087`, and `/orders/<uuid>` looked like three distinct findings — each one paying for a full independent verification pass and landing as a separate report. Deduplication now templates opaque per-object id segments (pure numbers, UUIDs, long hex/ObjectIds) to a placeholder when comparing endpoints, so object-id variants of the same endpoint collapse into a single finding. The templating is conservative (version segments like `v1`/`v2` and named paths are never collapsed) and applies only to the duplicate-comparison key — the stored and reported endpoint keeps the real id so the PoC stays reproducible. Because every dedup path (report gates and child→parent merge) shares this logic, it also cuts redundant, expensive verifier runs — precision over volume.
+
 ## [v4.6.15](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.15) — Two-account IDOR/BOLA from a second ingested session (2026-09-01)
 
 ### Added

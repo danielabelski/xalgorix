@@ -1901,3 +1901,84 @@ func TestReportVuln_OptionalParamsHandledByGates(t *testing.T) {
 		}
 	})
 }
+
+func TestTemplatePathParams(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"/orders/1042", "/orders/{id}"},
+		{"/users/9f3e1c2a-1111-2222-3333-444455556666", "/users/{id}"}, // UUID
+		{"/o/deadbeefdeadbeef12345678", "/o/{id}"},                     // 24-hex ObjectId
+		{"/api/v1/users", "/api/v1/users"},                             // version segment preserved
+		{"/api/v2/orders/55", "/api/v2/orders/{id}"},                   // only the id templated
+		{"/orders/1042/items/9", "/orders/{id}/items/{id}"},            // multiple ids
+		{"/users/abc", "/users/abc"},                                   // short named slug preserved
+		{"/files/0a1b2c3d", "/files/0a1b2c3d"},                         // short hex (<16) preserved
+		{"/search", "/search"},                                         // no id
+		{"", ""},                                                       // empty
+	}
+	for _, c := range cases {
+		if got := templatePathParams(c.in); got != c.want {
+			t.Errorf("templatePathParams(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestDedupEndpointKey_NormalizesThenTemplates(t *testing.T) {
+	// Uppercase + query + fragment + trailing slash, then id templating.
+	got := dedupEndpointKey("https://App.example.com/Orders/1042/Items/9?x=1#frag")
+	want := "https://app.example.com/orders/{id}/items/{id}"
+	if got != want {
+		t.Fatalf("dedupEndpointKey = %q, want %q", got, want)
+	}
+}
+
+func TestFindDuplicateVulnerability_IDVariantsDedup(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "IDOR on order", Description: "idor",
+		Target: "https://app.example.com", Endpoint: "/api/orders/1042",
+	}}
+	// Same class + same target, different object id in the path.
+	dup, _, isDup := findDuplicateVulnerability(existing, "IDOR on order 2087", "idor",
+		"https://app.example.com", "/api/orders/2087")
+	if !isDup {
+		t.Fatal("expected /api/orders/2087 to dedup against /api/orders/1042 (same IDOR endpoint)")
+	}
+	if dup.ID != "XALG-1" {
+		t.Fatalf("expected duplicate of XALG-1, got %q", dup.ID)
+	}
+}
+
+func TestFindDuplicateVulnerability_VersionNotMerged(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "IDOR", Description: "idor",
+		Target: "https://app.example.com", Endpoint: "/api/v1/users/1",
+	}}
+	// v1 vs v2 are distinct endpoints, not object-id variants → not a duplicate.
+	if _, _, isDup := findDuplicateVulnerability(existing, "IDOR", "idor",
+		"https://app.example.com", "/api/v2/users/1"); isDup {
+		t.Fatal("expected /api/v1 and /api/v2 to remain distinct endpoints")
+	}
+}
+
+func TestFindDuplicateVulnerability_DifferentClassNotMerged(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "IDOR on orders", Description: "idor",
+		Target: "https://app.example.com", Endpoint: "/api/orders/1",
+	}}
+	// Same templated endpoint but a different vuln class + different title.
+	if _, _, isDup := findDuplicateVulnerability(existing, "SQL injection in orders", "sql injection",
+		"https://app.example.com", "/api/orders/2"); isDup {
+		t.Fatal("templating must not merge different vuln classes on the same endpoint")
+	}
+}
+
+func TestFindDuplicateVulnerability_DifferentTargetNotMerged(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "IDOR on order", Description: "idor",
+		Target: "https://app.example.com", Endpoint: "/api/orders/1042",
+	}}
+	// Same templated endpoint + class but a DIFFERENT host → not a duplicate.
+	if _, _, isDup := findDuplicateVulnerability(existing, "IDOR on order", "idor",
+		"https://other.example.com", "/api/orders/2087"); isDup {
+		t.Fatal("findings on different hosts must not be merged")
+	}
+}
