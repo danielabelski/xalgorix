@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **`probe_hypothesis` closes the source-to-runtime loop: it touches the live target from a seeded hypothesis.** `scan_source_sinks` finds the dangerous code and `scan_source_routes` gives it a reachable path, but until now nothing acted on that path — the model had to hand-craft every request. The new tool takes a ledger hypothesis that carries a real HTTP path (a `source-route` hypothesis, or an ingested/authenticated endpoint), resolves it against the scan target, issues **one** baseline request, and records the response as evidence — turning a guessed route into a confirmed lead. A live `2xx` raises confidence and moves the hypothesis to `testing`; `401/403` flags it as a prime `authz_matrix` target; a `404`/connection failure marks it `blocked` so the scheduler stops spending budget on routes that aren't deployed. It uses the scan's session auth automatically (so authenticated routes are probed authenticated) and does not follow redirects (a `3xx` to `/login` is itself a signal). Safety: because the tool resolves the target host internally (the agent-loop scope gate keys off tool arguments and can't see it), it always scope-checks the resolved host with the same operator-machine guard `authz_matrix` uses and refuses loopback/RFC1918/the dashboard listener; it reuses the existing scope-agnostic request path, honors the scan's request-rate policy and cancellation, and is disabled in passive mode. Source-location (`file:line`) endpoints from `scan_source_sinks` are skipped — they carry no HTTP path.
+
 ## [v4.6.24](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.24) — Give source-discovered sinks a reachable HTTP path (scan_source_routes) (2026-09-02)
 
 ### Added

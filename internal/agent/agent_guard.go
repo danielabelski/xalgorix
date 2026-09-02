@@ -325,7 +325,7 @@ func (a *Agent) shouldBlockForOutOfScope(toolName string, toolArgs map[string]st
 	lowerTool := strings.ToLower(toolName)
 	switch lowerTool {
 	case "terminal_execute", "python_action", "browser_action", "page_agent", "pageagent",
-		"report_vulnerability", "authz_matrix":
+		"report_vulnerability", "authz_matrix", "probe_hypothesis":
 		// gated
 	default:
 		return false, ""

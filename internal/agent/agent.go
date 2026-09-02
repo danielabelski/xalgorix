@@ -147,6 +147,7 @@ type Agent struct {
 	reconMode                  string    // active or passive reconnaissance
 	scanIntensity              string    // active or passive testing/scanning
 	activityHosts              []string  // normalized target hosts used by passive policy
+	targets                    []string  // raw scan targets from Run(), used to resolve a base URL for probe_hypothesis
 	passiveReconGuardActive    bool      // full scans with passive recon block direct access until passive evidence is collected
 	passiveReconGuardDone      bool
 	passiveReconPassiveLookups int
@@ -386,6 +387,14 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// dangerous sinks in the same handler file so the sink gets an attackable
 	// endpoint.
 	a.registerScanSourceRoutesTool(reg)
+
+	// Register the third part of the bridge (probe_hypothesis): issues ONE
+	// scope-gated baseline request against the live target for a ledger
+	// hypothesis that carries a real HTTP path (e.g. a source-route hypothesis)
+	// and records the response as evidence — turning a seeded path into a
+	// confirmed-reachable (or blocked) lead. Agent-bound: needs the scope
+	// config, session auth, the scan target, and the ledger.
+	a.registerProbeHypothesisTool(reg)
 
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
@@ -805,6 +814,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 	if a.stopped.Load() {
 		return
 	}
+	a.targets = targets // remember the scan targets so probe_hypothesis can resolve a base URL for a bare path
 	a.scanStart = time.Now()
 	if a.scanBudget != nil {
 		a.scanBudget.start()
