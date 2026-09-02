@@ -103,7 +103,7 @@ Specialist roles (use these exact roles and hold each to its evidence contract):
 	b.WriteString(`
 Drive the work from the shared hypothesis ledger so specialists never overlap:
 - Call read_ledger(filter=schedulable) to see the open hypotheses.
-- Give each specialist a DISJOINT set and mark ownership with update_hypothesis(assigned_to=<agent_id>).
+- Give each specialist a DISJOINT lane by vuln class, and have it call claim_next_hypothesis(vuln_class=<its class>) to atomically take the top hypothesis in its lane — this assigns ownership and moves it to testing in one step, so two specialists can never grab the same target. (Use update_hypothesis(assigned_to=...) only for manual overrides.)
 - Require each specialist to record findings as they go with add_hypothesis_evidence, and to set a final status: proven (with a linked finding via kind=finding_ref) or rejected (with the baseline that ruled it out).
 - Keep coordinating while they run: incorporate every result with wait_agent/check_agent, independently verify candidates, and do not finish with an uncollected delegation or a proven-but-unreported hypothesis.
 Do not delegate three generic scans or duplicate your own work.`)

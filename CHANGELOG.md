@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] — Deterministic claiming of the next hypothesis
+
+### Added
+- **`claim_next_hypothesis` turns the evidence ledger into a real work queue.** The shared ledger already ranked untested hypotheses by confidence, but picking and assigning one was left to free-form model choice — so an agent could skip the strongest lead, and two parallel specialists could grab the same target. The new tool atomically claims the highest-confidence *queued* hypothesis (optionally scoped to a `vuln_class` lane), assigns it to the calling agent, and moves it to `testing` in one locked step — then hands back its next action and baseline. Specialists are now directed to claim their lane with it instead of eyeballing the ledger, so scheduling is deterministic and collision-free, and the coordinator provably works the most promising leads first.
+
 ## [v4.6.16](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.16) — Precision: dedup object-ID variants before verification (2026-09-01)
 
 ### Changed

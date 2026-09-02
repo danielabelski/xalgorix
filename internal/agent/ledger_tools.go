@@ -121,6 +121,20 @@ func (a *Agent) registerLedgerTools(reg *tools.Registry) {
 		},
 		Execute: a.readLedgerTool,
 	})
+
+	reg.Register(&tools.Tool{
+		Name: "claim_next_hypothesis",
+		Description: "Atomically claim the single highest-value untested hypothesis from the shared " +
+			"ledger to work next. This deterministically picks the top QUEUED hypothesis (highest " +
+			"confidence first), optionally filtered to your vuln_class, assigns it to you, and moves it " +
+			"to 'testing' so no other agent works the same target. Prefer this over eyeballing " +
+			"read_ledger: it guarantees you take the most promising lead and prevents two specialists " +
+			"from colliding. Returns the hypothesis and its next action; if nothing is claimable it says so.",
+		Parameters: []tools.Parameter{
+			{Name: "vuln_class", Description: "Optional: only claim a hypothesis of this class (e.g. idor, sqli, xss, ssrf). Omit to claim the top hypothesis of any class.", Required: false},
+		},
+		Execute: a.claimNextHypothesisTool,
+	})
 }
 
 func (a *Agent) recordHypothesisTool(args map[string]string) (tools.Result, error) {
@@ -295,6 +309,59 @@ func (a *Agent) readLedgerTool(args map[string]string) (tools.Result, error) {
 		}
 		return tools.Result{Output: out}, nil
 	}
+}
+
+func (a *Agent) claimNextHypothesisTool(args map[string]string) (tools.Result, error) {
+	l := a.ledger()
+	if l == nil {
+		return tools.Result{Error: "ledger unavailable in this context"}, nil
+	}
+	classFilter := strings.ToLower(strings.TrimSpace(args["vuln_class"]))
+
+	// Schedulable is already ranked (highest confidence first). We only
+	// auto-claim QUEUED hypotheses: "blocked" ones are waiting on a precondition
+	// and shouldn't be silently moved into testing. Assign() will flip the
+	// chosen one queued→testing atomically under the ledger lock.
+	var picked *scanctx.Hypothesis
+	for _, h := range l.Schedulable(0) {
+		if h.Status != scanctx.HypothesisQueued {
+			continue
+		}
+		if classFilter != "" && strings.ToLower(h.VulnClass) != classFilter {
+			continue
+		}
+		hh := h
+		picked = &hh
+		break
+	}
+	if picked == nil {
+		if classFilter != "" {
+			return tools.Result{Output: fmt.Sprintf("No queued %q hypotheses to claim. Use read_ledger(filter=schedulable) to see other classes, or record new ones from recon with record_hypothesis.", classFilter)}, nil
+		}
+		return tools.Result{Output: "No queued hypotheses to claim right now. Record new ones from recon with record_hypothesis, or the surface may be exhausted."}, nil
+	}
+
+	owner := a.ledgerOrigin()
+	l.Assign(picked.ID, owner)
+	got, ok := l.Get(picked.ID)
+	if !ok {
+		got = *picked
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Claimed %s — now [%s], owner %s: %s%s (confidence %.2f).\n",
+		got.ID, got.Status, owner, got.VulnClass, formatLoc(got), got.Confidence)
+	if got.NextAction != "" {
+		fmt.Fprintf(&b, "Next action: %s\n", got.NextAction)
+	}
+	if got.Baseline != "" {
+		fmt.Fprintf(&b, "Baseline/control: %s\n", got.Baseline)
+	}
+	b.WriteString("Work this hypothesis, record evidence with add_hypothesis_evidence, then set its final status with update_hypothesis: proven (link the finding via kind=finding_ref) or rejected (with the baseline that ruled it out).")
+	return tools.Result{
+		Output:   b.String(),
+		Metadata: map[string]any{"hypothesis_id": got.ID, "vuln_class": got.VulnClass, "status": string(got.Status)},
+	}, nil
 }
 
 // ledgerOrigin identifies the writing agent: the delegation ID for a specialist,
