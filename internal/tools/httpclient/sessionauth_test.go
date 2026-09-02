@@ -112,3 +112,41 @@ func TestSetSessionAuthClears(t *testing.T) {
 		t.Fatal("passing empty map must clear the context's auth")
 	}
 }
+
+func TestSetAndGetSessionAuthB(t *testing.T) {
+	const ctx = "scan-ctx-B"
+	// Role A and role B are independent stores.
+	SetSessionAuth(ctx, map[string]string{"Authorization": "Bearer A"})
+	SetSessionAuthB(ctx, map[string]string{"Authorization": "Bearer B", "": "drop"})
+	defer SetSessionAuth(ctx, nil)
+	defer SetSessionAuthB(ctx, nil)
+
+	b := SessionAuthBForContext(ctx)
+	if b == nil || b["Authorization"] != "Bearer B" {
+		t.Fatalf("role B not stored: %v", b)
+	}
+	if _, ok := b[""]; ok {
+		t.Fatal("blank header name must be dropped for role B")
+	}
+	// Role A store must be unaffected by a role-B write.
+	if a := SessionAuthForContext(ctx); a["Authorization"] != "Bearer A" {
+		t.Fatalf("role A store affected by role B write: %v", a)
+	}
+	// http_request applies only role A (getSessionAuth), never role B.
+	if getSessionAuth(ctx)["Authorization"] != "Bearer A" {
+		t.Fatal("getSessionAuth (the http_request path) must return role A")
+	}
+	// Returned map must be a defensive copy.
+	b["Authorization"] = "TAMPER"
+	if again := SessionAuthBForContext(ctx); again["Authorization"] != "Bearer B" {
+		t.Fatal("SessionAuthBForContext must return a defensive copy")
+	}
+	// Clearing role B must leave role A intact.
+	SetSessionAuthB(ctx, nil)
+	if SessionAuthBForContext(ctx) != nil {
+		t.Fatal("passing empty map must clear role B")
+	}
+	if SessionAuthForContext(ctx) == nil {
+		t.Fatal("clearing role B must not clear role A")
+	}
+}

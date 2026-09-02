@@ -207,3 +207,77 @@ func TestAuthzMatrixRunsWithIngestedSession(t *testing.T) {
 		t.Fatalf("expected 1 recorded hypothesis (anonymous vs ingested role A), got %v", res.Metadata["recorded_hypotheses"])
 	}
 }
+
+// TestAuthzIdentitiesUsesIngestedSessionBAsRoleB verifies that a second session
+// registered via ingest_har role=b (SetSessionAuthB) becomes role B when no
+// operator second account is configured — enabling two-account IDOR/BOLA.
+func TestAuthzIdentitiesUsesIngestedSessionBAsRoleB(t *testing.T) {
+	ag := &Agent{scanCtx: scanctx.New("authz-bses-"+t.Name(), ""), ctx: context.Background()}
+	httpclient.SetSessionAuth(ag.scanCtx.ID, map[string]string{"Authorization": "Bearer A"})
+	httpclient.SetSessionAuthB(ag.scanCtx.ID, map[string]string{"Authorization": "Bearer B"})
+	defer httpclient.SetSessionAuth(ag.scanCtx.ID, nil)
+	defer httpclient.SetSessionAuthB(ag.scanCtx.ID, nil)
+
+	ids := ag.authzIdentities()
+	if len(ids) != 3 {
+		t.Fatalf("expected role-a + role-b (both ingested) + anonymous, got %d: %+v", len(ids), ids)
+	}
+	if ids[0].role != "role-a" || ids[0].headers["Authorization"] != "Bearer A" {
+		t.Fatalf("role A wrong: %+v", ids[0])
+	}
+	if ids[1].role != "role-b" || ids[1].headers["Authorization"] != "Bearer B" {
+		t.Fatalf("role B (ingested) wrong: %+v", ids[1])
+	}
+	if ids[2].role != "anonymous" {
+		t.Fatalf("expected anonymous last, got %+v", ids[2])
+	}
+}
+
+// TestAuthzIdentitiesPrefersOperatorAuthBOverSessionB verifies operator role-B
+// precedence over an ingested role-B session.
+func TestAuthzIdentitiesPrefersOperatorAuthBOverSessionB(t *testing.T) {
+	ag := &Agent{targetAuthB: "Authorization: Bearer OPB", scanCtx: scanctx.New("authz-bprec-"+t.Name(), ""), ctx: context.Background()}
+	httpclient.SetSessionAuthB(ag.scanCtx.ID, map[string]string{"Authorization": "Bearer SESB"})
+	defer httpclient.SetSessionAuthB(ag.scanCtx.ID, nil)
+
+	var rb *authzIdentity
+	ids := ag.authzIdentities()
+	for i := range ids {
+		if ids[i].role == "role-b" {
+			rb = &ids[i]
+		}
+	}
+	if rb == nil || rb.headers["Authorization"] != "Bearer OPB" {
+		t.Fatalf("expected role B to use the operator account, got %+v", rb)
+	}
+}
+
+// TestAuthzMatrixTwoIngestedAccounts is the end-to-end two-account proof: role A
+// and role B both come from ingested sessions, and the matrix flags /broken
+// (role B and anonymous both reach role A's owner record).
+func TestAuthzMatrixTwoIngestedAccounts(t *testing.T) {
+	srv := authzTestServer()
+	defer srv.Close()
+	ag := newAuthzAgent(t, true)
+	ag.targetAuth = ""
+	ag.targetAuthB = ""
+	httpclient.SetSessionAuth(ag.scanCtx.ID, map[string]string{"Authorization": "Bearer AAA"})
+	httpclient.SetSessionAuthB(ag.scanCtx.ID, map[string]string{"Authorization": "Bearer BBB"})
+	defer httpclient.SetSessionAuth(ag.scanCtx.ID, nil)
+	defer httpclient.SetSessionAuthB(ag.scanCtx.ID, nil)
+
+	res, err := ag.authzMatrixTool(map[string]string{"url": srv.URL + "/broken", "parameter": "id"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, _ := res.Metadata["recorded_hypotheses"].(int); got != 2 {
+		t.Fatalf("expected 2 recorded (role B + anonymous), got %v", res.Metadata["recorded_hypotheses"])
+	}
+	var roles []string
+	for _, h := range ag.scanCtx.Ledger.All() {
+		roles = append(roles, h.Role)
+	}
+	if !contains(roles, "role-b") {
+		t.Fatalf("expected a role-b hypothesis, got roles %v", roles)
+	}
+}

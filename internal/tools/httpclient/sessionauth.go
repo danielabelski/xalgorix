@@ -15,6 +15,12 @@ import (
 var (
 	sessionAuthMu sync.RWMutex
 	sessionAuth   = map[string]map[string]string{} // contextID -> canonical header -> value
+	// sessionAuthB holds a SECOND account's credentials (role B) per scan
+	// context. Unlike sessionAuth (role A), it is deliberately NOT applied to
+	// http_request calls: role B is the "other user" identity used on purpose
+	// by the authorization matrix to prove cross-account access (IDOR/BOLA),
+	// not the session the scan should carry by default.
+	sessionAuthB = map[string]map[string]string{} // contextID -> canonical header -> value
 )
 
 // SetSessionAuth registers authenticated-session headers for a scan context.
@@ -42,6 +48,44 @@ func SetSessionAuth(contextID string, headers map[string]string) {
 // external source (e.g. HAR ingestion) and want to confirm what was applied.
 func SessionAuthForContext(contextID string) map[string]string {
 	return getSessionAuth(contextID)
+}
+
+// SetSessionAuthB registers a SECOND account's headers (role B) for a scan
+// context. Passing an empty map clears any existing role-B auth. Role B is used
+// by the authorization matrix as the cross-account identity for IDOR/BOLA
+// testing; it is never auto-applied to http_request (see sessionAuthB).
+func SetSessionAuthB(contextID string, headers map[string]string) {
+	sessionAuthMu.Lock()
+	defer sessionAuthMu.Unlock()
+	if len(headers) == 0 {
+		delete(sessionAuthB, contextID)
+		return
+	}
+	cp := make(map[string]string, len(headers))
+	for k, v := range headers {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		cp[k] = v
+	}
+	sessionAuthB[contextID] = cp
+}
+
+// SessionAuthBForContext returns a copy of the registered role-B headers for a
+// context (or nil).
+func SessionAuthBForContext(contextID string) map[string]string {
+	sessionAuthMu.RLock()
+	defer sessionAuthMu.RUnlock()
+	src := sessionAuthB[contextID]
+	if len(src) == 0 {
+		return nil
+	}
+	cp := make(map[string]string, len(src))
+	for k, v := range src {
+		cp[k] = v
+	}
+	return cp
 }
 
 // getSessionAuth returns a copy of the auth headers for a context (or nil).
