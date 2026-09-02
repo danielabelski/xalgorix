@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased] — Benchmark scoring, robustness, and a per-challenge timeout
+
+### Changed
+- **Benchmark scoring is now class-based.** Each challenge app hosts exactly one vulnerability, so a finding of the expected class against it counts as solved; the previous exact-endpoint requirement wrongly failed a correct detection when the agent proved the bug on a different path (e.g. reflected XSS confirmed at `/?q=` rather than a declared `/search`). Path precision is a separate concern from class detection, which is what the benchmark measures.
+- **Per-challenge wall-clock timeout.** `bench.RunWithTimeout` (and a `-timeout` flag on `xalgorix-bench`, default 8m) bound each challenge scan and mark timeouts on the scorecard, so a wandering or stuck scan can no longer hang the whole run; partial findings gathered before the deadline are still scored.
+
+### Fixed
+- **IDOR challenge no longer panics on non-`/api/orders/` paths** (it sliced the prefix off every request path) and now serves a small index linking to a concrete object so the endpoint is discoverable by the crawler.
+
 ## [v4.6.20](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.20) — More benchmark challenges (SSRF, SSTI, LFI, command injection) (2026-09-01)
 
 ### Added

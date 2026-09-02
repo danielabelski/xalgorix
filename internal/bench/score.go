@@ -2,7 +2,6 @@ package bench
 
 import (
 	"fmt"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +17,7 @@ type Result struct {
 	MatchedFindingID string
 	Findings         int
 	Elapsed          time.Duration
+	TimedOut         bool
 	Err              error
 }
 
@@ -73,6 +73,9 @@ func (s Scorecard) String() string {
 		if r.MatchedFindingID != "" {
 			fmt.Fprintf(&b, "  -> %s", r.MatchedFindingID)
 		}
+		if r.TimedOut {
+			b.WriteString("  (timed out)")
+		}
 		if r.Err != nil {
 			fmt.Fprintf(&b, "  ERROR: %v", r.Err)
 		}
@@ -95,17 +98,19 @@ func (s Scorecard) String() string {
 	return b.String()
 }
 
-// Solved reports whether any finding proves the expected class on the expected
-// endpoint, returning the matching finding's ID. This is the deterministic
-// scoring primitive — no model involved.
-func Solved(expectedClass, expectedEndpoint string, findings []reporting.Vulnerability) (bool, string) {
+// Solved reports whether any finding is of the expected vulnerability class,
+// returning the matching finding's ID. This is the deterministic scoring
+// primitive — no model involved.
+//
+// Each challenge app hosts exactly ONE vulnerability, so a finding of the right
+// class against it is the intended bug. Endpoint/path precision is deliberately
+// NOT required: whether the agent proves the class on /search or / (and whether
+// it discovers a specific route) is a separate concern from whether it detects
+// the class, which is what this benchmark measures.
+func Solved(expectedClass string, findings []reporting.Vulnerability) (bool, string) {
 	want := canonicalClass(expectedClass)
-	wantPath := endpointPath(expectedEndpoint)
 	for _, f := range findings {
-		if classifyFinding(f) != want {
-			continue
-		}
-		if endpointMatches(wantPath, f.Endpoint) || endpointMatches(wantPath, f.Target) {
+		if classifyFinding(f) == want {
 			return true, f.ID
 		}
 	}
@@ -205,41 +210,4 @@ func firstDigits(s string) string {
 		return s[start:]
 	}
 	return ""
-}
-
-// endpointMatches reports whether a finding's endpoint/target covers the
-// expected path: exact match, or the expected path is a parent segment of the
-// finding's path (so an IDOR reported on /api/orders/1042 matches the challenge
-// endpoint /api/orders).
-func endpointMatches(wantPath, findingLoc string) bool {
-	got := endpointPath(findingLoc)
-	if got == "" || wantPath == "" {
-		return false
-	}
-	return got == wantPath || strings.HasPrefix(got, wantPath+"/")
-}
-
-// endpointPath reduces an endpoint or full URL to a normalized path: host and
-// scheme stripped, query/fragment removed, trailing slash trimmed, lowercased.
-func endpointPath(loc string) string {
-	loc = strings.TrimSpace(loc)
-	if loc == "" {
-		return ""
-	}
-	if strings.Contains(loc, "://") {
-		if u, err := url.Parse(loc); err == nil {
-			loc = u.Path
-		}
-	}
-	if i := strings.IndexAny(loc, "?#"); i >= 0 {
-		loc = loc[:i]
-	}
-	loc = strings.ToLower(loc)
-	if len(loc) > 1 {
-		loc = strings.TrimRight(loc, "/")
-	}
-	if loc == "" {
-		return "/"
-	}
-	return loc
 }

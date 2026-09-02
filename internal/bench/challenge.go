@@ -63,8 +63,16 @@ func Builtin() []Challenge {
 			Name: "idor", Class: "idor", Endpoint: "/api/orders", Param: "id",
 			Desc: "Serves any order by id under /api/orders/<id> with no authorization check.",
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				const prefix = "/api/orders/"
+				if !strings.HasPrefix(r.URL.Path, prefix) {
+					// Root/other paths: a small index that links to a concrete
+					// object, so the agent's crawler discovers the endpoint.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Orders</h1><a href="/api/orders/1042">view order 1042</a></body></html>`)
+					return
+				}
 				// Any id returns a populated record — no session/ownership check.
-				id := r.URL.Path[len("/api/orders/"):]
+				id := strings.TrimPrefix(r.URL.Path, prefix)
 				if id == "" {
 					http.NotFound(w, r)
 					return

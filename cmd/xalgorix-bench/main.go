@@ -28,6 +28,7 @@ import (
 func main() {
 	only := flag.String("only", "", "comma-separated challenge names to run (default: all built-in)")
 	task := flag.String("task", "Perform a full security assessment of this target and prove any vulnerability you find with a concrete PoC.", "instruction passed to the agent")
+	timeout := flag.Duration("timeout", bench.DefaultChallengeTimeout, "per-challenge wall-clock timeout (e.g. 5m); 0 disables")
 	flag.Parse()
 
 	cfg := config.Get()
@@ -45,8 +46,8 @@ func main() {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "xalgorix-bench: running %d challenge(s) with model %s\n", len(challenges), cfg.ResolveModel())
-	card := bench.Run(context.Background(), challenges, realScan(*task))
+	fmt.Fprintf(os.Stderr, "xalgorix-bench: running %d challenge(s) with model %s (per-challenge timeout %s)\n", len(challenges), cfg.ResolveModel(), *timeout)
+	card := bench.RunWithTimeout(context.Background(), challenges, realScan(*task), *timeout)
 	fmt.Print(card.String())
 }
 
@@ -70,7 +71,7 @@ func filterChallenges(all []bench.Challenge, csv string) []bench.Challenge {
 // and returns the findings it produced. Mirrors the production scan wiring
 // (internal/web/scan_session.go) minus the dashboard plumbing.
 func realScan(instruction string) bench.ScanFunc {
-	return func(_ context.Context, target, scanID string) ([]reporting.Vulnerability, error) {
+	return func(ctx context.Context, target, scanID string) ([]reporting.Vulnerability, error) {
 		cfg := config.Get()
 
 		scanDir := filepath.Join(os.TempDir(), "xalgorix-bench", scanID)
@@ -101,11 +102,29 @@ func realScan(instruction string) bench.ScanFunc {
 		ag.SetActivityPolicy("active", "active", []string{target})
 
 		fmt.Fprintf(os.Stderr, "  [bench] %s → %s\n", scanID, target)
-		ag.Run([]string{target}, instruction)
+		// Run the (blocking) scan in a goroutine so the harness's per-challenge
+		// deadline can stop a wandering or stuck scan instead of hanging the run.
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			ag.Run([]string{target}, instruction)
+		}()
+		select {
+		case <-runDone:
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "  [bench] %s → deadline reached, stopping scan\n", scanID)
+			ag.Stop()
+			<-runDone
+		}
 
 		close(events)
 		<-done
 
-		return reporting.GetVulnerabilitiesForContext(sc.ID), nil
+		findings := reporting.GetVulnerabilitiesForContext(sc.ID)
+		for _, f := range findings {
+			fmt.Fprintf(os.Stderr, "    finding %s: title=%q endpoint=%q target=%q cwe=%q sev=%q tags=%v\n",
+				f.ID, f.Title, f.Endpoint, f.Target, f.CWE, f.Severity, f.Tags)
+		}
+		return findings, nil
 	}
 }
