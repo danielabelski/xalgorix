@@ -222,3 +222,39 @@ func (a *Agent) seedRoutes(routes []codesearch.RouteMatch, sinkVulnsByFile map[s
 	}
 	return seeded, correlated
 }
+
+// sourceSeedSummary is the outcome of auto-seeding the ledger from whitebox
+// source at scan start.
+type sourceSeedSummary struct {
+	SinkHypotheses  int
+	RouteHypotheses int
+	Correlated      int
+}
+
+// seedLedgerFromSource runs the deterministic sink + route sweeps over the
+// scan's resolved whitebox source and seeds the ledger, so the source-to-runtime
+// bridge populates schedulable hypotheses at scan start instead of waiting for
+// the model to call scan_source_sinks / scan_source_routes. Routes are
+// correlated with the sinks found in the same handler file (a route whose file
+// has a dangerous sink is seeded class-typed and higher-confidence). It is a
+// no-op when no source is configured, bounded by the per-sweep caps, and
+// idempotent (the ledger dedups), so it is safe to call once per scan alongside
+// seedLedgerFromSurface's artifact seeding.
+func (a *Agent) seedLedgerFromSource() sourceSeedSummary {
+	var sum sourceSeedSummary
+	if a.scanCtx == nil || codesearch.GetSourceRoot(a.scanCtx.ID) == "" {
+		return sum
+	}
+	// Sinks first: file-scoped dangerous-sink hypotheses, plus the file→vuln map
+	// used to type co-located routes.
+	byFile := map[string][]string{}
+	if sinkFound, err := codesearch.SinkScan(a.scanCtx.ID, 20); err == nil {
+		sum.SinkHypotheses = a.seedSinks(sinkFound)
+		byFile = sinkVulnsByFile(sinkFound)
+	}
+	// Routes next: reachable-path hypotheses, correlated with the sinks above.
+	if routes, err := codesearch.RouteScan(a.scanCtx.ID, 60); err == nil {
+		sum.RouteHypotheses, sum.Correlated = a.seedRoutes(routes, byFile)
+	}
+	return sum
+}
