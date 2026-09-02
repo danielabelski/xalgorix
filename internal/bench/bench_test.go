@@ -80,6 +80,10 @@ func TestClassifyFinding(t *testing.T) {
 		{"Injection issue", "SQL injection via id", "", "sqli"},
 		{"Open Redirect on /redirect", "", "", "open_redirect"},
 		{"Access another user's order", "insecure direct object reference", "", "idor"},
+		{"SSRF in the fetch endpoint", "", "", "ssrf"},
+		{"Server-Side Template Injection via name", "template injection", "", "ssti"},
+		{"Path traversal in download", "local file inclusion", "", "lfi"},
+		{"Command injection in ping", "os command executed", "", "rce"},
 		{"Mystery bug", "no class keyword", "CWE-79", "xss"},   // CWE fallback
 		{"Mystery bug", "no class keyword", "CWE-639", "idor"}, // CWE fallback
 		{"Mystery bug", "no class keyword", "CWE-99999", ""},   // unmapped
@@ -133,8 +137,8 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 	}
 
 	card := Run(context.Background(), Builtin(), fake)
-	if card.Total() != 4 {
-		t.Fatalf("expected 4 challenges, got %d", card.Total())
+	if card.Total() != len(Builtin()) {
+		t.Fatalf("expected %d challenges, got %d", len(Builtin()), card.Total())
 	}
 	if card.SolvedCount() != 2 {
 		t.Fatalf("expected 2 solved (xss+idor), got %d\n%s", card.SolvedCount(), card.String())
@@ -143,7 +147,40 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 	if byClass["xss"] != [2]int{1, 1} || byClass["idor"] != [2]int{1, 1} {
 		t.Fatalf("expected xss 1/1 and idor 1/1, got %v", byClass)
 	}
-	if byClass["open_redirect"] != [2]int{0, 1} || byClass["sqli"] != [2]int{0, 1} {
-		t.Fatalf("expected open_redirect 0/1 and sqli 0/1, got %v", byClass)
+	// Every other class is present but unsolved by this fake.
+	for _, c := range []string{"open_redirect", "sqli", "ssrf", "ssti", "lfi", "rce"} {
+		if byClass[c] != [2]int{0, 1} {
+			t.Fatalf("expected %s 0/1, got %v", c, byClass[c])
+		}
+	}
+}
+
+func TestNewBuiltinChallengesExhibitVuln(t *testing.T) {
+	// ssrf: an internal-target url returns metadata-like secret content.
+	ssrf := challengeByName(t, "ssrf").Start()
+	defer ssrf.Close()
+	if body := httpGet(t, ssrf.URL+"/fetch?url=http://169.254.169.254/latest/meta-data/"); !strings.Contains(body, "security-credentials") {
+		t.Fatalf("ssrf did not return internal metadata: %q", body)
+	}
+
+	// ssti: {{7*7}} evaluates to 49.
+	ssti := challengeByName(t, "ssti").Start()
+	defer ssti.Close()
+	if body := httpGet(t, ssti.URL+"/greet?name={{7*7}}"); !strings.Contains(body, "Hello, 49!") {
+		t.Fatalf("ssti did not evaluate the template expression: %q", body)
+	}
+
+	// lfi: path traversal to passwd returns fabricated passwd content.
+	lfi := challengeByName(t, "lfi").Start()
+	defer lfi.Close()
+	if body := httpGet(t, lfi.URL+"/download?file=../../../../etc/passwd"); !strings.Contains(body, "root:x:0:0:") {
+		t.Fatalf("lfi did not leak passwd content: %q", body)
+	}
+
+	// cmdi: a shell metacharacter yields command output.
+	cmdi := challengeByName(t, "cmdi").Start()
+	defer cmdi.Close()
+	if body := httpGet(t, cmdi.URL+"/ping?host=127.0.0.1%3Bid"); !strings.Contains(body, "uid=0(root)") {
+		t.Fatalf("cmdi did not execute the injected command: %q", body)
 	}
 }
