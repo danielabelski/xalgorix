@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — Two-account IDOR/BOLA from a second ingested session
+## [v4.6.15](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.15) — Two-account IDOR/BOLA from a second ingested session (2026-09-01)
 
 ### Added
 - **`ingest_har` can now register a SECOND account (`role=b`) for true two-account IDOR/BOLA.** Proving broken object-level authorization needs two real identities: one user's session reaching another user's objects. Capture a HAR while logged in as a second user and run `ingest_har path=… role=b` — its session is registered as role B (a dedicated store that is deliberately *not* auto-applied to `http_request`, since role B is the "other user" identity used on purpose). `authz_matrix` then uses that ingested session as role B (when no operator second account is configured, mirroring how role A already falls back to an ingested session), replaying each request as role A, role B, and anonymous to flag any of role A's resources that role B can reach. Role-B ingestion registers credentials only — it does not seed the ledger, since role B is a comparison identity, not new attack surface.
