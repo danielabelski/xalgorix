@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — More benchmark challenges (SSRF, SSTI, LFI, command injection)
+## [v4.6.20](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.20) — More benchmark challenges (SSRF, SSTI, LFI, command injection) (2026-09-01)
 
 ### Added
 - **Four more benchmark challenge classes.** The benchmark harness now covers SSRF (an internal-target fetch returns cloud-metadata-like secrets), SSTI (a `{{7*7}}` expression evaluates to `49`), LFI/path traversal (`../../etc/passwd` returns passwd-like content), and command injection (a shell metacharacter yields `uid=0(root)`), on top of the existing reflected XSS, IDOR, open redirect, and error-based SQLi. Each challenge simulates the dangerous outcome rather than performing a real fetch/exec/file-read, so the set stays hermetic and safe while presenting a crisp, detectable signal. All four map to existing scoring classes, so `xalgorix-bench` now measures eight classes.
