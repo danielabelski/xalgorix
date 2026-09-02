@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — Benchmark harness (measure detection per class)
+## [v4.6.19](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.19) — Benchmark harness (measure detection per class) (2026-09-01)
 
 ### Added
 - **A benchmark harness to measure detection, per vulnerability class.** New `internal/bench` package hosts a set of deliberately vulnerable, self-contained challenge apps (reflected XSS, IDOR, open redirect, error-based SQLi to start) and deterministically scores a scan's findings against the expected class and endpoint — so the effect of a change on real detection can be measured instead of assumed. The heavy agent run is injected as a `ScanFunc`, keeping the challenge apps, scoring, and aggregation fully unit-tested without any model calls. A new operator command, `xalgorix-bench`, wires the real agent and prints a per-class scorecard; it needs `XALGORIX_LLM`/`XALGORIX_API_KEY` and makes live calls, so it is a local tool and not part of the shipped release. This is the first step toward the repeatable evaluation the roadmap requires before any parity claim; the challenge set is intentionally small and will grow.
