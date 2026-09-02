@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v4.6.26](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.26) — Auto-seed the ledger from whitebox source at scan start (2026-09-02)
 
 ### Changed
 - **Whitebox source now auto-seeds the ledger at scan start — the source-to-runtime bridge fires from iteration 1.** The three whitebox tools (`scan_source_sinks`, `scan_source_routes`, `probe_hypothesis`) only ran if the model chose to call them, so a scan with source attached could spend early iterations black-box-crawling before the code was ever examined. Now, as soon as the source is resolved, the scan sweeps it for dangerous sinks and HTTP routes and seeds the ledger with the resulting hypotheses — dangerous sinks (`file:line`), reachable routes (real HTTP paths), and the route↔sink correlations (a route whose handler file has a dangerous sink is seeded class-typed and higher-confidence) — exactly as an uploaded OpenAPI/HAR context already auto-seeds the surface. The specialists get concrete, source-derived leads to `probe_hypothesis` and exploit from the first iteration instead of rediscovering them. Deterministic, bounded (per-sweep caps), and idempotent (the ledger dedups), so it never floods or duplicates; a no-op when no source is configured.
