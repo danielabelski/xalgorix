@@ -337,7 +337,7 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 	// This is repeated under the write lock just before append to close races.
 	store := getStoreByID(contextID)
 	store.mu.RLock()
-	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], target, endpoint); ok {
+	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cwe_id"], target, endpoint); ok {
 		store.mu.RUnlock()
 		return duplicateResult(existing, msg), nil
 	}
@@ -464,7 +464,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// ── Gate 4: Smart Deduplication — same vuln type on same endpoint = duplicate ──
 	store = getStoreByID(contextID)
 	store.mu.RLock()
-	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], target, endpoint); ok {
+	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cwe_id"], target, endpoint); ok {
 		store.mu.RUnlock()
 		return duplicateResult(existing, msg), nil
 	}
@@ -596,7 +596,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 
 	store = getStoreByID(contextID) // re-resolve in case of race
 	store.mu.Lock()
-	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], target, endpoint); ok {
+	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cwe_id"], target, endpoint); ok {
 		store.mu.Unlock()
 		return duplicateResult(existing, msg), nil
 	}
@@ -732,20 +732,20 @@ func duplicateResult(existing Vulnerability, msg string) tools.Result {
 	}
 }
 
-func findDuplicateVulnerability(existing []Vulnerability, title, description, target, endpoint string) (Vulnerability, string, bool) {
+func findDuplicateVulnerability(existing []Vulnerability, title, description, cwe, target, endpoint string) (Vulnerability, string, bool) {
 	normalizedTitle := normalizeFindingText(title)
 	normalizedTarget := normalizeEndpoint(target)
 	// Endpoints use the templated key so object-ID variants of the same path
 	// (/orders/1042 vs /orders/2087) are recognized as one finding. Targets are
 	// hosts, not object paths, so they keep the plain normalization.
 	normalizedEndpoint := dedupEndpointKey(endpoint)
-	vulnType := extractVulnType(title, description)
+	vulnType := extractVulnTypeWithCWE(title, description, cwe)
 
 	for _, vuln := range existing {
 		existingTitle := normalizeFindingText(vuln.Title)
 		existingTarget := normalizeEndpoint(vuln.Target)
 		existingEndpoint := dedupEndpointKey(vuln.Endpoint)
-		existingType := extractVulnType(vuln.Title, vuln.Description)
+		existingType := extractVulnTypeWithCWE(vuln.Title, vuln.Description, vuln.CWE)
 		sameTarget := normalizedTarget == existingTarget
 
 		// Exact finding match after trimming/case normalization.
@@ -2019,7 +2019,7 @@ func PromoteToParent(childContextID, parentContextID, vulnID string) {
 		}
 	}
 	// Skip semantic duplicates too, mirroring MergeVulnsToContext's behavior.
-	if _, _, dup := findDuplicateVulnerability(dst.vulns, found.Title, found.Description, found.Target, found.Endpoint); dup {
+	if _, _, dup := findDuplicateVulnerability(dst.vulns, found.Title, found.Description, found.CWE, found.Target, found.Endpoint); dup {
 		return
 	}
 	dst.vulns = append(dst.vulns, *found)
@@ -2067,7 +2067,7 @@ func MergeVulnsToContext(srcContextID, dstContextID string) int {
 
 	added := 0
 	for _, v := range srcVulns {
-		if _, _, duplicate := findDuplicateVulnerability(dstStore.vulns, v.Title, v.Description, v.Target, v.Endpoint); duplicate {
+		if _, _, duplicate := findDuplicateVulnerability(dstStore.vulns, v.Title, v.Description, v.CWE, v.Target, v.Endpoint); duplicate {
 			continue
 		}
 		if seenIDs[v.ID] {
@@ -2558,6 +2558,67 @@ func extractVulnType(title, description string) string {
 		}
 	}
 	return ""
+}
+
+// cweDigitsRe pulls the numeric portion out of a CWE identifier so "CWE-79",
+// "cwe 79", and "79" all normalize to "79".
+var cweDigitsRe = regexp.MustCompile(`[0-9]+`)
+
+// cweToVulnType maps a CWE identifier to the same canonical class names
+// extractVulnType uses, so deduplication can still recognize a finding's class
+// when the title/description carry no class keyword but a CWE is set. Only
+// high-confidence, common mappings are included; anything unmapped yields "".
+func cweToVulnType(cwe string) string {
+	switch cweDigitsRe.FindString(cwe) {
+	case "79":
+		return "xss"
+	case "89":
+		return "sqli"
+	case "918":
+		return "ssrf"
+	case "22":
+		return "lfi"
+	case "98":
+		return "rfi"
+	case "77", "78", "94", "95":
+		return "rce"
+	case "352":
+		return "csrf"
+	case "611":
+		return "xxe"
+	case "601":
+		return "open_redirect"
+	case "287", "288", "305", "306":
+		return "auth_bypass"
+	case "200", "209", "532":
+		return "info_disclosure"
+	case "284", "285", "566", "639", "862", "863":
+		return "idor"
+	case "1021":
+		return "clickjacking"
+	case "942":
+		return "cors"
+	case "93", "113":
+		return "crlf"
+	case "1336":
+		return "ssti"
+	case "502":
+		return "deserialization"
+	default:
+		return ""
+	}
+}
+
+// extractVulnTypeWithCWE is extractVulnType with a CWE fallback: when the
+// title/description don't reveal a class, the finding's CWE (if any) is mapped
+// to one. This tightens dedup for findings whose titles omit the class keyword
+// (e.g. "Unauthenticated contact creation" with CWE-79) so they still collapse
+// onto the same-class report instead of each triggering a fresh verification.
+func extractVulnTypeWithCWE(title, description, cwe string) string {
+	if t := extractVulnType(title, description); t != "" {
+		return t
+	}
+	return cweToVulnType(cwe)
 }
 
 // normalizeEndpoint strips query params, fragments, and trailing slashes

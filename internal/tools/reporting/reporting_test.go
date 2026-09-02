@@ -1937,7 +1937,7 @@ func TestFindDuplicateVulnerability_IDVariantsDedup(t *testing.T) {
 		Target: "https://app.example.com", Endpoint: "/api/orders/1042",
 	}}
 	// Same class + same target, different object id in the path.
-	dup, _, isDup := findDuplicateVulnerability(existing, "IDOR on order 2087", "idor",
+	dup, _, isDup := findDuplicateVulnerability(existing, "IDOR on order 2087", "idor", "",
 		"https://app.example.com", "/api/orders/2087")
 	if !isDup {
 		t.Fatal("expected /api/orders/2087 to dedup against /api/orders/1042 (same IDOR endpoint)")
@@ -1953,7 +1953,7 @@ func TestFindDuplicateVulnerability_VersionNotMerged(t *testing.T) {
 		Target: "https://app.example.com", Endpoint: "/api/v1/users/1",
 	}}
 	// v1 vs v2 are distinct endpoints, not object-id variants → not a duplicate.
-	if _, _, isDup := findDuplicateVulnerability(existing, "IDOR", "idor",
+	if _, _, isDup := findDuplicateVulnerability(existing, "IDOR", "idor", "",
 		"https://app.example.com", "/api/v2/users/1"); isDup {
 		t.Fatal("expected /api/v1 and /api/v2 to remain distinct endpoints")
 	}
@@ -1965,7 +1965,7 @@ func TestFindDuplicateVulnerability_DifferentClassNotMerged(t *testing.T) {
 		Target: "https://app.example.com", Endpoint: "/api/orders/1",
 	}}
 	// Same templated endpoint but a different vuln class + different title.
-	if _, _, isDup := findDuplicateVulnerability(existing, "SQL injection in orders", "sql injection",
+	if _, _, isDup := findDuplicateVulnerability(existing, "SQL injection in orders", "sql injection", "",
 		"https://app.example.com", "/api/orders/2"); isDup {
 		t.Fatal("templating must not merge different vuln classes on the same endpoint")
 	}
@@ -1977,8 +1977,61 @@ func TestFindDuplicateVulnerability_DifferentTargetNotMerged(t *testing.T) {
 		Target: "https://app.example.com", Endpoint: "/api/orders/1042",
 	}}
 	// Same templated endpoint + class but a DIFFERENT host → not a duplicate.
-	if _, _, isDup := findDuplicateVulnerability(existing, "IDOR on order", "idor",
+	if _, _, isDup := findDuplicateVulnerability(existing, "IDOR on order", "idor", "",
 		"https://other.example.com", "/api/orders/2087"); isDup {
 		t.Fatal("findings on different hosts must not be merged")
+	}
+}
+
+func TestExtractVulnTypeWithCWE(t *testing.T) {
+	cases := []struct {
+		name             string
+		title, desc, cwe string
+		want             string
+	}{
+		{"keyword wins over cwe", "Reflected XSS in search", "", "CWE-89", "xss"},
+		{"cwe fallback when no keyword", "Unauthenticated contact creation", "adds a record", "CWE-79", "xss"},
+		{"cwe fallback idor", "Access another account's order", "returns the record", "CWE-639", "idor"},
+		{"cwe format variants", "no class keyword here", "", "79", "xss"},
+		{"unmapped cwe → empty", "no class keyword here", "", "CWE-770", ""},
+		{"neither → empty", "no class keyword here", "", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := extractVulnTypeWithCWE(c.title, c.desc, c.cwe); got != c.want {
+				t.Fatalf("extractVulnTypeWithCWE(%q,%q,%q) = %q, want %q", c.title, c.desc, c.cwe, got, c.want)
+			}
+		})
+	}
+}
+
+func TestFindDuplicateVulnerability_CWEFallbackDedup(t *testing.T) {
+	// Neither title nor description carries an XSS keyword, but both findings
+	// declare CWE-79 → the CWE fallback recognizes them as the same class on the
+	// same endpoint, so the second is a duplicate.
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "Unauthenticated contact creation", Description: "creates a contact record",
+		CWE: "CWE-79", Target: "https://app.example.com", Endpoint: "/api/contacts",
+	}}
+	dup, _, isDup := findDuplicateVulnerability(existing, "Arbitrary contact addition", "adds a contact record",
+		"CWE-79", "https://app.example.com", "/api/contacts")
+	if !isDup {
+		t.Fatal("expected CWE-79 findings on the same endpoint to dedup via the CWE class fallback")
+	}
+	if dup.ID != "XALG-1" {
+		t.Fatalf("expected duplicate of XALG-1, got %q", dup.ID)
+	}
+}
+
+func TestFindDuplicateVulnerability_UnmappedCWENotMerged(t *testing.T) {
+	// An unmapped CWE and no class keyword → class stays "", so distinct titles
+	// on the same endpoint are NOT collapsed (the fallback never over-merges).
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "Odd behavior A", Description: "something happens",
+		CWE: "CWE-770", Target: "https://app.example.com", Endpoint: "/api/x",
+	}}
+	if _, _, isDup := findDuplicateVulnerability(existing, "Odd behavior B", "something else happens",
+		"CWE-770", "https://app.example.com", "/api/x"); isDup {
+		t.Fatal("unmapped CWE + no keyword must not merge distinct findings")
 	}
 }

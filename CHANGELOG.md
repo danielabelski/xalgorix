@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] — CWE-aware duplicate detection
+
+### Changed
+- **Duplicate detection now falls back to the CWE when a finding's title doesn't name its class.** The near-duplicate check keys on vulnerability class, which it inferred from title/description keywords — so a finding worded without the class name (e.g. "Unauthenticated contact creation" that is really stored XSS, tagged CWE-79) escaped class-based dedup and paid for its own full verification. When no keyword is present, the finding's CWE is now mapped to the class, so same-class findings on the same endpoint collapse as intended. The mapping is limited to high-confidence, common CWEs; an unmapped CWE with no keyword still yields no class, so the fallback never over-merges distinct findings.
+
 ## [v4.6.17](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.17) — Deterministic claiming of the next hypothesis (2026-09-01)
 
 ### Added
