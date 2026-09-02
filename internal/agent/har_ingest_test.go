@@ -65,3 +65,47 @@ func TestHarIngestToolMissingPath(t *testing.T) {
 		t.Fatal("expected an error when the HAR file cannot be read")
 	}
 }
+
+func TestIngestHARRoleB(t *testing.T) {
+	ctxID := "har-roleb-" + t.Name()
+	ag := &Agent{scanCtx: scanctx.New(ctxID, "")}
+	defer httpclient.SetSessionAuthB(ctxID, nil)
+
+	h, err := har.Parse([]byte(harIngestSample))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	res := ag.ingestHARRoleB(h, "app.example.com")
+
+	// Role-B credentials registered (merged Authorization + Cookie).
+	b := httpclient.SessionAuthBForContext(ctxID)
+	if b["Authorization"] != "Bearer TOKEN" || b["Cookie"] != "session=abc" {
+		t.Fatalf("expected role-B session merged+registered, got %#v", b)
+	}
+	// Role B must NOT register a role-A session, and must NOT seed the ledger.
+	if httpclient.SessionAuthForContext(ctxID) != nil {
+		t.Fatal("role B ingestion must not register the role A session")
+	}
+	if n := ag.scanCtx.Ledger.Len(); n != 0 {
+		t.Fatalf("role B ingestion must not seed the ledger, got %d", n)
+	}
+	if role, _ := res.Metadata["role"].(string); role != "b" {
+		t.Fatalf("expected metadata role=b, got %v", res.Metadata["role"])
+	}
+	if ok, _ := res.Metadata["auth_registered"].(bool); !ok {
+		t.Fatal("expected auth_registered=true")
+	}
+}
+
+func TestNormalizeIngestRole(t *testing.T) {
+	for _, in := range []string{"b", "B", "role-b", "second", "2", " b "} {
+		if normalizeIngestRole(in) != "b" {
+			t.Fatalf("expected %q -> b", in)
+		}
+	}
+	for _, in := range []string{"", "a", "primary", "x"} {
+		if normalizeIngestRole(in) != "a" {
+			t.Fatalf("expected %q -> a", in)
+		}
+	}
+}
