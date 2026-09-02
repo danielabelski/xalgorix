@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — Benchmark scoring, robustness, and a per-challenge timeout
+## [v4.6.21](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.21) — Benchmark scoring, robustness, and a per-challenge timeout (2026-09-01)
 
 ### Changed
 - **Benchmark scoring is now class-based.** Each challenge app hosts exactly one vulnerability, so a finding of the expected class against it counts as solved; the previous exact-endpoint requirement wrongly failed a correct detection when the agent proved the bug on a different path (e.g. reflected XSS confirmed at `/?q=` rather than a declared `/search`). Path precision is a separate concern from class detection, which is what the benchmark measures.
