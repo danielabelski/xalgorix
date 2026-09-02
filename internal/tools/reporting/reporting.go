@@ -735,13 +735,16 @@ func duplicateResult(existing Vulnerability, msg string) tools.Result {
 func findDuplicateVulnerability(existing []Vulnerability, title, description, target, endpoint string) (Vulnerability, string, bool) {
 	normalizedTitle := normalizeFindingText(title)
 	normalizedTarget := normalizeEndpoint(target)
-	normalizedEndpoint := normalizeEndpoint(endpoint)
+	// Endpoints use the templated key so object-ID variants of the same path
+	// (/orders/1042 vs /orders/2087) are recognized as one finding. Targets are
+	// hosts, not object paths, so they keep the plain normalization.
+	normalizedEndpoint := dedupEndpointKey(endpoint)
 	vulnType := extractVulnType(title, description)
 
 	for _, vuln := range existing {
 		existingTitle := normalizeFindingText(vuln.Title)
 		existingTarget := normalizeEndpoint(vuln.Target)
-		existingEndpoint := normalizeEndpoint(vuln.Endpoint)
+		existingEndpoint := dedupEndpointKey(vuln.Endpoint)
 		existingType := extractVulnType(vuln.Title, vuln.Description)
 		sameTarget := normalizedTarget == existingTarget
 
@@ -2577,6 +2580,57 @@ func normalizeEndpoint(endpoint string) string {
 	endpoint = strings.TrimRight(endpoint, "/")
 	// Lowercase for consistent comparison
 	return strings.ToLower(endpoint)
+}
+
+// idPathSegment matches a single path segment that is an opaque per-object
+// identifier — a pure number, a UUID, or a long hex string (e.g. a Mongo
+// ObjectId). These vary per object instance, so the SAME finding across many
+// IDs (/orders/1, /orders/2, /orders/9f3e…-uuid) would otherwise look like
+// distinct endpoints and each trigger a fresh, expensive verification plus a
+// separate stored finding.
+var (
+	uuidPathSegment = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	hexPathSegment  = regexp.MustCompile(`^[0-9a-f]{16,}$`)
+	numPathSegment  = regexp.MustCompile(`^\d+$`)
+)
+
+// isIDPathSegment reports whether a path segment looks like an opaque object
+// identifier. It is deliberately conservative: version-like ("v1", "v2") and
+// named segments ("users", "api") never match, so distinct endpoints are not
+// collapsed — only object-ID variants of the same endpoint are.
+func isIDPathSegment(seg string) bool {
+	if seg == "" {
+		return false
+	}
+	if numPathSegment.MatchString(seg) {
+		return true
+	}
+	// normalizeEndpoint already lowercased, but be defensive for direct callers.
+	low := strings.ToLower(seg)
+	return uuidPathSegment.MatchString(low) || hexPathSegment.MatchString(low)
+}
+
+// templatePathParams collapses opaque per-object identifier segments in a path
+// to "{id}", so ID variants of the same endpoint share a key. It expects an
+// already query/fragment-stripped, lowercased path (see dedupEndpointKey).
+func templatePathParams(path string) string {
+	if path == "" || !strings.Contains(path, "/") {
+		return path
+	}
+	segs := strings.Split(path, "/")
+	for i, s := range segs {
+		if isIDPathSegment(s) {
+			segs[i] = "{id}"
+		}
+	}
+	return strings.Join(segs, "/")
+}
+
+// dedupEndpointKey is normalizeEndpoint plus path-parameter templating. It is
+// used ONLY for duplicate comparison — never for the stored or displayed
+// endpoint, which must keep the real object id for the PoC to be reproducible.
+func dedupEndpointKey(endpoint string) string {
+	return templatePathParams(normalizeEndpoint(endpoint))
 }
 
 func normalizeFindingText(value string) string {
