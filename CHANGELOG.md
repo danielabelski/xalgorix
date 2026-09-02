@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — Stop dropping browser-confirmed XSS as a false positive
+## [v4.6.22](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.22) — Stop dropping browser-confirmed XSS as a false positive (2026-09-01)
 
 ### Fixed
 - **The false-positive gate no longer rejects a browser-confirmed XSS as "reflection only."** When `verify_xss` proves execution in a real browser, it emits a machine-generated proof — `Browser-confirmed XSS: a dialog:alert dialog carrying the nonce "…" fired while loading …` — but that phrasing matched none of the gate's execution markers, while the reflected payload the agent includes (`<script>`, `onerror=`) tripped the reflection-only check, so a genuinely proven XSS was dropped (and had to be re-reported, sometimes landing as needs-manual-verification). The gate now recognizes the verifier's execution tokens (and dialog/console/DOM signal kinds), so a browser-confirmed XSS passes through to the independent verifier instead of being discarded. Surfaced by the first benchmark baseline run.
