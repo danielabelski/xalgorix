@@ -1690,6 +1690,15 @@ func (a *Agent) prepareScanEnvironment() {
 			codesearch.SetSourceRoot(a.scanCtx.ID, root)
 			a.emit(Event{Type: "message", Content: "📦 Whitebox source ready — use code_search to hunt sinks."})
 			log.Printf("[agent] whitebox source ready at %s", root)
+			// Auto-seed the ledger from source so the source-to-runtime bridge
+			// starts populated (mirrors seedLedgerFromSurface for uploaded
+			// artifacts): dangerous sinks + reachable routes become schedulable
+			// hypotheses from iteration 1, without waiting for the model to call
+			// scan_source_sinks / scan_source_routes.
+			if s := a.seedLedgerFromSource(); s.SinkHypotheses+s.RouteHypotheses > 0 {
+				a.emit(Event{Type: "message", Content: fmt.Sprintf("🔎 Seeded %d source→sink and %d route hypotheses from source (%d route↔sink correlated) — use read_ledger and probe_hypothesis to confirm reachability.", s.SinkHypotheses, s.RouteHypotheses, s.Correlated)})
+				log.Printf("[agent] source seeding: %d sink, %d route hypotheses (%d correlated)", s.SinkHypotheses, s.RouteHypotheses, s.Correlated)
+			}
 		}
 	}
 	// Attack-surface seeding (OpenAPI / HAR / Postman). Parse the operator's
