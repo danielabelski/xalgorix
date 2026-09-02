@@ -208,3 +208,77 @@ func TestRegister(t *testing.T) {
 		t.Fatal("code_search should declare parameters")
 	}
 }
+
+func TestSinkScanNoSource(t *testing.T) {
+	// No source root configured for this context → SinkScan must error so the
+	// caller can fall back to black-box discovery.
+	if _, err := SinkScan("ctx-sinkscan-missing", 20); err == nil {
+		t.Fatal("SinkScan must error when no source root is configured")
+	}
+}
+
+func TestSinkScanFindsRCESink(t *testing.T) {
+	const ctx = "ctx-sinkscan-rce"
+	dir := t.TempDir()
+	// A user-controlled command reaching os.system — the canonical RCE sink the
+	// curated 'rce' class must catch. grep-ERE-safe (no (?i)) so it passes with
+	// the grep fallback when ripgrep is absent (as in CI).
+	src := "import os\n\ndef handler(request):\n    cmd = request.args.get('cmd')\n    os.system(cmd)  # RCE sink\n"
+	if err := os.WriteFile(filepath.Join(dir, "vuln.py"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	SetSourceRoot(ctx, dir)
+	defer SetSourceRoot(ctx, "")
+
+	res, err := SinkScan(ctx, 20)
+	if err != nil {
+		t.Fatalf("SinkScan: %v", err)
+	}
+	rce := res["rce"]
+	if len(rce) == 0 {
+		t.Fatalf("expected >=1 rce sink match, got none; full result: %+v", res)
+	}
+	var found bool
+	for _, m := range rce {
+		// Structured fields must be populated: a source-root-relative file
+		// (never absolute), a 1-based line, and bounded text.
+		if m.File == "" || filepath.IsAbs(m.File) {
+			t.Fatalf("SinkMatch.File must be a source-root-relative path, got %q", m.File)
+		}
+		if m.Line <= 0 {
+			t.Fatalf("SinkMatch.Line must be 1-based, got %d", m.Line)
+		}
+		if strings.Contains(m.Text, "os.system") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected an os.system hit in rce matches, got: %+v", rce)
+	}
+	if rce[0].File != "vuln.py" {
+		t.Fatalf("expected match file 'vuln.py', got %q", rce[0].File)
+	}
+}
+
+func TestSinkScanBoundsPerClass(t *testing.T) {
+	const ctx = "ctx-sinkscan-bound"
+	dir := t.TempDir()
+	var sb strings.Builder
+	sb.WriteString("import os\n")
+	for i := 0; i < 5; i++ {
+		sb.WriteString("os.system('x')\n")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "many.py"), []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	SetSourceRoot(ctx, dir)
+	defer SetSourceRoot(ctx, "")
+
+	res, err := SinkScan(ctx, 2)
+	if err != nil {
+		t.Fatalf("SinkScan: %v", err)
+	}
+	if n := len(res["rce"]); n > 2 {
+		t.Fatalf("maxPerClass=2 must bound rce matches, got %d", n)
+	}
+}
