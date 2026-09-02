@@ -29,6 +29,13 @@ type Challenge struct {
 	Param    string       // the vulnerable parameter, when applicable
 	Desc     string       // one-line human description
 	Handler  http.Handler // the deliberately vulnerable app
+
+	// SourceFiles is the whitebox source tree for the app, as relative path →
+	// file content. When set, the harness materializes it to a temp directory
+	// and hands that directory to the scan as the target's source repo, so the
+	// scan can use the source-to-runtime bridge (scan_source_sinks /
+	// scan_source_routes / probe_hypothesis). Nil for pure black-box challenges.
+	SourceFiles map[string]string
 }
 
 // Start launches the challenge app on an ephemeral loopback server. The caller
@@ -164,6 +171,56 @@ func Builtin() []Challenge {
 					out += "uid=0(root) gid=0(root) groups=0(root)\n"
 				}
 				_, _ = fmt.Fprint(w, out)
+			}),
+		},
+		{
+			// Whitebox challenge: the command-injectable route is NOT linked from
+			// any page, so black-box crawling cannot find it. Solving it requires
+			// the source-to-runtime bridge — scan the attached source, discover
+			// the route + the os.popen sink in the same file, probe it live, then
+			// exploit it. Class rce, so it scores on the existing scale.
+			Name: "whitebox-cmdi", Class: "rce", Endpoint: "/internal/run-check", Param: "host",
+			Desc: "Command injection on an UNLINKED route, discoverable only via the attached source.",
+			SourceFiles: map[string]string{
+				"app.py": "from flask import Flask, request\n" +
+					"import os\n\n" +
+					"app = Flask(__name__)\n\n\n" +
+					"@app.route('/')\n" +
+					"def index():\n" +
+					"    return '<html><body>Service</body></html>'\n\n\n" +
+					"@app.route('/healthz')\n" +
+					"def healthz():\n" +
+					"    return 'ok'\n\n\n" +
+					"# Internal diagnostics endpoint - intentionally not linked from any page.\n" +
+					"@app.route('/internal/run-check')\n" +
+					"def run_check():\n" +
+					"    host = request.args.get('host', '')\n" +
+					"    # Vulnerable: user input flows into a shell command.\n" +
+					"    return os.popen('ping -c1 ' + host).read()\n",
+			},
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/healthz":
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					_, _ = fmt.Fprint(w, "ok")
+				case "/internal/run-check":
+					host := r.URL.Query().Get("host")
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					out := fmt.Sprintf("PING %s: 56 data bytes\n64 bytes: icmp_seq=0 ttl=64 time=0.041 ms\n", host)
+					if hasShellMeta(host) {
+						// Simulated command execution of the injected command.
+						out += "uid=0(root) gid=0(root) groups=0(root)\n"
+					}
+					_, _ = fmt.Fprint(w, out)
+				case "/":
+					// Index links only to /healthz — the vulnerable route is NOT
+					// linked, so black-box crawling can't find it; only whitebox
+					// source discovery can.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Service</h1><p>See <a href="/healthz">health</a>.</p></body></html>`)
+				default:
+					http.NotFound(w, r)
+				}
 			}),
 		},
 	}
