@@ -374,6 +374,12 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// with authenticated-endpoint authorization hypotheses.
 	a.registerHARIngestTool(reg)
 
+	// Register the whitebox source-to-runtime bridge (scan_source_sinks): sweeps
+	// the attached source tree for dangerous sinks and seeds each as a
+	// source->sink hypothesis (Endpoint=file:line, Origin=source-sink) so the
+	// evidence-driven loop can trace it to a reachable route and exploit it.
+	a.registerScanSourceSinksTool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests

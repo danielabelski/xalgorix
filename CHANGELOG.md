@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **`scan_source_sinks` bridges whitebox source to runtime exploitation.** Black-box recon finds routes; whitebox search finds the dangerous code behind them — but nothing connected the two automatically. The new tool sweeps the attached source tree for dangerous sinks (RCE/command injection, SQLi, SSRF, file I/O→LFI, template→SSTI, deserialization, open redirect) using the same curated patterns as `code_search`, then seeds each hit into the shared ledger as a source→sink hypothesis tagged with its `file:line` and a `source-sink:` data-flow note — the first automated populator of `Hypothesis.DataFlow`. Each sink class is mapped to its canonical vuln class (e.g. `cmdi`→`rce`, `fileio`→`lfi`, `template`→`ssti`); discovery-only classes (secrets, auth, crypto) are deliberately not seeded. Seeding is bounded (max 40 hypotheses per sweep) and idempotent (dedup by class + `file:line`, so re-running adds nothing), and when no source is configured the tool degrades to a black-box fallback message. Specialists can then `claim_next_hypothesis` and trace each sink back to a reachable route to prove it on the live target — the first step toward source-to-runtime exploitation.
+
 ## [v4.6.22](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.22) — Stop dropping browser-confirmed XSS as a false positive (2026-09-01)
 
 ### Fixed

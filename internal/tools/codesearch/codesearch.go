@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -182,6 +183,135 @@ func sinkClasses() []string {
 	}
 	sort.Strings(cs)
 	return cs
+}
+
+// SinkMatch is one dangerous-sink hit located in the target's source: a
+// source-root-relative file, a 1-based line number, and the (bounded) matched
+// source text. It is the structured unit the agent seeds into the ledger as a
+// source->sink hypothesis to trace back to a reachable HTTP route.
+type SinkMatch struct {
+	File string `json:"file"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+// SinkScan runs every curated sink-class pattern over the scan's resolved
+// source root and returns the structured matches grouped by class (only classes
+// with at least one hit appear in the map). maxPerClass bounds matches returned
+// per class (defaults to 20, hard cap 100). It errors only when no whitebox
+// source is configured for the scan — the signal callers use to fall back to
+// black-box discovery.
+//
+// This is the programmatic, seed-the-ledger sibling of the code_search tool:
+// code_search renders a human-readable blob for one class on demand, whereas
+// SinkScan sweeps all classes at once and yields typed matches so the agent can
+// deterministically populate source->sink hypotheses. A single class whose
+// search times out is skipped rather than failing the whole sweep.
+func SinkScan(contextID string, maxPerClass int) (map[string][]SinkMatch, error) {
+	root := getSourceRoot(contextID)
+	if root == "" {
+		return nil, fmt.Errorf("whitebox source not configured for scan %q", contextID)
+	}
+	if maxPerClass <= 0 {
+		maxPerClass = 20
+	}
+	if maxPerClass > 100 {
+		maxPerClass = 100
+	}
+	results := make(map[string][]SinkMatch)
+	for _, class := range sinkClasses() {
+		pattern := sinkPatterns[class]
+		if pattern == "" {
+			continue
+		}
+		matches, err := searchSinkMatches(root, pattern, maxPerClass)
+		if err != nil {
+			continue // e.g. this class's search timed out; keep sweeping.
+		}
+		if len(matches) > 0 {
+			results[class] = matches
+		}
+	}
+	return results, nil
+}
+
+// searchSinkMatches runs one sink-class regex over dir and returns structured
+// matches (file:line:text), preferring ripgrep and falling back to grep -RnE.
+// It is the structured sibling of runSearch: instead of a display blob it
+// yields []SinkMatch for programmatic seeding, with source-root-relative paths
+// and bounded text. rg/grep exit 1 (no matches) is not treated as an error;
+// only a timeout is.
+func searchSinkMatches(dir, pattern string, max int) ([]SinkMatch, error) {
+	if max <= 0 {
+		max = 20
+	}
+	var cmd *exec.Cmd
+	if rg, err := exec.LookPath("rg"); err == nil {
+		cmd = exec.Command(rg, "--no-heading", "--line-number", "--color", "never", "-S",
+			"--max-count", strconv.Itoa(max), "-e", pattern, dir)
+	} else {
+		cmd = exec.Command("grep", "-RnE", "--color=never", pattern, dir)
+	}
+
+	done := make(chan struct{})
+	var out []byte
+	go func() {
+		out, _ = cmd.CombinedOutput() // exit 1 == no matches; tolerated
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return nil, fmt.Errorf("sink search timed out")
+	}
+
+	matches := make([]SinkMatch, 0, max)
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		m, ok := parseGrepLine(dir, line)
+		if !ok {
+			continue
+		}
+		matches = append(matches, m)
+		if len(matches) >= max {
+			break
+		}
+	}
+	return matches, nil
+}
+
+// parseGrepLine parses a single rg/grep "file:line:text" record into a
+// SinkMatch with a source-root-relative path and bounded text. It returns
+// ok=false for lines that don't carry a parseable line number (e.g. binary
+// notices or blank separators).
+func parseGrepLine(root, line string) (SinkMatch, bool) {
+	parts := strings.SplitN(line, ":", 3)
+	if len(parts) < 3 {
+		return SinkMatch{}, false
+	}
+	ln, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return SinkMatch{}, false
+	}
+	file := parts[0]
+	if rel, err := filepath.Rel(root, file); err == nil && !strings.HasPrefix(rel, "..") {
+		file = rel
+	}
+	return SinkMatch{File: file, Line: ln, Text: boundText(parts[2], 200)}, true
+}
+
+// boundText trims and length-bounds a matched source line for compact display.
+func boundText(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }
 
 func parseIntSafe(s string) (int, error) {
