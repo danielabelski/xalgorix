@@ -274,6 +274,51 @@ func Builtin() []Challenge {
 				}
 			}),
 		},
+		{
+			// Whitebox challenge (SSTI): the vulnerable preview route is not
+			// linked from any page, so it is discoverable only via the attached
+			// source. Solving it exercises the source-to-runtime bridge for a
+			// third injection class — the template sink (render_template_string
+			// over concatenated user input) lives inside the /internal/preview
+			// handler, which codesearch types as a template sink (→ ssti).
+			Name: "whitebox-ssti", Class: "ssti", Endpoint: "/internal/preview", Param: "name",
+			Desc: "Server-side template injection on an UNLINKED route, discoverable only via the attached source.",
+			SourceFiles: map[string]string{
+				"app.py": "from flask import Flask, request, render_template_string\n\n" +
+					"app = Flask(__name__)\n\n\n" +
+					"@app.route('/')\n" +
+					"def index():\n" +
+					"    return '<html><body>Preview service</body></html>'\n\n\n" +
+					"@app.route('/healthz')\n" +
+					"def healthz():\n" +
+					"    return 'ok'\n\n\n" +
+					"# Internal preview endpoint - intentionally not linked from any page.\n" +
+					"@app.route('/internal/preview')\n" +
+					"def preview():\n" +
+					"    name = request.args.get('name', '')\n" +
+					"    # Vulnerable: user input rendered as a Jinja2 template.\n" +
+					"    return render_template_string('<h1>Hello ' + name + '</h1>')\n",
+			},
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/healthz":
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					_, _ = fmt.Fprint(w, "ok")
+				case "/internal/preview":
+					name := r.URL.Query().Get("name")
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					// Simulated Jinja2 render: a {{ a * b }} expression is
+					// evaluated (so {{7*7}} → 49), proving template injection.
+					_, _ = fmt.Fprintf(w, "<html><body><h1>Hello %s</h1></body></html>", sstiRender(name))
+				case "/":
+					// Index does NOT link the vulnerable preview route.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Preview</h1><p>See <a href="/healthz">health</a>.</p></body></html>`)
+				default:
+					http.NotFound(w, r)
+				}
+			}),
+		},
 	}
 }
 

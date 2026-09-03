@@ -146,18 +146,21 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 		t.Fatalf("expected xss 1/1 and idor 1/1, got %v", byClass)
 	}
 	// Every other single-challenge class is present but unsolved by this fake.
-	for _, c := range []string{"open_redirect", "ssrf", "ssti", "lfi"} {
+	for _, c := range []string{"open_redirect", "ssrf", "lfi"} {
 		if byClass[c] != [2]int{0, 1} {
 			t.Fatalf("expected %s 0/1, got %v", c, byClass[c])
 		}
 	}
-	// rce (cmdi + whitebox-cmdi) and sqli (error-sqli + whitebox-sqli) each have
-	// two challenges, both unsolved by this fake.
+	// rce (cmdi + whitebox-cmdi), sqli (error-sqli + whitebox-sqli), and ssti
+	// (ssti + whitebox-ssti) each have two challenges, all unsolved by this fake.
 	if byClass["rce"] != [2]int{0, 2} {
 		t.Fatalf("expected rce 0/2, got %v", byClass["rce"])
 	}
 	if byClass["sqli"] != [2]int{0, 2} {
 		t.Fatalf("expected sqli 0/2, got %v", byClass["sqli"])
+	}
+	if byClass["ssti"] != [2]int{0, 2} {
+		t.Fatalf("expected ssti 0/2, got %v", byClass["ssti"])
 	}
 }
 
@@ -299,6 +302,40 @@ func TestWhiteboxSqliChallengeExhibitsVuln(t *testing.T) {
 	}
 	// The index must NOT link the vulnerable route (whitebox-only discovery).
 	if body := httpGet(t, srv.URL+"/"); strings.Contains(body, "/internal/report") {
+		t.Fatalf("index must not link the vulnerable route (whitebox-only), got %q", body)
+	}
+}
+
+func TestWhiteboxSstiChallengeExhibitsVuln(t *testing.T) {
+	wb := challengeByName(t, "whitebox-ssti")
+
+	// The whitebox source carries the template sink (render_template_string over
+	// concatenated user input) inside the unlinked preview route's handler.
+	src, ok := wb.SourceFiles["app.py"]
+	if !ok {
+		t.Fatal("whitebox-ssti must ship app.py source")
+	}
+	if !strings.Contains(src, "/internal/preview") || !strings.Contains(src, "render_template_string") {
+		t.Fatalf("app.py must contain the /internal/preview route and the render_template_string sink:\n%s", src)
+	}
+
+	srv := wb.Start()
+	defer srv.Close()
+
+	// A {{7*7}} expression is evaluated server-side to 49 (template injection).
+	if body := httpGet(t, srv.URL+"/internal/preview?name=%7B%7B7*7%7D%7D"); !strings.Contains(body, "49") {
+		t.Fatalf("whitebox-ssti did not evaluate the template expression to 49: %q", body)
+	}
+	// A benign name is echoed literally, not evaluated.
+	if body := httpGet(t, srv.URL+"/internal/preview?name=alice"); !strings.Contains(body, "alice") || strings.Contains(body, "49") {
+		t.Fatalf("benign name must be echoed literally, not evaluated: %q", body)
+	}
+	// Health endpoint is benign.
+	if body := httpGet(t, srv.URL+"/healthz"); !strings.Contains(body, "ok") {
+		t.Fatalf("healthz should return ok, got %q", body)
+	}
+	// The index must NOT link the vulnerable route (whitebox-only discovery).
+	if body := httpGet(t, srv.URL+"/"); strings.Contains(body, "/internal/preview") {
 		t.Fatalf("index must not link the vulnerable route (whitebox-only), got %q", body)
 	}
 }
