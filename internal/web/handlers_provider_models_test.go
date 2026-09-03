@@ -103,6 +103,19 @@ func TestProviderModelsURLsUsesCodexCatalogProtocol(t *testing.T) {
 	}
 }
 
+func TestProviderModelsURLsPreservesZAIV4(t *testing.T) {
+	urls, err := providerModelsURLs(providers.Entry{
+		ID: "zai-coding-plan", BaseURL: "https://api.z.ai/api/coding/paas/v4", HeaderStyle: "openai",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"https://api.z.ai/api/coding/paas/v4/models"}
+	if !reflect.DeepEqual(urls, want) {
+		t.Fatalf("URLs = %v, want %v", urls, want)
+	}
+}
+
 func TestModelDiscoveryConfigMatchesActiveProviderByLLMProvider(t *testing.T) {
 	// Providers routed via XALGORIX_LLM_PROVIDER (for example DeepSeek) persist a
 	// bare, provider-native model name with no "<provider>/" prefix on XALGORIX_LLM

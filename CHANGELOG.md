@@ -1,5 +1,13 @@
 # Changelog
 
+## [v4.6.43](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.43) — Native Z.AI (Zhipu GLM) provider support (2026-09-03)
+
+### Added
+- **Native support for Z.AI (Zhipu GLM), including the GLM Coding Plan (#511).** Two catalog entries ship: `Z.AI (standard API)` (base `https://api.z.ai/api/paas/v4`) and `Z.AI Coding Plan` (base `https://api.z.ai/api/coding/paas/v4`), both offered in first-run setup and the Settings → LLM provider list and keyed by API key. `glm-*` model ids now route to Z.AI automatically, and a GLM id is accepted in either case — a `GLM-5.3` selection is sent as the canonical `glm-5.3` — so a newly released model id is not rejected as Z.AI's catalog evolves.
+
+### Fixed
+- **Z.AI chat requests no longer hit a malformed `/v4/v1/chat/completions` URL (which Z.AI rejects with `401 token expired or incorrect`).** The OpenAI-compatible URL builder now treats an explicit API-version segment already present in a provider's base (Z.AI's `/v4`, OpenAI's `/v1`, …) as authoritative and only inserts `/v1` when the base carries no version at all. The fix is applied uniformly across every endpoint builder — the legacy single-call resolver, the composite resolver, the multi-provider router, and model discovery — so `https://api.z.ai/api/coding/paas/v4` resolves to `…/v4/chat/completions`. Existing providers are unaffected (MiniMax and OpenAI still resolve to `…/v1/chat/completions`).
+
 ## [v4.6.42](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.42) — Complete precision coverage: a negative control for every black-box class (2026-09-02)
 
 ### Added

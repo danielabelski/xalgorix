@@ -70,6 +70,7 @@ func (r *Router) TestRoute(model string) (RouteResult, error) {
 	if !entryOK {
 		return RouteResult{}, fmt.Errorf("provider %q not found in catalog", providerID)
 	}
+	bareModel = normalizeProviderModel(entry, bareModel)
 
 	hasKey := r.keys.HasKey(providerID)
 
@@ -116,6 +117,7 @@ func (r *Router) Route(ctx context.Context, model string) (Endpoint, error) {
 			Msg: fmt.Sprintf("router: provider %q not in catalog", providerID),
 		}
 	}
+	bareModel = normalizeProviderModel(entry, bareModel)
 
 	// Step 3: Get API key
 	pk, hasKey := r.keys.Get(providerID)
@@ -150,20 +152,10 @@ func (r *Router) Route(ctx context.Context, model string) (Endpoint, error) {
 		url = strings.TrimSuffix(url, "/v1")
 		url += "/v1beta/models/" + bareModel + ":generateContent"
 	case "openai":
-		if !strings.HasSuffix(strings.ToLower(url), "/chat/completions") {
-			if !strings.HasSuffix(apiBase, "/v1") && !strings.Contains(apiBase, "/v1/") {
-				url += "/v1"
-			}
-			url += "/chat/completions"
-		}
+		url = providers.OpenAICompatibleURL(apiBase, "chat/completions")
 	default:
 		// Fallback to OpenAI-compatible format
-		if !strings.HasSuffix(strings.ToLower(url), "/chat/completions") {
-			if !strings.HasSuffix(apiBase, "/v1") && !strings.Contains(apiBase, "/v1/") {
-				url += "/v1"
-			}
-			url += "/chat/completions"
-		}
+		url = providers.OpenAICompatibleURL(apiBase, "chat/completions")
 	}
 
 	return Endpoint{

@@ -122,6 +122,33 @@ func TestBuiltin_NovitaConfiguration(t *testing.T) {
 	}
 }
 
+func TestBuiltin_ZAIConfigurations(t *testing.T) {
+	tests := []struct {
+		id      string
+		baseURL string
+	}{
+		{"zai", "https://api.z.ai/api/paas/v4"},
+		{"zai-coding-plan", "https://api.z.ai/api/coding/paas/v4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			entry, ok := LookupBuiltin(tt.id)
+			if !ok {
+				t.Fatalf("%s provider is missing from the built-in catalog", tt.id)
+			}
+			if entry.BaseURL != tt.baseURL {
+				t.Errorf("BaseURL = %q, want %q", entry.BaseURL, tt.baseURL)
+			}
+			if entry.HeaderStyle != "openai" {
+				t.Errorf("HeaderStyle = %q, want openai", entry.HeaderStyle)
+			}
+			if len(entry.AuthMethods) != 1 || entry.AuthMethods[0] != "api_key" {
+				t.Errorf("AuthMethods = %v, want [api_key]", entry.AuthMethods)
+			}
+		})
+	}
+}
+
 // TestService_GetUnknown asserts an unknown id returns
 // (zero, false, nil) without an error so callers can branch
 // cleanly.

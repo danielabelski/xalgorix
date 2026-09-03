@@ -25,6 +25,8 @@ var setupProviders = []setupProvider{
 	{id: "anthropic", name: "Anthropic (Claude)", defaultModel: "claude-fable-5", needsAPIKey: true},
 	{id: "google", name: "Google Gemini", defaultModel: "gemini-3.5-flash", needsAPIKey: true},
 	{id: "minimax", name: "MiniMax", defaultModel: "MiniMax-M3", needsAPIKey: true},
+	{id: "zai", name: "Z.AI (standard API)", defaultModel: "glm-5.3", needsAPIKey: true},
+	{id: "zai-coding-plan", name: "Z.AI Coding Plan", defaultModel: "glm-5.3", needsAPIKey: true},
 	{id: "ollama", name: "Ollama (local, no API key)", defaultModel: "llama3.3"},
 	{id: "custom", name: "Custom OpenAI-compatible endpoint", needsAPIKey: true},
 }

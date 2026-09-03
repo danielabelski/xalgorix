@@ -153,3 +153,37 @@ func TestBuildCatalogEndpoint_CustomProviderFallbackBase(t *testing.T) {
 		t.Errorf("error type = %T, want *ConfigError", err)
 	}
 }
+
+func TestBuildCatalogEndpoint_ZAICodingPlanPreservesV4(t *testing.T) {
+	entry, ok := providers.LookupBuiltin("zai-coding-plan")
+	if !ok {
+		t.Fatal("Z.AI Coding Plan provider is missing")
+	}
+	prof := auth.Profile{
+		Provider:  "zai-coding-plan",
+		ProfileID: "default",
+		Type:      auth.APIKey,
+		APIKey:    "zai-key",
+	}
+	ep, err := BuildCatalogEndpoint(entry, prof, "GLM-5.3", "")
+	if err != nil {
+		t.Fatalf("BuildCatalogEndpoint: %v", err)
+	}
+	if ep.URL != "https://api.z.ai/api/coding/paas/v4/chat/completions" {
+		t.Fatalf("URL = %q, want Z.AI /v4/chat/completions without injected /v1", ep.URL)
+	}
+	if ep.Model != "glm-5.3" || ep.APIKey != "zai-key" || ep.HeaderStyle != "openai" {
+		t.Fatalf("endpoint = %+v", ep)
+	}
+}
+
+func TestNormalizeEndpointModelRecognizesLegacyCustomZAIConfig(t *testing.T) {
+	got := normalizeEndpointModel(
+		"custom",
+		"https://api.z.ai/api/coding/paas/v4/chat/completions",
+		"Glm-5.3-Flash",
+	)
+	if got != "glm-5.3-flash" {
+		t.Fatalf("normalized model = %q, want glm-5.3-flash", got)
+	}
+}

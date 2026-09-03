@@ -358,6 +358,12 @@ func TestResolveEndpoint_ProviderDefaultsAndCustomBases(t *testing.T) {
 			wantModel: "deepseek-v4-pro",
 		},
 		{
+			name:      "zai coding plan default",
+			cfg:       config.Config{LLM: "zai-coding-plan/Glm-5.3", APIKey: "k"},
+			wantURL:   "https://api.z.ai/api/coding/paas/v4/chat/completions",
+			wantModel: "Glm-5.3",
+		},
+		{
 			name:      "gemini default",
 			cfg:       config.Config{LLM: "google/gemini-3.1-pro-preview", APIKey: "k"},
 			wantURL:   "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent",
@@ -380,6 +386,12 @@ func TestResolveEndpoint_ProviderDefaultsAndCustomBases(t *testing.T) {
 			cfg:       config.Config{LLM: "custom/my-model", APIBase: "https://llm.example/v1/chat/completions", APIKey: "k"},
 			wantURL:   "https://llm.example/v1/chat/completions",
 			wantModel: "my-model",
+		},
+		{
+			name:      "custom versioned v4 base",
+			cfg:       config.Config{LLM: "custom/Glm-5.3", APIBase: "https://api.z.ai/api/coding/paas/v4", APIKey: "k"},
+			wantURL:   "https://api.z.ai/api/coding/paas/v4/chat/completions",
+			wantModel: "Glm-5.3",
 		},
 	}
 

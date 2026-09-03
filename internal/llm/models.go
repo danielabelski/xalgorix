@@ -54,6 +54,7 @@ var canonicalProviders = map[string]bool{
 	"minimax":   true,
 	"nvidia":    true,
 	"cohere":    true,
+	"zai":       true,
 }
 
 // initModelIndex builds the exact-match index and pattern rules
@@ -139,6 +140,8 @@ func initModelIndex() {
 		{"kimi-", "moonshot"},
 		// MiniMax
 		{"minimax-", "minimax"},
+		// Z.AI / Zhipu GLM
+		{"glm-", "zai"},
 		// NVIDIA-hosted model ids
 		{"nvidia/", "nvidia"},
 		{"meta/llama-", "nvidia"},
