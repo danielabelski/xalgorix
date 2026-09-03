@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.41](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.41) — Black-box benchmark now measures precision (negative controls) (2026-09-02)
+
+### Added
+- **The benchmark now measures false-positive rate, not just recall, via negative-control challenges.** Every challenge so far was vulnerable, so the benchmark only rewarded finding bugs — a scanner that over-reports (the failure mode all the reporting gates and verifiers exist to prevent) would still score perfectly. A `Challenge` can now be flagged `Negative`: the app handles the same kind of input as a positive challenge but SECURELY, so the correct outcome is NO finding of that class, and scoring inverts (a negative control is "solved" only when the class is correctly NOT reported; reporting it is a false positive). Four negative controls ship: `safe-search` (reflects input but HTML-escapes it — no XSS), `safe-redirect` (only relative same-origin redirects — no open redirect), `safe-sqli` (parameterized; a bad id returns a generic 400 with no database error — no SQLi), and `safe-fetch` (an allowlist refuses internal/metadata hosts with 403 — no SSRF). The scorecard reports a `Precision: N/M negative controls clean, K false positive(s)` line and marks each false positive with the offending finding id, so a change's effect on precision is measured alongside recall. Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.40](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.40) — Black-box benchmark challenges are now crawler-discoverable (2026-09-02)
 
 ### Changed

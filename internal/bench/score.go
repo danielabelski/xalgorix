@@ -13,7 +13,8 @@ import (
 type Result struct {
 	Name             string
 	Class            string
-	Solved           bool
+	Negative         bool // negative control: correct outcome is NO finding of Class
+	Solved           bool // handled correctly (positive: found; negative: correctly avoided)
 	MatchedFindingID string
 	Findings         int
 	Elapsed          time.Duration
@@ -34,6 +35,30 @@ func (s Scorecard) SolvedCount() int {
 	n := 0
 	for _, r := range s.Results {
 		if r.Solved {
+			n++
+		}
+	}
+	return n
+}
+
+// NegativeCount returns the number of negative-control challenges.
+func (s Scorecard) NegativeCount() int {
+	n := 0
+	for _, r := range s.Results {
+		if r.Negative {
+			n++
+		}
+	}
+	return n
+}
+
+// FalsePositives returns the number of negative-control challenges the scan
+// mishandled by reporting the class it was supposed to stay silent on. This is
+// the benchmark's precision signal: a scanner that over-reports fails these.
+func (s Scorecard) FalsePositives() int {
+	n := 0
+	for _, r := range s.Results {
+		if r.Negative && !r.Solved {
 			n++
 		}
 	}
@@ -70,7 +95,12 @@ func (s Scorecard) String() string {
 			status = "PASS"
 		}
 		fmt.Fprintf(&b, "  [%s] %-16s %-14s %2d finding(s)  %6.1fs", status, r.Name, r.Class, r.Findings, r.Elapsed.Seconds())
-		if r.MatchedFindingID != "" {
+		switch {
+		case r.Negative && r.Solved:
+			b.WriteString("  (negative: no FP)")
+		case r.Negative && !r.Solved:
+			fmt.Fprintf(&b, "  FALSE POSITIVE -> %s", r.MatchedFindingID)
+		case r.MatchedFindingID != "":
 			fmt.Fprintf(&b, "  -> %s", r.MatchedFindingID)
 		}
 		if r.TimedOut {
@@ -94,6 +124,9 @@ func (s Scorecard) String() string {
 			fmt.Fprintf(&b, " %s %d/%d", c, byClass[c][0], byClass[c][1])
 		}
 		b.WriteByte('\n')
+	}
+	if neg := s.NegativeCount(); neg > 0 {
+		fmt.Fprintf(&b, "Precision: %d/%d negative controls clean, %d false positive(s)\n", neg-s.FalsePositives(), neg, s.FalsePositives())
 	}
 	return b.String()
 }

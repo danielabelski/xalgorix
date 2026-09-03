@@ -65,7 +65,7 @@ func runOne(parent context.Context, c Challenge, scan ScanFunc, timeout time.Dur
 		defer cancel()
 	}
 
-	res := Result{Name: c.Name, Class: canonicalClass(c.Class)}
+	res := Result{Name: c.Name, Class: canonicalClass(c.Class), Negative: c.Negative}
 	start := time.Now()
 	findings, err := scan(ctx, srv.URL, sourceDir, "bench-"+c.Name)
 	res.Elapsed = time.Since(start)
@@ -77,8 +77,17 @@ func runOne(parent context.Context, c Challenge, scan ScanFunc, timeout time.Dur
 		res.Err = err
 	}
 	// Score whatever findings were gathered — a scan that timed out may still
-	// have reported the vulnerability before the deadline.
-	res.Solved, res.MatchedFindingID = Solved(c.Class, findings)
+	// have reported the vulnerability before the deadline. For a negative
+	// control the scoring inverts: reporting the class is a false positive, so
+	// "solved" means the class was correctly NOT reported. MatchedFindingID
+	// holds the offending finding id when a negative control false-positives.
+	reported, id := Solved(c.Class, findings)
+	res.MatchedFindingID = id
+	if c.Negative {
+		res.Solved = !reported
+	} else {
+		res.Solved = reported
+	}
 	return res
 }
 
