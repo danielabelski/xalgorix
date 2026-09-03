@@ -405,6 +405,15 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// session auth, the scan target, and the ledger.
 	a.registerVerifySQLiTool(reg)
 
+	// Register the deterministic server-side template-injection confirmer
+	// (verify_ssti): the SSTI sibling of verify_sqli. Given a seeded hypothesis
+	// or a url + parameter, it sends a benign baseline plus {{a*b}} / ${a*b}
+	// payloads with randomized operands, and confirms injection when the
+	// evaluated product appears in the probe response but not the baseline —
+	// recording exploit-proven evidence in the ledger. Agent-bound: needs the
+	// scope config, session auth, the scan target, and the ledger.
+	a.registerVerifySSTITool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests
