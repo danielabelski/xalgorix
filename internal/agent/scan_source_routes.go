@@ -69,11 +69,12 @@ func (a *Agent) scanSourceRoutesTool(args map[string]string) (tools.Result, erro
 		return tools.Result{Output: "Swept the source for HTTP route declarations and found none of the known framework patterns (Flask/FastAPI, Django, Express, Spring, Go routers, Rails). The app may use an uncommon router — try code_search with a custom regex, or map routes by crawling the live target."}, nil
 	}
 
-	// Correlate routes with dangerous sinks in the same file (best-effort: a
-	// sink-scan failure just means no correlation, not a hard error).
-	byFile := map[string][]string{}
+	// Correlate routes with dangerous sinks inside each route's handler
+	// (best-effort: a sink-scan failure just means no correlation, not a hard
+	// error).
+	byFile := map[string][]fileSink{}
 	if found, serr := codesearch.SinkScan(a.scanCtx.ID, 20); serr == nil {
-		byFile = sinkVulnsByFile(found)
+		byFile = sinksByFileWithLines(found)
 	}
 
 	seeded, correlated := a.seedRoutes(routes, byFile)
@@ -97,7 +98,7 @@ func (a *Agent) scanSourceRoutesTool(args map[string]string) (tools.Result, erro
 	if seeded > 0 {
 		fmt.Fprintf(&b, "Seeded %d route hypotheses into the ledger (origin=source-route)", seeded)
 		if correlated > 0 {
-			fmt.Fprintf(&b, ", %d correlated with a same-file dangerous sink (class-typed, higher confidence)", correlated)
+			fmt.Fprintf(&b, ", %d whose handler reaches a dangerous sink (class-typed, higher confidence)", correlated)
 		}
 		b.WriteString(". Use read_ledger(filter=schedulable) or claim_next_hypothesis, then request each route on the live target and prove the vuln.")
 	} else {
@@ -106,32 +107,53 @@ func (a *Agent) scanSourceRoutesTool(args map[string]string) (tools.Result, erro
 	return tools.Result{Output: b.String(), Metadata: map[string]any{"routes": len(routes), "seeded": seeded, "correlated": correlated}}, nil
 }
 
-// sinkVulnsByFile inverts a SinkScan result into file -> sorted, deduplicated
-// canonical vuln classes, using the same sinkClassToVuln allowlist as
-// scan_source_sinks (discovery-only classes are skipped). It is the lookup
-// seedRoutes uses to type a route by the dangerous sinks in its handler file.
-func sinkVulnsByFile(found map[string][]codesearch.SinkMatch) map[string][]string {
-	byFile := map[string]map[string]bool{}
+// fileSink is a dangerous sink located at a specific line in a source file,
+// tagged with its canonical vuln class. Carrying the line lets seedRoutes
+// attribute a sink to the ENCLOSING route handler rather than the whole file.
+type fileSink struct {
+	line int
+	vuln string
+}
+
+// sinksByFileWithLines inverts a SinkScan result into file -> sinks (line +
+// canonical vuln), using the same sinkClassToVuln allowlist as scan_source_sinks
+// (discovery-only classes are skipped). It is the lookup seedRoutes uses to type
+// a route by the dangerous sinks that fall inside its handler span.
+func sinksByFileWithLines(found map[string][]codesearch.SinkMatch) map[string][]fileSink {
+	out := map[string][]fileSink{}
 	for class, matches := range found {
 		vuln, ok := sinkClassToVuln[class]
 		if !ok {
 			continue
 		}
 		for _, m := range matches {
-			if byFile[m.File] == nil {
-				byFile[m.File] = map[string]bool{}
-			}
-			byFile[m.File][vuln] = true
+			out[m.File] = append(out[m.File], fileSink{line: m.Line, vuln: vuln})
 		}
-	}
-	out := map[string][]string{}
-	for file, set := range byFile {
-		for v := range set {
-			out[file] = append(out[file], v)
-		}
-		sort.Strings(out[file])
 	}
 	return out
+}
+
+// enclosingRouteVuln returns the worst vuln class among the sinks that fall
+// within route r's handler span — the lines from r's declaration up to (but not
+// including) the next route declaration in the same file. sameFileRouteLines
+// must be the sorted decl lines of every route in r.File. Returns "" when no
+// dangerous sink is enclosed (the route is then seeded as an attack-surface
+// lead, not class-typed).
+func enclosingRouteVuln(r codesearch.RouteMatch, sameFileRouteLines []int, sinks []fileSink) string {
+	// The handler span ends at the next route declaration strictly below r.
+	nextLine := int(^uint(0) >> 1) // max int
+	for _, ln := range sameFileRouteLines {
+		if ln > r.Line && ln < nextLine {
+			nextLine = ln
+		}
+	}
+	var enclosed []string
+	for _, s := range sinks {
+		if s.line >= r.Line && s.line < nextLine {
+			enclosed = append(enclosed, s.vuln)
+		}
+	}
+	return highestSeverityVuln(enclosed)
 }
 
 // highestSeverityVuln picks the most-dangerous vuln class present, falling back
@@ -156,17 +178,30 @@ func highestSeverityVuln(vulns []string) string {
 
 // seedRoutes upserts bounded, deduplicated route hypotheses from a route sweep
 // and returns how many NEW hypotheses were created and how many of those were
-// correlated with a same-file dangerous sink. Each hypothesis carries a REAL
-// HTTP path as Endpoint and Origin=source-route. A route whose handler file
-// contains a dangerous sink is typed by that sink's (worst) vuln class at
-// confidence 0.45; an uncorrelated route seeds as an authz/attack-surface
-// (idor) lead at confidence 0.3. Idempotent: the ledger dedups by
-// vuln_class+endpoint, so re-seeding the same routes adds nothing.
-func (a *Agent) seedRoutes(routes []codesearch.RouteMatch, sinkVulnsByFile map[string][]string) (seeded, correlated int) {
+// correlated with a dangerous sink INSIDE the route's handler. Each hypothesis
+// carries a REAL HTTP path as Endpoint and Origin=source-route. A route whose
+// handler span (its declaration up to the next route in the same file) encloses
+// a dangerous sink is typed by that sink's (worst) vuln class at confidence
+// 0.45; a route with no enclosed sink seeds as an authz/attack-surface (idor)
+// lead at confidence 0.3. Attributing sinks by handler span (not whole file)
+// avoids typing every route in a multi-route file with an unrelated sink.
+// Idempotent: the ledger dedups by vuln_class+endpoint, so re-seeding the same
+// routes adds nothing.
+func (a *Agent) seedRoutes(routes []codesearch.RouteMatch, sinksByFile map[string][]fileSink) (seeded, correlated int) {
 	l := a.ledger()
 	if l == nil {
 		return 0, 0
 	}
+	// Per-file sorted route declaration lines, so each route's handler span can
+	// be bounded by the next route declaration below it.
+	routeLinesByFile := map[string][]int{}
+	for _, r := range routes {
+		routeLinesByFile[r.File] = append(routeLinesByFile[r.File], r.Line)
+	}
+	for f := range routeLinesByFile {
+		sort.Ints(routeLinesByFile[f])
+	}
+
 	for _, r := range routes {
 		if seeded >= maxRouteSeed {
 			break
@@ -181,10 +216,7 @@ func (a *Agent) seedRoutes(routes []codesearch.RouteMatch, sinkVulnsByFile map[s
 			label = r.Method + " " + path
 		}
 
-		vuln := ""
-		if vulns := sinkVulnsByFile[r.File]; len(vulns) > 0 {
-			vuln = highestSeverityVuln(vulns)
-		}
+		vuln := enclosingRouteVuln(r, routeLinesByFile[r.File], sinksByFile[r.File])
 
 		var h scanctx.Hypothesis
 		if vuln != "" {
@@ -192,11 +224,11 @@ func (a *Agent) seedRoutes(routes []codesearch.RouteMatch, sinkVulnsByFile map[s
 				Title:      fmt.Sprintf("Source route %s → %s sink", label, vuln),
 				VulnClass:  vuln,
 				Endpoint:   path,
-				DataFlow:   fmt.Sprintf("source-route: %s %s @ %s → reaches a %s sink in the same file", r.Framework, label, loc, vuln),
+				DataFlow:   fmt.Sprintf("source-route: %s %s @ %s → its handler reaches a %s sink", r.Framework, label, loc, vuln),
 				Confidence: 0.45,
 				Status:     scanctx.HypothesisQueued,
 				Origin:     "source-route",
-				NextAction: fmt.Sprintf("Request %s on the live target; its handler file %s contains a %s sink — drive user input to it and prove %s.", label, r.File, vuln, vuln),
+				NextAction: fmt.Sprintf("Request %s on the live target; its handler (in %s) reaches a %s sink — drive user input to it and prove %s.", label, r.File, vuln, vuln),
 			}
 		} else {
 			h = scanctx.Hypothesis{
@@ -245,12 +277,12 @@ func (a *Agent) seedLedgerFromSource() sourceSeedSummary {
 	if a.scanCtx == nil || codesearch.GetSourceRoot(a.scanCtx.ID) == "" {
 		return sum
 	}
-	// Sinks first: file-scoped dangerous-sink hypotheses, plus the file→vuln map
-	// used to type co-located routes.
-	byFile := map[string][]string{}
+	// Sinks first: file-scoped dangerous-sink hypotheses, plus the per-file
+	// sink lines used to attribute sinks to their enclosing route handler.
+	byFile := map[string][]fileSink{}
 	if sinkFound, err := codesearch.SinkScan(a.scanCtx.ID, 20); err == nil {
 		sum.SinkHypotheses = a.seedSinks(sinkFound)
-		byFile = sinkVulnsByFile(sinkFound)
+		byFile = sinksByFileWithLines(sinkFound)
 	}
 	// Routes next: reachable-path hypotheses, correlated with the sinks above.
 	if routes, err := codesearch.RouteScan(a.scanCtx.ID, 60); err == nil {
