@@ -363,6 +363,22 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 	// real output into the wrong field). Generic prose must never masquerade as
 	// proof: doing so silently defeats Gate 2 and yields "evidence" that merely
 	// restates the description, so notifications/reports carry no real proof.
+	// ── Bridge: fold browser-confirmed XSS proof from the ledger into the proof ──
+	// verify_xss records concrete browser-execution proof (a dialog/console/DOM
+	// signal carrying the injected nonce) in the shared ledger, but models do not
+	// reliably paste that verdict into exploitation_proof — so a genuinely
+	// browser-confirmed XSS gets dropped by the reflection-only gate below. When
+	// the ledger holds a verify_xss confirmation for this scan, fold it into the
+	// proof so the finding is judged on the real evidence, not on what the model
+	// happened to paste.
+	if reportLooksLikeXSS(title, args["description"], args["cwe_id"]) {
+		if bp := ledgerBrowserXSSProof(contextID); bp != "" &&
+			!strings.Contains(strings.ToLower(proof), "browser-confirmed xss") {
+			proof = strings.TrimSpace(proof + "\n" + bp)
+			args["exploitation_proof"] = proof
+		}
+	}
+
 	if proof == "" {
 		for _, cand := range []string{args["description"], args["technical_analysis"], args["poc_description"]} {
 			if c := strings.TrimSpace(cand); len(c) >= 20 && HasConcreteImpact(c) {
@@ -1015,6 +1031,46 @@ func checkFabricatedFinding(title, endpoint, description, proof, severity string
 		} {
 			if strings.Contains(blob, m) {
 				return fmt.Sprintf("❌ REJECTED: '%s' reports the target as UNREACHABLE (matched %q) — that is an availability/scope issue, not a %s vulnerability. Note it with add_note and finish gracefully; only report an actionable finding backed by a concrete exploitation outcome against a reachable endpoint.", title, m, strings.ToUpper(severity))
+			}
+		}
+	}
+	return ""
+}
+
+// reportLooksLikeXSS reports whether a finding is an XSS claim, by title/
+// description keyword or CWE-79.
+func reportLooksLikeXSS(title, description, cwe string) bool {
+	lower := strings.ToLower(title + " " + description)
+	if strings.Contains(lower, "xss") ||
+		strings.Contains(lower, "cross-site script") ||
+		strings.Contains(lower, "cross site script") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(cwe), "79")
+}
+
+// ledgerBrowserXSSProof returns the browser verifier's confirmation summary for
+// a browser-confirmed XSS recorded in this scan's ledger, or "" when none is
+// present. verify_xss (internal/tools/browser) records concrete execution proof
+// — a dialog/console/DOM signal carrying the injected nonce — as an "exploit"
+// evidence on a verify_xss-origin xss hypothesis. That ledger record, not
+// whatever the model pasted into exploitation_proof, is the authoritative proof
+// that the payload actually RAN, so callers fold it into the reported proof to
+// stop the reflection-only false-positive gate from dropping a genuinely
+// confirmed XSS.
+func ledgerBrowserXSSProof(contextID string) string {
+	sc := scanctx.Get(contextID)
+	if sc == nil || sc.Ledger == nil {
+		return ""
+	}
+	for _, h := range sc.Ledger.All() {
+		if !strings.EqualFold(h.VulnClass, "xss") || !strings.EqualFold(h.Origin, "verify_xss") {
+			continue
+		}
+		for _, ev := range h.Evidence {
+			if strings.EqualFold(ev.Kind, "exploit") &&
+				strings.Contains(strings.ToLower(ev.Summary), "browser-confirmed xss") {
+				return ev.Summary
 			}
 		}
 	}

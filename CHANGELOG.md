@@ -1,5 +1,11 @@
 # Changelog
 
+## [v4.6.46](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.46) — Browser-backed XSS detection: use system Chrome, stop dropping confirmed XSS (2026-09-03)
+
+### Fixed
+- **The scanner now uses a system-installed Google Chrome (`/usr/bin/chrome`, `/opt/google/chrome/chrome`) instead of falling through to rod's bundled/downloaded Chromium.** On hosts whose only browser is Google Chrome, rod's `LookPath` and the previous well-known-path list both missed it, so the browser silently fell back to a ~170MB Chromium auto-download (which then fails offline) — breaking `verify_xss` and every browser-backed check. Those install locations are now probed explicitly before the auto-download fallback.
+- **A genuinely browser-confirmed reflected XSS is no longer dropped by the reflection-only false-positive gate.** `verify_xss` records concrete browser-execution proof (a dialog/console/DOM signal carrying the injected nonce) in the scan ledger, but the model does not always paste that verdict into `exploitation_proof`, so the finding was gated as "reflection only." The report path now folds the ledger's authoritative `verify_xss` confirmation into the proof before the gate runs, so a confirmed XSS is judged on the real evidence. Verified end-to-end against the benchmark: the reflected-XSS challenge now detects, confirms, reports, and is independently `verified`.
+
 ## [v4.6.45](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.45) — Benchmark now covers CSRF (positive + negative) (2026-09-03)
 
 ### Added
