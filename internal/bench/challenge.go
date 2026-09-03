@@ -223,6 +223,57 @@ func Builtin() []Challenge {
 				}
 			}),
 		},
+		{
+			// Whitebox challenge (SQLi): the vulnerable reporting route is not
+			// linked from any page, so it is discoverable only via the attached
+			// source. Solving it exercises the source-to-runtime bridge for a
+			// second injection class — the sqli sink (a raw SELECT built by
+			// string concatenation) lives inside the /internal/report handler.
+			Name: "whitebox-sqli", Class: "sqli", Endpoint: "/internal/report", Param: "uid",
+			Desc: "SQL injection on an UNLINKED route, discoverable only via the attached source.",
+			SourceFiles: map[string]string{
+				"app.py": "from flask import Flask, request\n" +
+					"import sqlite3\n\n" +
+					"app = Flask(__name__)\n" +
+					"db = sqlite3.connect(':memory:', check_same_thread=False)\n\n\n" +
+					"@app.route('/')\n" +
+					"def index():\n" +
+					"    return '<html><body>Reports service</body></html>'\n\n\n" +
+					"@app.route('/healthz')\n" +
+					"def healthz():\n" +
+					"    return 'ok'\n\n\n" +
+					"# Internal reporting endpoint - intentionally not linked from any page.\n" +
+					"@app.route('/internal/report')\n" +
+					"def report():\n" +
+					"    uid = request.args.get('uid', '')\n" +
+					"    # Vulnerable: user input concatenated into a raw SQL query.\n" +
+					"    query = \"SELECT id, name FROM users WHERE id = '\" + uid + \"'\"\n" +
+					"    return str(db.execute(query).fetchall())\n",
+			},
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/healthz":
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					_, _ = fmt.Fprint(w, "ok")
+				case "/internal/report":
+					uid := r.URL.Query().Get("uid")
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					if containsQuote(uid) {
+						// Simulated SQL error revealing injectability.
+						w.WriteHeader(http.StatusInternalServerError)
+						_, _ = fmt.Fprintf(w, "Database error: You have an error in your SQL syntax; check the manual near '%s' at line 1", uid)
+						return
+					}
+					_, _ = fmt.Fprintf(w, "<html><body>report for uid %s</body></html>", uid)
+				case "/":
+					// Index does NOT link the vulnerable reporting route.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Reports</h1><p>See <a href="/healthz">health</a>.</p></body></html>`)
+				default:
+					http.NotFound(w, r)
+				}
+			}),
+		},
 	}
 }
 

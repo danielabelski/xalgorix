@@ -146,14 +146,18 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 		t.Fatalf("expected xss 1/1 and idor 1/1, got %v", byClass)
 	}
 	// Every other single-challenge class is present but unsolved by this fake.
-	for _, c := range []string{"open_redirect", "sqli", "ssrf", "ssti", "lfi"} {
+	for _, c := range []string{"open_redirect", "ssrf", "ssti", "lfi"} {
 		if byClass[c] != [2]int{0, 1} {
 			t.Fatalf("expected %s 0/1, got %v", c, byClass[c])
 		}
 	}
-	// rce now has two challenges (cmdi + whitebox-cmdi), both unsolved here.
+	// rce (cmdi + whitebox-cmdi) and sqli (error-sqli + whitebox-sqli) each have
+	// two challenges, both unsolved by this fake.
 	if byClass["rce"] != [2]int{0, 2} {
 		t.Fatalf("expected rce 0/2, got %v", byClass["rce"])
+	}
+	if byClass["sqli"] != [2]int{0, 2} {
+		t.Fatalf("expected sqli 0/2, got %v", byClass["sqli"])
 	}
 }
 
@@ -262,5 +266,39 @@ func TestHarnessMaterializesSourceFiles(t *testing.T) {
 	}
 	if seen["bench-reflected-xss"] != "" {
 		t.Fatalf("a black-box challenge must receive an empty source dir, got %q", seen["bench-reflected-xss"])
+	}
+}
+
+func TestWhiteboxSqliChallengeExhibitsVuln(t *testing.T) {
+	wb := challengeByName(t, "whitebox-sqli")
+
+	// The whitebox source carries the sqli sink (a raw SELECT built by string
+	// concatenation) inside the unlinked reporting route's handler.
+	src, ok := wb.SourceFiles["app.py"]
+	if !ok {
+		t.Fatal("whitebox-sqli must ship app.py source")
+	}
+	if !strings.Contains(src, "/internal/report") || !strings.Contains(src, "SELECT id, name FROM users") {
+		t.Fatalf("app.py must contain the /internal/report route and the raw SELECT sink:\n%s", src)
+	}
+
+	srv := wb.Start()
+	defer srv.Close()
+
+	// A quote in uid triggers a SQL syntax error (injectable).
+	if body := httpGet(t, srv.URL+"/internal/report?uid=1%27"); !strings.Contains(strings.ToLower(body), "sql syntax") {
+		t.Fatalf("whitebox-sqli did not leak a SQL error on quote injection: %q", body)
+	}
+	// A benign uid does not.
+	if body := httpGet(t, srv.URL+"/internal/report?uid=1"); strings.Contains(strings.ToLower(body), "sql syntax") {
+		t.Fatalf("benign uid must not yield a SQL error: %q", body)
+	}
+	// Health endpoint is benign.
+	if body := httpGet(t, srv.URL+"/healthz"); !strings.Contains(body, "ok") {
+		t.Fatalf("healthz should return ok, got %q", body)
+	}
+	// The index must NOT link the vulnerable route (whitebox-only discovery).
+	if body := httpGet(t, srv.URL+"/"); strings.Contains(body, "/internal/report") {
+		t.Fatalf("index must not link the vulnerable route (whitebox-only), got %q", body)
 	}
 }
