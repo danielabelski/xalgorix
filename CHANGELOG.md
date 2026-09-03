@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v4.6.28](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.28) — Route-discovery precision fix (2026-09-02)
 
 ### Fixed
 - **Source route discovery no longer mistakes ordinary `.get()`/`.post()` calls for HTTP routes.** The Express/Koa route pattern matched `<anything>.get("…")`, so common non-router calls — `request.args.get('host')`, `dict.get('key')`, `session.get('token')` — were scooped up as bogus route hypotheses (the first whitebox benchmark run seeded 4 routes for a 3-route app; the extra one was a "route" named `host` harvested from `request.args.get('host')`). The receiver is now restricted to router-like names (`app`, `router`, `routes`, `route`, `api`, `srv`, `server`, `mux`, `koa`, `fastify`), so only real route declarations are seeded — keeping the ledger and `probe_hypothesis` focused on genuine attack surface. Gin/Echo routers, which use upper-case method calls (`r.GET(...)`), are matched by the separate Go-router pattern and are unaffected. Surfaced by the v4.6.27 whitebox benchmark.
