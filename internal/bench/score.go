@@ -122,6 +122,15 @@ func Solved(expectedClass string, findings []reporting.Vulnerability) (bool, str
 // reporting package's private classifier) so the benchmark's notion of "right
 // class" is explicit and stable.
 func classifyFinding(f reporting.Vulnerability) string {
+	// Prefer the CWE: it is the authoritative, structured class signal. A finding
+	// tagged CWE-1336 is SSTI even when its description also mentions the remote
+	// code execution it can escalate to — which would otherwise match the broader
+	// "rce" keyword (which precedes "ssti" in classKeywords) and misclassify the
+	// finding. Title/description keywords are the fallback for findings that carry
+	// no (or an unmapped) CWE.
+	if c := cweClass(f.CWE); c != "" {
+		return c
+	}
 	text := strings.ToLower(f.Title + " " + f.Description)
 	for _, m := range classKeywords {
 		for _, kw := range m.keywords {
@@ -130,7 +139,7 @@ func classifyFinding(f reporting.Vulnerability) string {
 			}
 		}
 	}
-	return cweClass(f.CWE)
+	return ""
 }
 
 type classMatch struct {

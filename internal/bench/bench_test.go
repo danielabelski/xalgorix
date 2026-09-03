@@ -91,6 +91,12 @@ func TestClassifyFinding(t *testing.T) {
 		{"Mystery bug", "no class keyword", "CWE-639", "idor"}, // CWE fallback
 		{"Mystery bug", "no class keyword", "CWE-99999", ""},   // unmapped
 		{"Mystery bug", "no class keyword", "", ""},            // nothing
+		// An SSTI finding whose description mentions the RCE it can escalate to
+		// must classify as ssti via its CWE, not rce via the "remote code
+		// execution" keyword (which precedes ssti in classKeywords).
+		{"Server-Side Template Injection via name", "confirmed {{7*7}}=49; can be escalated to remote code execution", "CWE-1336", "ssti"},
+		// CWE wins over a conflicting description keyword generally.
+		{"Template injection", "the payload triggers command injection style impact", "CWE-1336", "ssti"},
 	}
 	for _, c := range cases {
 		got := classifyFinding(reporting.Vulnerability{Title: c.title, Description: c.desc, CWE: c.cwe})
