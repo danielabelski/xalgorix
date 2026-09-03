@@ -961,6 +961,24 @@ func TestCheckClaimConsistency(t *testing.T) {
 			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
 			"high", "dumped users table via union select from information_schema", false,
 		},
+		// Error-based SQLi: C:H proven by a reflected DBMS error, no data dumped
+		// → accepted. A provoked SQL syntax error proves an exploitable injection
+		// point, which is confidentiality-impacting even without extraction.
+		{
+			"error-based sqli c:h via dbms error",
+			"SQL injection", "CWE-89", "manual_verified",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+			"high", "injecting a single quote (uid=1') returned: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version", false,
+		},
+		// Guard: a NON-SQLi finding claiming C:H with only a 'syntax error'
+		// string (no data obtained) is still rejected — the SQLi carve-out must
+		// not leak to other classes.
+		{
+			"non-sqli c:h with syntax error still rejected",
+			"Information exposure", "CWE-200", "manual_verified",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+			"high", "the response contained a generic syntax error message", true,
+		},
 		// Info severity → gate does not apply.
 		{
 			"info severity skipped",
@@ -1816,6 +1834,8 @@ func TestHasConcreteImpact(t *testing.T) {
 		"dumped 42 rows including password hash values",
 		"interactsh callback received from target IP",
 		"union select confirmed data extraction",
+		// Error-based SQLi: a provoked DBMS error is a concrete injection outcome.
+		"HTTP/1.1 500\nYou have an error in your SQL syntax; check the manual near '''",
 	} {
 		if !HasConcreteImpact(s) {
 			t.Errorf("expected concrete impact for %q", s)
