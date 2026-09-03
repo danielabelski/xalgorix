@@ -686,6 +686,53 @@ func Builtin() []Challenge {
 				_, _ = fmt.Fprint(w, "imported 0 records\n")
 			}),
 		},
+		{
+			// CSRF: a state-changing POST (change the account email) protected by
+			// nothing — the form carries no anti-CSRF token and the handler
+			// requires none, so a form auto-submitted from any origin silently
+			// changes the victim's email. Discoverable via the "/" index form.
+			Name: "csrf", Class: "csrf", Endpoint: "/account/email", Param: "",
+			Desc: "State-changing POST /account/email accepts requests with no anti-CSRF token (CSRF).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					_ = r.ParseForm()
+					// VULNERABLE: the email change is applied with no anti-CSRF
+					// token and no Origin/Referer check — any site can submit it.
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					_, _ = fmt.Fprint(w, "account email updated\n")
+					return
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				// The change-email form carries NO anti-CSRF token field.
+				_, _ = fmt.Fprint(w, `<html><body><h1>Account settings</h1><p>Change the email on your account.</p><form action="/account/email" method="post"><input name="email" type="email"><button>Save</button></form></body></html>`)
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (csrf): the change-email form embeds a per-session
+			// anti-CSRF token and the handler rejects any POST whose token is
+			// missing or wrong, so a forged cross-site submission cannot change
+			// state.
+			Name: "safe-account", Class: "csrf", Endpoint: "/account/email", Param: "", Negative: true,
+			Desc: "NEGATIVE CONTROL: change-email POST requires a valid anti-CSRF token (no CSRF).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				const csrfToken = "sess-csrf-7f3a9c2e"
+				if r.Method == http.MethodPost {
+					_ = r.ParseForm()
+					// SAFE: a missing or incorrect anti-CSRF token is refused, so
+					// a cross-site request cannot change the account email.
+					if r.PostFormValue("csrf_token") != csrfToken {
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = fmt.Fprint(w, "invalid csrf token\n")
+						return
+					}
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					_, _ = fmt.Fprint(w, "account email updated\n")
+					return
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = fmt.Fprintf(w, `<html><body><h1>Account settings</h1><p>Change the email on your account.</p><form action="/account/email" method="post"><input type="hidden" name="csrf_token" value="%s"><input name="email" type="email"><button>Save</button></form></body></html>`, csrfToken)
+			}),
+		},
 	}
 }
 
