@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.39](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.39) — Lock in the source scanner's multi-language route/sink detection (2026-09-02)
+
+### Changed
+- **Deterministic regression coverage now pins the source scanner's multi-language route and sink detection.** The whitebox source-to-runtime bridge advertises support for Flask/FastAPI, Django, Express/Koa/Fastify, Spring, Go routers, and Rails, but its route/sink regexes were only tested for Flask and Express — and the Express false-positive fixed in v4.6.28 showed these patterns can carry real bugs. This adds `TestRouteScanCrossLanguage` (Go `r.GET(...)` / `mux.HandleFunc(...)`, Spring `@GetMapping`/`@PostMapping`, Django `path`/`re_path`, Rails `get`/`post`) and `TestSinkScanCrossLanguage` (Java `Runtime.getRuntime().exec`/`ProcessBuilder`, Go `os/exec`, PHP `shell_exec` → all recognized as `rce` sinks), which confirm every advertised language's routes and command-exec sinks are detected and guard against pattern regressions. All patterns already worked — this is contention-independent evidence and a regression fence, not a behavior change. Test-only; the shipped binary is unchanged.
+
 ## [v4.6.38](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.38) — Cross-language whitebox benchmark challenge (Node/Express RCE) (2026-09-02)
 
 ### Added
