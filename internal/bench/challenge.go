@@ -561,6 +561,88 @@ func Builtin() []Challenge {
 				_, _ = fmt.Fprintf(w, "fetched external url: %s\n", raw)
 			}),
 		},
+		{
+			// NEGATIVE CONTROL (lfi): rejects path traversal; only plain
+			// filenames are served, so /etc/passwd is never reachable.
+			Name: "safe-lfi", Class: "lfi", Endpoint: "/download", Param: "file", Negative: true,
+			Desc: "NEGATIVE CONTROL: rejects '..' and path separators (no path traversal).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Documents</h1><ul><li><a href="/download?file=report.pdf">report.pdf</a></li><li><a href="/download?file=invoice.txt">invoice.txt</a></li></ul></body></html>`)
+					return
+				}
+				file := r.URL.Query().Get("file")
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				// SAFE: reject traversal and any path separators; only a plain
+				// filename from the fixed documents directory is served.
+				if strings.ContainsAny(file, "/\\") || strings.Contains(file, "..") {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = fmt.Fprint(w, "invalid file name")
+					return
+				}
+				_, _ = fmt.Fprintf(w, "contents of document %q\n", file)
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (rce): validates the host and refuses shell
+			// metacharacters, so no injected command ever runs.
+			Name: "safe-cmdi", Class: "rce", Endpoint: "/ping", Param: "host", Negative: true,
+			Desc: "NEGATIVE CONTROL: rejects shell metacharacters in host (no command injection).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Network Tools</h1><form action="/ping" method="get"><input name="host" placeholder="host"><button>Ping</button></form><p><a href="/ping?host=example.com">ping example.com</a></p></body></html>`)
+					return
+				}
+				host := r.URL.Query().Get("host")
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				// SAFE: refuse shell metacharacters — the value is never handed to
+				// a shell, so nothing executes.
+				if hasShellMeta(host) {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = fmt.Fprint(w, "invalid host")
+					return
+				}
+				_, _ = fmt.Fprintf(w, "PING %s: 56 data bytes\n64 bytes: icmp_seq=0 ttl=64 time=0.050 ms\n", host)
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (ssti): the name is inserted as literal (HTML-
+			// escaped) text, never evaluated, so {{7*7}} stays {{7*7}} (never 49).
+			Name: "safe-ssti", Class: "ssti", Endpoint: "/greet", Param: "name", Negative: true,
+			Desc: "NEGATIVE CONTROL: name is rendered as literal text, not evaluated (no template injection).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				if r.URL.Path == "/" {
+					_, _ = fmt.Fprint(w, `<html><body><h1>Greeter</h1><form action="/greet" method="get"><input name="name" placeholder="your name"><button>Greet</button></form><p><a href="/greet?name=friend">say hi</a></p></body></html>`)
+					return
+				}
+				name := r.URL.Query().Get("name")
+				// SAFE: literal, HTML-escaped text — the template engine never
+				// evaluates it, so a {{7*7}} probe is echoed as-is.
+				_, _ = fmt.Fprintf(w, "<html><body>Hello, %s!</body></html>", html.EscapeString(name))
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (idor): ownership is enforced, so every order
+			// object is forbidden without the owner's session — no cross-object read.
+			Name: "safe-idor", Class: "idor", Endpoint: "/api/orders", Param: "id", Negative: true,
+			Desc: "NEGATIVE CONTROL: object access is authorized; other users' orders return 403 (no IDOR).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				const prefix = "/api/orders/"
+				if !strings.HasPrefix(r.URL.Path, prefix) {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Orders</h1><a href="/api/orders/1042">view order 1042</a></body></html>`)
+					return
+				}
+				// SAFE: the caller has no session establishing ownership of this
+				// object, so access is refused — no record (no card/owner data) is
+				// ever returned.
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = fmt.Fprint(w, "forbidden: not your order")
+			}),
+		},
 	}
 }
 

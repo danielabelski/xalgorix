@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.42](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.42) — Complete precision coverage: a negative control for every black-box class (2026-09-02)
+
+### Added
+- **Every black-box class now has a matched positive + negative control, so precision is measured uniformly, not just for four classes.** v4.6.41 introduced negative controls for XSS, open redirect, SQLi, and SSRF; this adds the remaining four so a false positive is caught on any class: `safe-lfi` (rejects `..`/path separators — no path traversal), `safe-cmdi` (refuses shell metacharacters in `host` — no command injection), `safe-ssti` (renders `name` as literal HTML-escaped text, never evaluating it — a `{{7*7}}` probe stays literal), and `safe-idor` (enforces object ownership — every `/api/orders/<id>` returns 403 with no record). The benchmark now runs 21 challenges (13 positive + 8 negative), one negative control per black-box class, so a change's effect on the false-positive rate is visible across the whole class set. Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.41](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.41) — Black-box benchmark now measures precision (negative controls) (2026-09-02)
 
 ### Added
