@@ -396,6 +396,15 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// config, session auth, the scan target, and the ledger.
 	a.registerProbeHypothesisTool(reg)
 
+	// Register the deterministic error-based SQL-injection confirmer
+	// (verify_sqli): the SQLi counterpart of verify_xss. Given a seeded hypothesis
+	// or a url + parameter, it sends a benign baseline, a single-quote payload,
+	// and a doubled-quote payload, and confirms injection when a DBMS error
+	// appears on the broken request but not on the baseline — recording
+	// exploit-proven evidence in the ledger. Agent-bound: needs the scope config,
+	// session auth, the scan target, and the ledger.
+	a.registerVerifySQLiTool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests

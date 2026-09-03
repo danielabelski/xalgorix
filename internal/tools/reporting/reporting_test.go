@@ -2074,3 +2074,26 @@ func TestFindDuplicateVulnerability_UnmappedCWENotMerged(t *testing.T) {
 		t.Fatal("unmapped CWE + no keyword must not merge distinct findings")
 	}
 }
+
+// TestLooksLikeSQLError verifies the shared DBMS-error detector matches every
+// signature case-insensitively, that each signature is ALSO a concrete-impact
+// indicator (the append refactor keeps verify_sqli and the reporting impact-gate
+// in lockstep), and that benign / generic-error text is not flagged.
+func TestLooksLikeSQLError(t *testing.T) {
+	for _, sig := range dbmsErrorSignatures {
+		if !LooksLikeSQLError("HTTP 500\n" + strings.ToUpper(sig) + " — query failed") {
+			t.Errorf("LooksLikeSQLError should match signature %q (case-insensitive)", sig)
+		}
+		if !HasConcreteImpact("response body: " + sig) {
+			t.Errorf("DBMS signature %q must also be a concrete-impact indicator", sig)
+		}
+	}
+	for _, s := range []string{
+		"", "HTTP 200 OK", "the endpoint returned 3 rows", "a generic error page",
+		"syntax error", // generic phrase must NOT match "sql syntax"
+	} {
+		if LooksLikeSQLError(s) {
+			t.Errorf("LooksLikeSQLError should NOT match benign text %q", s)
+		}
+	}
+}
