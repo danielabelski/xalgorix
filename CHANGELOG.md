@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v4.6.29](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.29) — Handler-span route↔sink correlation (2026-09-02)
 
 ### Changed
 - **Source route↔sink correlation now attributes a sink to its enclosing handler, not the whole file.** When source auto-seeding types a route by a co-located dangerous sink, it previously matched *any* sink anywhere in the same file — so in a multi-route file every route was typed with the same (often unrelated) vuln class. The first whitebox benchmark run showed this: all three routes in the challenge's `app.py` were typed `rce` even though only `/internal/run-check` actually contains the `os.popen` sink. Correlation now uses the route's handler span — a sink at line L is attributed to the route whose declaration is the nearest one at or above L (bounded by the next route declaration below it) — so only the route that genuinely reaches a sink is class-typed and prioritized; the others seed as ordinary attack-surface (`idor`) leads. This keeps `probe_hypothesis` and exploitation focused on the route that actually reaches the dangerous code.
