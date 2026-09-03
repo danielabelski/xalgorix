@@ -144,27 +144,35 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 	if card.Total() != len(Builtin()) {
 		t.Fatalf("expected %d challenges, got %d", len(Builtin()), card.Total())
 	}
-	if card.SolvedCount() != 2 {
-		t.Fatalf("expected 2 solved (xss+idor), got %d\n%s", card.SolvedCount(), card.String())
+	// Solved = 2 positives (reflected-xss + idor) + every negative control
+	// (all correctly clean, since the fake reports nothing on them).
+	negatives := card.NegativeCount()
+	if want := 2 + negatives; card.SolvedCount() != want {
+		t.Fatalf("expected %d solved (xss+idor+%d clean negatives), got %d\n%s", want, negatives, card.SolvedCount(), card.String())
+	}
+	if card.FalsePositives() != 0 {
+		t.Fatalf("expected 0 false positives (fake reports nothing on negatives), got %d\n%s", card.FalsePositives(), card.String())
 	}
 	byClass := card.ByClass()
-	if byClass["xss"] != [2]int{1, 1} || byClass["idor"] != [2]int{1, 1} {
-		t.Fatalf("expected xss 1/1 and idor 1/1, got %v", byClass)
+	// xss = reflected-xss (positive, solved) + safe-search (negative, clean) = 2/2.
+	if byClass["xss"] != [2]int{2, 2} || byClass["idor"] != [2]int{1, 1} {
+		t.Fatalf("expected xss 2/2 and idor 1/1, got %v", byClass)
 	}
-	// Every other single-challenge class is present but unsolved by this fake.
+	// open_redirect and ssrf each have a positive (unsolved by this fake) plus a
+	// negative control (correctly clean) => 1/2.
 	for _, c := range []string{"open_redirect", "ssrf"} {
-		if byClass[c] != [2]int{0, 1} {
-			t.Fatalf("expected %s 0/1, got %v", c, byClass[c])
+		if byClass[c] != [2]int{1, 2} {
+			t.Fatalf("expected %s 1/2, got %v", c, byClass[c])
 		}
 	}
-	// rce has three challenges (cmdi + whitebox-cmdi + whitebox-node-rce); sqli
-	// (error-sqli + whitebox-sqli), ssti (ssti + whitebox-ssti), and lfi
-	// (lfi + whitebox-lfi) each have two — all unsolved by this fake.
+	// rce = cmdi + whitebox-cmdi + whitebox-node-rce (0/3). sqli = error-sqli +
+	// whitebox-sqli (positives, unsolved) + safe-sqli (negative, clean) => 1/3.
+	// ssti and lfi each have two positives, unsolved by this fake.
 	if byClass["rce"] != [2]int{0, 3} {
 		t.Fatalf("expected rce 0/3, got %v", byClass["rce"])
 	}
-	if byClass["sqli"] != [2]int{0, 2} {
-		t.Fatalf("expected sqli 0/2, got %v", byClass["sqli"])
+	if byClass["sqli"] != [2]int{1, 3} {
+		t.Fatalf("expected sqli 1/3, got %v", byClass["sqli"])
 	}
 	if byClass["ssti"] != [2]int{0, 2} {
 		t.Fatalf("expected ssti 0/2, got %v", byClass["ssti"])
@@ -453,5 +461,92 @@ func TestBlackboxChallengesDiscoverable(t *testing.T) {
 				t.Errorf("index must expose parameter %q (form/link); got %q", c.Param, body)
 			}
 		})
+	}
+}
+
+// TestNegativeControlsScoring verifies the precision scoring: reporting a class
+// on a negative control is a false positive (that challenge FAILs and is
+// counted), while reporting nothing keeps every negative control clean.
+func TestNegativeControlsScoring(t *testing.T) {
+	// A scan that (wrongly) reports XSS on the safe-search negative control.
+	fpFake := func(_ context.Context, target, _, scanID string) ([]reporting.Vulnerability, error) {
+		if scanID == "bench-safe-search" {
+			return []reporting.Vulnerability{{ID: "XALG-9", Title: "Reflected XSS", CWE: "CWE-79", Endpoint: target + "/search"}}, nil
+		}
+		return nil, nil
+	}
+	card := Run(context.Background(), Builtin(), fpFake)
+	if card.FalsePositives() < 1 {
+		t.Fatalf("expected >=1 false positive on safe-search, got %d\n%s", card.FalsePositives(), card.String())
+	}
+	var ss Result
+	for _, r := range card.Results {
+		if r.Name == "safe-search" {
+			ss = r
+		}
+	}
+	if !ss.Negative {
+		t.Fatal("safe-search must be a negative control")
+	}
+	if ss.Solved {
+		t.Fatal("safe-search must FAIL (false positive) when the scan reports XSS on it")
+	}
+
+	// A scan that reports nothing keeps every negative control clean.
+	cleanFake := func(context.Context, string, string, string) ([]reporting.Vulnerability, error) {
+		return nil, nil
+	}
+	clean := Run(context.Background(), Builtin(), cleanFake)
+	if clean.FalsePositives() != 0 {
+		t.Fatalf("expected 0 false positives when nothing is reported, got %d", clean.FalsePositives())
+	}
+	if clean.NegativeCount() < 4 {
+		t.Fatalf("expected at least 4 negative controls, got %d", clean.NegativeCount())
+	}
+}
+
+// TestNegativeControlsAreSafe confirms each negative-control app actually
+// handles its input securely — so a finding of its class really would be a
+// false positive, not a genuine bug the benchmark mislabeled.
+func TestNegativeControlsAreSafe(t *testing.T) {
+	// safe-search: reflection is HTML-escaped (no raw <script>).
+	ss := challengeByName(t, "safe-search").Start()
+	defer ss.Close()
+	if body := httpGet(t, ss.URL+"/search?q=<script>alert(1)</script>"); strings.Contains(body, "<script>alert(1)</script>") {
+		t.Fatalf("safe-search must escape the payload, got %q", body)
+	}
+
+	// safe-redirect: an external absolute URL is rejected; a relative path is allowed.
+	sr := challengeByName(t, "safe-redirect").Start()
+	defer sr.Close()
+	respExt, err := noRedirectClient().Get(sr.URL + "/redirect?url=https://evil.example/")
+	if err != nil {
+		t.Fatalf("safe-redirect request: %v", err)
+	}
+	defer respExt.Body.Close()
+	if respExt.StatusCode == http.StatusFound && respExt.Header.Get("Location") == "https://evil.example/" {
+		t.Fatal("safe-redirect must not redirect to an external URL")
+	}
+	respRel, err := noRedirectClient().Get(sr.URL + "/redirect?url=/welcome")
+	if err != nil {
+		t.Fatalf("safe-redirect relative request: %v", err)
+	}
+	defer respRel.Body.Close()
+	if respRel.StatusCode != http.StatusFound || respRel.Header.Get("Location") != "/welcome" {
+		t.Fatalf("safe-redirect must allow a relative path, got status=%d loc=%q", respRel.StatusCode, respRel.Header.Get("Location"))
+	}
+
+	// safe-sqli: a quote yields a generic error, NOT a SQL error string.
+	sq := challengeByName(t, "safe-sqli").Start()
+	defer sq.Close()
+	if body := httpGet(t, sq.URL+"/product?id=1'"); strings.Contains(strings.ToLower(body), "sql syntax") {
+		t.Fatalf("safe-sqli must not leak a SQL error, got %q", body)
+	}
+
+	// safe-fetch: an internal metadata host is blocked (no metadata content).
+	sf := challengeByName(t, "safe-fetch").Start()
+	defer sf.Close()
+	if body := httpGet(t, sf.URL+"/fetch?url=http://169.254.169.254/latest/meta-data/"); strings.Contains(body, "security-credentials") {
+		t.Fatalf("safe-fetch must block internal metadata, got %q", body)
 	}
 }

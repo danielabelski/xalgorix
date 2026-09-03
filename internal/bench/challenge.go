@@ -12,6 +12,7 @@ package bench
 
 import (
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -36,6 +37,13 @@ type Challenge struct {
 	// scan can use the source-to-runtime bridge (scan_source_sinks /
 	// scan_source_routes / probe_hypothesis). Nil for pure black-box challenges.
 	SourceFiles map[string]string
+
+	// Negative marks a NEGATIVE CONTROL: the app handles the same kind of input
+	// as a matching positive challenge but SECURELY, so a correct scan reports
+	// NO finding of Class. These measure the false-positive rate — a scanner
+	// that over-reports fails them. Scoring inverts for negatives (see runOne):
+	// "solved" means the class was correctly NOT reported.
+	Negative bool
 }
 
 // Start launches the challenge app on an ephemeral loopback server. The caller
@@ -464,6 +472,93 @@ func Builtin() []Challenge {
 				default:
 					http.NotFound(w, r)
 				}
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (xss): reflects q but HTML-escapes it, so there is
+			// no XSS to report. A precise scanner reports nothing here.
+			Name: "safe-search", Class: "xss", Endpoint: "/search", Param: "q", Negative: true,
+			Desc: "NEGATIVE CONTROL: reflects q but HTML-escapes it (no XSS).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				if r.URL.Path == "/" {
+					_, _ = fmt.Fprint(w, `<html><body><h1>Search</h1><form action="/search" method="get"><input name="q" placeholder="query"><button>Search</button></form><p><a href="/search?q=example">recent search</a></p></body></html>`)
+					return
+				}
+				q := r.URL.Query().Get("q")
+				// SAFE: user input is HTML-escaped before reflection.
+				_, _ = fmt.Fprintf(w, "<html><body><h1>Results</h1><p>You searched for: %s</p></body></html>", html.EscapeString(q))
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (open_redirect): only relative same-origin targets
+			// are honored; absolute/scheme-relative URLs are rejected.
+			Name: "safe-redirect", Class: "open_redirect", Endpoint: "/redirect", Param: "url", Negative: true,
+			Desc: "NEGATIVE CONTROL: only redirects to relative same-origin paths (no open redirect).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Home</h1><p><a href="/redirect?url=/welcome">continue</a></p></body></html>`)
+					return
+				}
+				u := r.URL.Query().Get("url")
+				// SAFE: allow only relative, same-origin paths. Reject absolute
+				// URLs and scheme-relative ("//host") targets.
+				if !strings.HasPrefix(u, "/") || strings.HasPrefix(u, "//") {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = fmt.Fprint(w, "invalid redirect target")
+					return
+				}
+				w.Header().Set("Location", u)
+				w.WriteHeader(http.StatusFound)
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (sqli): parameterized; a non-numeric id yields a
+			// generic 400 with no database error text, so there is no SQLi signal.
+			Name: "safe-sqli", Class: "sqli", Endpoint: "/product", Param: "id", Negative: true,
+			Desc: "NEGATIVE CONTROL: parameterized query; invalid id -> generic 400, no DB error (no SQLi).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				if r.URL.Path == "/" {
+					_, _ = fmt.Fprint(w, `<html><body><h1>Catalog</h1><ul><li><a href="/product?id=1">Product #1</a></li><li><a href="/product?id=2">Product #2</a></li></ul></body></html>`)
+					return
+				}
+				id := r.URL.Query().Get("id")
+				// SAFE: parameterized. Non-numeric ids are rejected generically —
+				// no SQL string is built and no DBMS error is ever leaked.
+				if _, err := strconv.Atoi(strings.TrimSpace(id)); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = fmt.Fprint(w, "invalid product id")
+					return
+				}
+				_, _ = fmt.Fprintf(w, "<html><body>Product #%s</body></html>", id)
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (ssrf): an allowlist refuses internal/link-local/
+			// metadata hosts with 403, so no internal resource is ever reached.
+			Name: "safe-fetch", Class: "ssrf", Endpoint: "/fetch", Param: "url", Negative: true,
+			Desc: "NEGATIVE CONTROL: SSRF allowlist blocks internal/metadata hosts (403); only external fetches succeed.",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Link Preview</h1><form action="/fetch" method="get"><input name="url" placeholder="https://..."><button>Preview</button></form><p><a href="/fetch?url=https://example.com/logo.png">preview example</a></p></body></html>`)
+					return
+				}
+				raw := r.URL.Query().Get("url")
+				host := ""
+				if u, err := url.Parse(raw); err == nil {
+					host = strings.ToLower(u.Hostname())
+				}
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				// SAFE: refuse internal/metadata destinations.
+				if isInternalHost(host) {
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = fmt.Fprint(w, "blocked: destination not allowed")
+					return
+				}
+				_, _ = fmt.Fprintf(w, "fetched external url: %s\n", raw)
 			}),
 		},
 	}
