@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v4.6.30](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.30) — Second whitebox benchmark challenge (SQLi) (2026-09-02)
 
 ### Added
 - **Second whitebox benchmark challenge (`whitebox-sqli`) widens source-to-runtime validation to a second injection class.** The `whitebox-cmdi` challenge (v4.6.27) proved the source-to-runtime bridge end-to-end for command injection; this adds an equivalent SQL-injection challenge so the bridge is exercised across classes rather than one. Its vulnerable reporting route (`/internal/report`, which concatenates a user parameter straight into a raw `SELECT`) is **not linked from any page**, so — as with `whitebox-cmdi` — black-box crawling can't reach it and solving it requires the bridge: scan the source, discover the route and the co-located SQLi sink, attribute the sink to that handler, probe the route live, then prove the injection. Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
