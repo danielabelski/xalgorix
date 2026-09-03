@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.33](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.33) — Whitebox guidance teaches the source-to-runtime bridge (2026-09-02)
+
+### Changed
+- **The whitebox methodology briefing now drives the agent through the source-to-runtime bridge instead of describing the old hand-crafted flow.** The bridge shipped over v4.6.23–v4.6.32 (`scan_source_sinks`, `scan_source_routes`, `probe_hypothesis`, auto-seeding at scan start, and the `verify_sqli`/`verify_xss`/`verify_oob` confirmers) was fully built, but the whitebox briefing the agent reads at scan start still described the pre-bridge methodology — `code_search` a sink, trace it by hand, then hand-craft an exploit — and never mentioned the auto-seeded ledger or the new tools. A benchmark diagnostic showed the cost: with the correlated source→route hypothesis already sitting in the ledger from iteration 1, the agent spent its early budget black-box crawling (chasing a reflected XSS) and only reached the seeded SQL-injection route late, missing an 8-minute deadline it clears comfortably when it works the seeded lead first. The live-target modes (whitebox, and provision-and-DAST) now tell the agent to WORK THE SEEDED LEDGER FIRST: `claim_next_hypothesis` the top correlated source→route lead, `probe_hypothesis` it to confirm it is live, then CONFIRM the class deterministically with `verify_sqli` (error-based SQLi), `verify_xss` (browser-executed XSS), or `verify_oob` (blind RCE/SQLi/SSRF/XXE) — widening to broad black-box crawling only after the seeded leads are worked. The source-review mode (no live target) is unchanged. The guidance text was also refactored behind a pure `whiteboxGuidanceText` helper so it is unit-tested directly.
+
 ## [v4.6.32](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.32) — Deterministic error-based SQL injection confirmer (verify_sqli) (2026-09-02)
 
 ### Added
