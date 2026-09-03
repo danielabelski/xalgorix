@@ -414,3 +414,123 @@ func TestRouteScanIgnoresNonRouterGetCalls(t *testing.T) {
 		}
 	}
 }
+
+// TestRouteScanCrossLanguage verifies route extraction works across the
+// frameworks the bridge claims to support beyond Flask/Express: Go routers
+// (gin/net-http), Java Spring annotations, Django urls, and Rails routes.
+func TestRouteScanCrossLanguage(t *testing.T) {
+	const ctx = "ctx-routescan-xlang"
+	dir := t.TempDir()
+	files := map[string]string{
+		"routes.go": "package main\n\nfunc register(r *gin.Engine, mux *http.ServeMux) {\n" +
+			"\tr.GET(\"/go/items\", listItems)\n" +
+			"\tmux.HandleFunc(\"/go/health\", health)\n}\n",
+		"Controller.java": "@RestController\npublic class C {\n" +
+			"  @GetMapping(\"/spring/users\")\n  public String users() { return \"ok\"; }\n\n" +
+			"  @PostMapping(value = \"/spring/login\")\n  public String login() { return \"ok\"; }\n}\n",
+		"urls.py": "from django.urls import path, re_path\n\nurlpatterns = [\n" +
+			"    path('django/admin/', admin_view),\n" +
+			"    re_path(r'^django/legacy$', legacy_view),\n]\n",
+		"routes.rb": "Rails.application.routes.draw do\n" +
+			"  get 'rails/profile'\n  post 'rails/session'\nend\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	SetSourceRoot(ctx, dir)
+	defer SetSourceRoot(ctx, "")
+
+	routes, err := RouteScan(ctx, 100)
+	if err != nil {
+		t.Fatalf("RouteScan: %v", err)
+	}
+	byPath := map[string]RouteMatch{}
+	for _, r := range routes {
+		byPath[r.Path] = r
+	}
+
+	// Go + Spring routes are asserted precisely (path + method + file).
+	for _, want := range []struct{ path, method, file string }{
+		{"/go/items", "GET", "routes.go"},
+		{"/spring/users", "GET", "Controller.java"},
+		{"/spring/login", "POST", "Controller.java"},
+	} {
+		r, ok := byPath[want.path]
+		if !ok {
+			t.Errorf("expected route %q (all: %+v)", want.path, routes)
+			continue
+		}
+		if r.Method != want.method {
+			t.Errorf("route %q: method=%q want %q", want.path, r.Method, want.method)
+		}
+		if r.File != want.file {
+			t.Errorf("route %q: file=%q want %q", want.path, r.File, want.file)
+		}
+	}
+	// Go mux.HandleFunc, Django, and Rails routes: assert the distinctive path
+	// segment is present (leading-slash / trailing-slash normalization tolerant).
+	hasSeg := func(seg string) bool {
+		for p := range byPath {
+			if strings.Contains(p, seg) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, seg := range []string{"go/health", "django/admin", "django/legacy", "rails/profile", "rails/session"} {
+		if !hasSeg(seg) {
+			t.Errorf("expected a route containing %q (all: %+v)", seg, routes)
+		}
+	}
+}
+
+// TestSinkScanCrossLanguage verifies command-exec sink detection works across
+// languages: Java (Runtime.getRuntime/ProcessBuilder), Go (os/exec), PHP
+// (shell_exec) — each must surface as an rce sink.
+func TestSinkScanCrossLanguage(t *testing.T) {
+	const ctx = "ctx-sinkscan-xlang"
+	dir := t.TempDir()
+	files := map[string]string{
+		"Exec.java": "public class Exec {\n  void run(String h) throws Exception {\n" +
+			"    Runtime.getRuntime().exec(\"ping \" + h);\n" +
+			"    new ProcessBuilder(\"sh\", \"-c\", h).start();\n  }\n}\n",
+		"run.go": "package main\n\nimport \"os/exec\"\n\nfunc run(h string) {\n" +
+			"\texec.Command(\"sh\", \"-c\", h).Run()\n}\n",
+		"shell.php": "<?php\nfunction run($h) {\n  return shell_exec('ping ' . $h);\n}\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	SetSourceRoot(ctx, dir)
+	defer SetSourceRoot(ctx, "")
+
+	found, err := SinkScan(ctx, 50)
+	if err != nil {
+		t.Fatalf("SinkScan: %v", err)
+	}
+	rce := found["rce"]
+	if len(rce) == 0 {
+		t.Fatalf("expected rce sinks across languages, got none (found classes: %v)", classKeys(found))
+	}
+	filesWithRCE := map[string]bool{}
+	for _, m := range rce {
+		filesWithRCE[m.File] = true
+	}
+	for _, f := range []string{"Exec.java", "run.go", "shell.php"} {
+		if !filesWithRCE[f] {
+			t.Errorf("expected an rce sink in %s (rce matches: %+v)", f, rce)
+		}
+	}
+}
+
+func classKeys(m map[string][]SinkMatch) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
+}
