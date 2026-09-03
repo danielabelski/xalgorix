@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
 
@@ -2095,5 +2096,58 @@ func TestLooksLikeSQLError(t *testing.T) {
 		if LooksLikeSQLError(s) {
 			t.Errorf("LooksLikeSQLError should NOT match benign text %q", s)
 		}
+	}
+}
+
+// TestLedgerBrowserXSSProof verifies the bridge that rescues a genuinely
+// browser-confirmed XSS from the reflection-only false-positive gate: verify_xss
+// records the execution proof in the shared ledger, and the report flow folds
+// that authoritative proof into the finding so it is judged on real evidence
+// rather than on whatever string the model pasted.
+func TestLedgerBrowserXSSProof(t *testing.T) {
+	sc := scanctx.New("rep-xss-bridge-test", "")
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(sc.ID)
+
+	// No verify_xss confirmation yet → no bridged proof.
+	if got := ledgerBrowserXSSProof(sc.ID); got != "" {
+		t.Fatalf("expected empty proof before any verify_xss confirmation, got %q", got)
+	}
+
+	// Record a browser-confirmed XSS the way finalizeXSSVerdict does.
+	h := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title:     "Browser-confirmed XSS at /search",
+		VulnClass: "xss",
+		Endpoint:  "/search",
+		Parameter: "q",
+		Origin:    "verify_xss",
+	})
+	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
+		Kind:    "exploit",
+		Summary: `Browser-confirmed XSS: a dialog:alert dialog carrying the nonce "XV-7a91" fired while loading http://x/search?q=<script>alert('XV-7a91')</script>.`,
+	})
+
+	got := ledgerBrowserXSSProof(sc.ID)
+	if !strings.Contains(strings.ToLower(got), "browser-confirmed xss") {
+		t.Fatalf("expected the browser-confirmed proof summary, got %q", got)
+	}
+
+	// The bridged proof must satisfy the reflection-only XSS gate even though the
+	// description still contains the raw <script> payload (the classic drop case).
+	if rej := checkFalsePositive(
+		"Reflected XSS in /search?q",
+		"payload <script>alert('XV-7a91')</script> reflected and executed",
+		"high",
+		got,
+	); rej != "" {
+		t.Fatalf("browser-confirmed XSS proof must pass the FP gate, got rejection: %s", rej)
+	}
+
+	// A different scan class in the ledger must not be mistaken for XSS proof.
+	if !reportLooksLikeXSS("Reflected XSS in q", "", "") {
+		t.Fatal("reportLooksLikeXSS should detect an XSS title")
+	}
+	if reportLooksLikeXSS("SQL injection in id", "error-based", "CWE-89") {
+		t.Fatal("reportLooksLikeXSS must not classify SQLi as XSS")
 	}
 }

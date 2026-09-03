@@ -49,3 +49,23 @@ func TestPreLaunch_AllCommands(t *testing.T) {
 		})
 	}
 }
+
+// TestWellKnownBrowserPathsIncludeGoogleChrome guards the fix for hosts whose
+// only browser is Google Chrome at /opt/google/chrome/chrome (often symlinked
+// as /usr/bin/chrome): those paths must be probed so getChromiumPath uses the
+// installed browser instead of falling through to rod's ~170MB auto-download.
+func TestWellKnownBrowserPathsIncludeGoogleChrome(t *testing.T) {
+	paths := wellKnownBrowserPaths()
+	for _, want := range []string{"/usr/bin/chrome", "/opt/google/chrome/chrome"} {
+		found := false
+		for _, p := range paths {
+			if p == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("wellKnownBrowserPaths() must include %q so Google Chrome installs are used; got %v", want, paths)
+		}
+	}
+}

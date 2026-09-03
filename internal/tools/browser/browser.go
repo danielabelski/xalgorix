@@ -269,6 +269,25 @@ func detectCaidoPort() int {
 //go:embed extension/*
 var extensionFS embed.FS
 
+// wellKnownBrowserPaths lists absolute paths to probe when neither
+// XALGORIX_BROWSER_PATH nor rod's launcher.LookPath locate a browser. It exists
+// because rod's LookPath name list misses some real installs — most notably
+// Google Chrome at /opt/google/chrome/chrome (commonly symlinked as
+// /usr/bin/chrome). Without these entries a host whose only browser is Google
+// Chrome falls through to rod's ~170MB Chromium auto-download (which then often
+// fails offline), so verify_xss and every browser-backed check silently break.
+func wellKnownBrowserPaths() []string {
+	return []string{
+		"/usr/bin/chromium",
+		"/usr/bin/chromium-browser",
+		"/usr/bin/google-chrome-stable",
+		"/usr/bin/google-chrome",
+		"/usr/bin/chrome",           // Google Chrome (common symlink)
+		"/opt/google/chrome/chrome", // Google Chrome default install location
+		"/snap/bin/chromium",
+	}
+}
+
 // getChromiumPath returns the path to a Chromium binary.
 // Priority: 1) XALGORIX_BROWSER_PATH env  2) System-installed browser  3) Rod auto-download (~170MB first run)
 func getChromiumPath(ctxID string) (string, error) {
@@ -290,14 +309,7 @@ func getChromiumPath(ctxID string) (string, error) {
 	}
 
 	// 3. Well-known browser paths (fallback for systems where LookPath misses)
-	knownPaths := []string{
-		"/usr/bin/chromium",
-		"/usr/bin/chromium-browser",
-		"/usr/bin/google-chrome-stable",
-		"/usr/bin/google-chrome",
-		"/snap/bin/chromium",
-	}
-	for _, p := range knownPaths {
+	for _, p := range wellKnownBrowserPaths() {
 		if _, err := os.Stat(p); err == nil {
 			log.Printf("[browser] Using browser found at well-known path: %s", p)
 			return p, nil
