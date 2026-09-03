@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.34](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.34) — Third whitebox benchmark challenge (SSTI) (2026-09-02)
+
+### Added
+- **A third whitebox benchmark challenge (`whitebox-ssti`) widens source-to-runtime validation to server-side template injection.** With `whitebox-cmdi` (RCE) and `whitebox-sqli` now solving within the standard benchmark deadline, this adds an equivalent SSTI challenge so the source-to-runtime bridge is exercised across a third injection class. Its vulnerable preview route (`/internal/preview`, which renders a concatenated user parameter through `render_template_string`) is **not linked from any page**, so black-box crawling cannot reach it and solving it requires the bridge: scan the source, discover the route and the co-located template sink (which the code scanner types as a template sink → SSTI), attribute the sink to that handler, probe the route live, then prove the injection with the classic `{{7*7}}` → `49` evaluation. Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.33](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.33) — Whitebox guidance teaches the source-to-runtime bridge (2026-09-02)
 
 ### Changed
