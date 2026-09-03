@@ -154,9 +154,11 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 		t.Fatalf("expected 0 false positives (fake reports nothing on negatives), got %d\n%s", card.FalsePositives(), card.String())
 	}
 	byClass := card.ByClass()
-	// xss = reflected-xss (positive, solved) + safe-search (negative, clean) = 2/2.
-	if byClass["xss"] != [2]int{2, 2} || byClass["idor"] != [2]int{1, 1} {
-		t.Fatalf("expected xss 2/2 and idor 1/1, got %v", byClass)
+	// Each class now pairs its positive challenge(s) with a negative control.
+	// xss = reflected-xss (solved) + safe-search (clean) = 2/2. idor = idor
+	// (solved) + safe-idor (clean) = 2/2.
+	if byClass["xss"] != [2]int{2, 2} || byClass["idor"] != [2]int{2, 2} {
+		t.Fatalf("expected xss 2/2 and idor 2/2, got %v", byClass)
 	}
 	// open_redirect and ssrf each have a positive (unsolved by this fake) plus a
 	// negative control (correctly clean) => 1/2.
@@ -165,20 +167,22 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 			t.Fatalf("expected %s 1/2, got %v", c, byClass[c])
 		}
 	}
-	// rce = cmdi + whitebox-cmdi + whitebox-node-rce (0/3). sqli = error-sqli +
-	// whitebox-sqli (positives, unsolved) + safe-sqli (negative, clean) => 1/3.
-	// ssti and lfi each have two positives, unsolved by this fake.
-	if byClass["rce"] != [2]int{0, 3} {
-		t.Fatalf("expected rce 0/3, got %v", byClass["rce"])
+	// rce = cmdi + whitebox-cmdi + whitebox-node-rce (positives) + safe-cmdi
+	// (clean) => 1/4. sqli = error-sqli + whitebox-sqli (positives) + safe-sqli
+	// (clean) => 1/3. ssti = ssti + whitebox-ssti + safe-ssti => 1/3. lfi = lfi
+	// + whitebox-lfi + safe-lfi => 1/3. The one "solved" in each is the clean
+	// negative control (this fake finds none of these positives).
+	if byClass["rce"] != [2]int{1, 4} {
+		t.Fatalf("expected rce 1/4, got %v", byClass["rce"])
 	}
 	if byClass["sqli"] != [2]int{1, 3} {
 		t.Fatalf("expected sqli 1/3, got %v", byClass["sqli"])
 	}
-	if byClass["ssti"] != [2]int{0, 2} {
-		t.Fatalf("expected ssti 0/2, got %v", byClass["ssti"])
+	if byClass["ssti"] != [2]int{1, 3} {
+		t.Fatalf("expected ssti 1/3, got %v", byClass["ssti"])
 	}
-	if byClass["lfi"] != [2]int{0, 2} {
-		t.Fatalf("expected lfi 0/2, got %v", byClass["lfi"])
+	if byClass["lfi"] != [2]int{1, 3} {
+		t.Fatalf("expected lfi 1/3, got %v", byClass["lfi"])
 	}
 }
 
@@ -455,9 +459,10 @@ func TestBlackboxChallengesDiscoverable(t *testing.T) {
 			if !strings.Contains(body, c.Endpoint) {
 				t.Errorf("index must link endpoint %q so a crawler finds it; got %q", c.Endpoint, body)
 			}
-			// idor's object id is a path segment, not a query parameter, so it is
-			// exempt from the parameter-name check.
-			if c.Name != "idor" && c.Param != "" && !strings.Contains(body, c.Param) {
+			// The IDOR challenges' object id is a path segment (/api/orders/1042),
+			// not a query parameter, so they are exempt from the param-name check
+			// (the index still links the object, exposing the surface).
+			if c.Name != "idor" && c.Name != "safe-idor" && c.Param != "" && !strings.Contains(body, c.Param) {
 				t.Errorf("index must expose parameter %q (form/link); got %q", c.Param, body)
 			}
 		})
@@ -548,5 +553,33 @@ func TestNegativeControlsAreSafe(t *testing.T) {
 	defer sf.Close()
 	if body := httpGet(t, sf.URL+"/fetch?url=http://169.254.169.254/latest/meta-data/"); strings.Contains(body, "security-credentials") {
 		t.Fatalf("safe-fetch must block internal metadata, got %q", body)
+	}
+
+	// safe-lfi: a traversal payload is rejected (no passwd content).
+	sl := challengeByName(t, "safe-lfi").Start()
+	defer sl.Close()
+	if body := httpGet(t, sl.URL+"/download?file=../../../../etc/passwd"); strings.Contains(body, "root:") {
+		t.Fatalf("safe-lfi must reject traversal, got %q", body)
+	}
+
+	// safe-cmdi: a shell metacharacter is rejected (no command output).
+	sc := challengeByName(t, "safe-cmdi").Start()
+	defer sc.Close()
+	if body := httpGet(t, sc.URL+"/ping?host=127.0.0.1%3Bid"); strings.Contains(body, "uid=0") {
+		t.Fatalf("safe-cmdi must reject shell metacharacters, got %q", body)
+	}
+
+	// safe-ssti: a template expression is echoed literally, never evaluated.
+	st := challengeByName(t, "safe-ssti").Start()
+	defer st.Close()
+	if body := httpGet(t, st.URL+"/greet?name=%7B%7B7*7%7D%7D"); strings.Contains(body, "49") {
+		t.Fatalf("safe-ssti must not evaluate the template, got %q", body)
+	}
+
+	// safe-idor: any order object is forbidden (no card/owner record leaked).
+	si := challengeByName(t, "safe-idor").Start()
+	defer si.Close()
+	if body := httpGet(t, si.URL+"/api/orders/1042"); strings.Contains(body, "card_last4") || strings.Contains(body, `"owner"`) {
+		t.Fatalf("safe-idor must not return an order record, got %q", body)
 	}
 }
