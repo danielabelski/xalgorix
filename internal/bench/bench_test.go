@@ -188,6 +188,10 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 	if byClass["xxe"] != [2]int{1, 2} {
 		t.Fatalf("expected xxe 1/2, got %v", byClass["xxe"])
 	}
+	// csrf = csrf (positive, unsolved by this fake) + safe-account (negative, clean) => 1/2.
+	if byClass["csrf"] != [2]int{1, 2} {
+		t.Fatalf("expected csrf 1/2, got %v", byClass["csrf"])
+	}
 }
 
 func TestNewBuiltinChallengesExhibitVuln(t *testing.T) {
@@ -594,6 +598,17 @@ func TestNegativeControlsAreSafe(t *testing.T) {
 	if body := httpPost(t, simp.URL+"/import", xxePayload); strings.Contains(body, "root:") {
 		t.Fatalf("safe-import must not resolve external entities, got %q", body)
 	}
+
+	// safe-account: the change-email form embeds an anti-CSRF token and a
+	// tokenless POST is refused (no state change).
+	sa := challengeByName(t, "safe-account").Start()
+	defer sa.Close()
+	if body := httpGet(t, sa.URL+"/"); !strings.Contains(body, "csrf_token") {
+		t.Fatalf("safe-account form must embed an anti-CSRF token, got %q", body)
+	}
+	if status, body := httpPostForm(t, sa.URL+"/account/email", "email=attacker@evil.example"); status != http.StatusForbidden || strings.Contains(body, "updated") {
+		t.Fatalf("safe-account must refuse a tokenless POST, got status=%d body=%q", status, body)
+	}
 }
 
 // httpPost sends an XML body to url and returns the response body as a string.
@@ -624,5 +639,36 @@ func TestXxeChallengeExhibitsVuln(t *testing.T) {
 	// The index advertises the import endpoint so a crawler discovers it.
 	if body := httpGet(t, xxe.URL+"/"); !strings.Contains(body, "/import") {
 		t.Fatalf("index must link the import endpoint, got %q", body)
+	}
+}
+
+// httpPostForm submits form-encoded data and returns the status code and body.
+func httpPostForm(t *testing.T, url, data string) (int, string) {
+	t.Helper()
+	resp, err := http.Post(url, "application/x-www-form-urlencoded", strings.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+func TestCsrfChallengeExhibitsVuln(t *testing.T) {
+	csrf := challengeByName(t, "csrf").Start()
+	defer csrf.Close()
+
+	// The change-email form is discoverable and carries NO anti-CSRF token.
+	body := httpGet(t, csrf.URL+"/")
+	if !strings.Contains(body, "/account/email") {
+		t.Fatalf("index must expose the change-email endpoint, got %q", body)
+	}
+	if strings.Contains(strings.ToLower(body), "csrf") {
+		t.Fatalf("vulnerable change-email form must carry no anti-CSRF token, got %q", body)
+	}
+	// The state change is accepted with no token (cross-site forgeable).
+	status, resp := httpPostForm(t, csrf.URL+"/account/email", "email=attacker@evil.example")
+	if status != http.StatusOK || !strings.Contains(resp, "updated") {
+		t.Fatalf("csrf endpoint must accept a tokenless state change, got status=%d body=%q", status, resp)
 	}
 }

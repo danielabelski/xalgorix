@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.45](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.45) — Benchmark now covers CSRF (positive + negative) (2026-09-03)
+
+### Added
+- **The black-box benchmark now exercises CSRF detection, completing coverage of every class the finding classifier recognizes.** Adds a `csrf` positive challenge: a state-changing `POST /account/email` (change the account email) whose form carries no anti-CSRF token and whose handler requires none, so a request forged from any origin changes state. A matching `safe-account` negative control serves the same form with a per-session anti-CSRF token and refuses any POST whose token is missing or wrong (403), so reporting CSRF there is a false positive. Both advertise the change-email endpoint from a crawlable `/` index. The benchmark now runs 25 challenges (15 positive + 10 negative), and every classifier-supported class (xss, sqli, open_redirect, idor, ssrf, rce, lfi, ssti, xxe, csrf) has at least one challenge. Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.44](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.44) — Benchmark now covers XXE (positive + negative) (2026-09-03)
 
 ### Added
