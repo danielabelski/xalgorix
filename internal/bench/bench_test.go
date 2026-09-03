@@ -152,13 +152,14 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 		t.Fatalf("expected xss 1/1 and idor 1/1, got %v", byClass)
 	}
 	// Every other single-challenge class is present but unsolved by this fake.
-	for _, c := range []string{"open_redirect", "ssrf", "lfi"} {
+	for _, c := range []string{"open_redirect", "ssrf"} {
 		if byClass[c] != [2]int{0, 1} {
 			t.Fatalf("expected %s 0/1, got %v", c, byClass[c])
 		}
 	}
-	// rce (cmdi + whitebox-cmdi), sqli (error-sqli + whitebox-sqli), and ssti
-	// (ssti + whitebox-ssti) each have two challenges, all unsolved by this fake.
+	// rce (cmdi + whitebox-cmdi), sqli (error-sqli + whitebox-sqli), ssti
+	// (ssti + whitebox-ssti), and lfi (lfi + whitebox-lfi) each have two
+	// challenges, all unsolved by this fake.
 	if byClass["rce"] != [2]int{0, 2} {
 		t.Fatalf("expected rce 0/2, got %v", byClass["rce"])
 	}
@@ -167,6 +168,9 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 	}
 	if byClass["ssti"] != [2]int{0, 2} {
 		t.Fatalf("expected ssti 0/2, got %v", byClass["ssti"])
+	}
+	if byClass["lfi"] != [2]int{0, 2} {
+		t.Fatalf("expected lfi 0/2, got %v", byClass["lfi"])
 	}
 }
 
@@ -342,6 +346,40 @@ func TestWhiteboxSstiChallengeExhibitsVuln(t *testing.T) {
 	}
 	// The index must NOT link the vulnerable route (whitebox-only discovery).
 	if body := httpGet(t, srv.URL+"/"); strings.Contains(body, "/internal/preview") {
+		t.Fatalf("index must not link the vulnerable route (whitebox-only), got %q", body)
+	}
+}
+
+func TestWhiteboxLfiChallengeExhibitsVuln(t *testing.T) {
+	wb := challengeByName(t, "whitebox-lfi")
+
+	// The whitebox source carries the file-read sink (open() over a concatenated
+	// user path) inside the unlinked log-viewer route's handler.
+	src, ok := wb.SourceFiles["app.py"]
+	if !ok {
+		t.Fatal("whitebox-lfi must ship app.py source")
+	}
+	if !strings.Contains(src, "/internal/logs") || !strings.Contains(src, "open('/var/log/app/'") {
+		t.Fatalf("app.py must contain the /internal/logs route and the open() file-read sink:\n%s", src)
+	}
+
+	srv := wb.Start()
+	defer srv.Close()
+
+	// A ../ traversal to /etc/passwd leaks the passwd file (path traversal).
+	if body := httpGet(t, srv.URL+"/internal/logs?file=../../../../etc/passwd"); !strings.Contains(body, "root:") {
+		t.Fatalf("whitebox-lfi did not leak /etc/passwd on traversal: %q", body)
+	}
+	// A benign file name returns ordinary log lines, not passwd.
+	if body := httpGet(t, srv.URL+"/internal/logs?file=app.log"); strings.Contains(body, "root:") {
+		t.Fatalf("benign file must not leak passwd: %q", body)
+	}
+	// Health endpoint is benign.
+	if body := httpGet(t, srv.URL+"/healthz"); !strings.Contains(body, "ok") {
+		t.Fatalf("healthz should return ok, got %q", body)
+	}
+	// The index must NOT link the vulnerable route (whitebox-only discovery).
+	if body := httpGet(t, srv.URL+"/"); strings.Contains(body, "/internal/logs") {
 		t.Fatalf("index must not link the vulnerable route (whitebox-only), got %q", body)
 	}
 }

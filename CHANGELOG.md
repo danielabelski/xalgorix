@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.37](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.37) — Fourth whitebox benchmark challenge (LFI / path traversal) (2026-09-02)
+
+### Added
+- **A fourth whitebox benchmark challenge (`whitebox-lfi`) widens source-to-runtime validation to local file inclusion / path traversal.** With `whitebox-cmdi` (RCE), `whitebox-sqli`, and `whitebox-ssti` all solving within the standard benchmark deadline, this adds an equivalent LFI challenge so the source-to-runtime bridge is exercised across a fourth class. Its vulnerable log-viewer route (`/internal/logs`, which concatenates a user-supplied `file` parameter onto a base directory and `open()`s it) is **not linked from any page**, so black-box crawling cannot reach it and solving it requires the bridge: scan the source, discover the route and the co-located file-read sink (which the code scanner types as a `fileio` sink → LFI), attribute the sink to that handler, probe the route live, then prove the traversal with the classic `?file=../../../../etc/passwd` → `root:x:0:0:…` read. Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.36](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.36) — Benchmark classifier prefers the CWE over description keywords (2026-09-02)
 
 ### Fixed

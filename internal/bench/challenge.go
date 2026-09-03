@@ -319,7 +319,64 @@ func Builtin() []Challenge {
 				}
 			}),
 		},
+		{
+			// Whitebox challenge (LFI): the vulnerable log-viewer route is not
+			// linked from any page, so it is discoverable only via the attached
+			// source. Solving it exercises the source-to-runtime bridge for a
+			// fourth class — the file-read sink (open() over a concatenated user
+			// path) lives inside the /internal/logs handler, which codesearch
+			// types as a fileio sink (→ lfi).
+			Name: "whitebox-lfi", Class: "lfi", Endpoint: "/internal/logs", Param: "file",
+			Desc: "Local file inclusion / path traversal on an UNLINKED route, discoverable only via the attached source.",
+			SourceFiles: map[string]string{
+				"app.py": "from flask import Flask, request\n\n" +
+					"app = Flask(__name__)\n\n\n" +
+					"@app.route('/')\n" +
+					"def index():\n" +
+					"    return '<html><body>Logs service</body></html>'\n\n\n" +
+					"@app.route('/healthz')\n" +
+					"def healthz():\n" +
+					"    return 'ok'\n\n\n" +
+					"# Internal log viewer - intentionally not linked from any page.\n" +
+					"@app.route('/internal/logs')\n" +
+					"def logs():\n" +
+					"    name = request.args.get('file', 'app.log')\n" +
+					"    # Vulnerable: user input concatenated into a filesystem path.\n" +
+					"    return open('/var/log/app/' + name).read()\n",
+			},
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/healthz":
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					_, _ = fmt.Fprint(w, "ok")
+				case "/internal/logs":
+					file := r.URL.Query().Get("file")
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					if looksLikePasswdTraversal(file) {
+						// Simulated path traversal reading /etc/passwd.
+						_, _ = fmt.Fprint(w, "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n")
+						return
+					}
+					_, _ = fmt.Fprint(w, "2026-09-03 12:00:00 INFO app started\n2026-09-03 12:00:01 INFO request served\n")
+				case "/":
+					// Index does NOT link the vulnerable log-viewer route.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Logs</h1><p>See <a href="/healthz">health</a>.</p></body></html>`)
+				default:
+					http.NotFound(w, r)
+				}
+			}),
+		},
 	}
+}
+
+// looksLikePasswdTraversal reports whether a file parameter uses ../ traversal to
+// reach /etc/passwd — the classic LFI probe this challenge is designed to catch
+// (the sink concatenates the value onto /var/log/app/, so only traversal escapes
+// to a sensitive file).
+func looksLikePasswdTraversal(file string) bool {
+	f := strings.ToLower(file)
+	return strings.Contains(f, "..") && strings.Contains(f, "etc/passwd")
 }
 
 func containsQuote(s string) bool {
