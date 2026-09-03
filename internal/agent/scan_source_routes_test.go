@@ -9,18 +9,18 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools/codesearch"
 )
 
-// TestSeedRoutesCorrelatedAndUncorrelated verifies a route whose file has a
-// dangerous sink is typed by that vuln class at confidence 0.45, while a route
-// with no co-located sink seeds as an idor/attack-surface lead at 0.3 — both
-// carrying a real HTTP path Endpoint, source-route Origin, and queued status.
+// TestSeedRoutesCorrelatedAndUncorrelated verifies a route whose handler
+// encloses a dangerous sink is typed by that vuln class at confidence 0.45,
+// while a route with no enclosed sink seeds as an idor/attack-surface lead at
+// 0.3 — both carrying a real HTTP path Endpoint, source-route Origin, queued.
 func TestSeedRoutesCorrelatedAndUncorrelated(t *testing.T) {
 	ag := &Agent{scanCtx: scanctx.New("routes-corr-"+t.Name(), "")}
 	routes := []codesearch.RouteMatch{
 		{Method: "POST", Path: "/admin/exec", File: "handlers.py", Line: 12, Framework: "flask"},
 		{Method: "GET", Path: "/profile", File: "views.py", Line: 3, Framework: "flask/fastapi"},
 	}
-	byFile := map[string][]string{
-		"handlers.py": {"rce"}, // correlated
+	byFile := map[string][]fileSink{
+		"handlers.py": {{line: 14, vuln: "rce"}}, // sink inside /admin/exec's handler span
 		// views.py has no sink -> uncorrelated
 	}
 
@@ -65,12 +65,12 @@ func TestSeedRoutesCorrelatedAndUncorrelated(t *testing.T) {
 	}
 }
 
-// TestSeedRoutesHighestSeverity verifies a route whose file has several sink
-// classes is typed by the most-dangerous one.
+// TestSeedRoutesHighestSeverity verifies a route whose handler encloses several
+// sink classes is typed by the most-dangerous one.
 func TestSeedRoutesHighestSeverity(t *testing.T) {
 	ag := &Agent{scanCtx: scanctx.New("routes-sev-"+t.Name(), "")}
 	routes := []codesearch.RouteMatch{{Method: "GET", Path: "/x", File: "app.py", Line: 1, Framework: "flask"}}
-	byFile := map[string][]string{"app.py": {"sqli", "rce", "lfi"}}
+	byFile := map[string][]fileSink{"app.py": {{line: 5, vuln: "sqli"}, {line: 6, vuln: "rce"}, {line: 7, vuln: "lfi"}}}
 
 	if seeded, correlated := ag.seedRoutes(routes, byFile); seeded != 1 || correlated != 1 {
 		t.Fatalf("seeded=%d correlated=%d want 1,1", seeded, correlated)
@@ -124,20 +124,50 @@ func TestSeedRoutesNilLedger(t *testing.T) {
 	}
 }
 
-// TestSinkVulnsByFileSkipsDiscoveryOnly verifies the file->vuln inversion maps
-// via the sinkClassToVuln allowlist and skips discovery-only classes.
-func TestSinkVulnsByFileSkipsDiscoveryOnly(t *testing.T) {
+// TestSinksByFileWithLinesSkipsDiscoveryOnly verifies the file->sinks inversion
+// keeps sink lines + canonical vuln and skips discovery-only classes.
+func TestSinksByFileWithLinesSkipsDiscoveryOnly(t *testing.T) {
 	found := map[string][]codesearch.SinkMatch{
 		"rce":    {{File: "a.py", Line: 1, Text: "os.system(x)"}},
 		"crypto": {{File: "a.py", Line: 2, Text: "MD5(x)"}}, // discovery-only, skipped
 		"sqli":   {{File: "b.py", Line: 3, Text: "cursor.execute(q)"}},
 	}
-	byFile := sinkVulnsByFile(found)
-	if got := byFile["a.py"]; len(got) != 1 || got[0] != "rce" {
-		t.Fatalf("a.py vulns=%v want [rce] (crypto skipped)", got)
+	byFile := sinksByFileWithLines(found)
+	if got := byFile["a.py"]; len(got) != 1 || got[0].vuln != "rce" || got[0].line != 1 {
+		t.Fatalf("a.py sinks=%v want [{1 rce}] (crypto skipped)", got)
 	}
-	if got := byFile["b.py"]; len(got) != 1 || got[0] != "sqli" {
-		t.Fatalf("b.py vulns=%v want [sqli]", got)
+	if got := byFile["b.py"]; len(got) != 1 || got[0].vuln != "sqli" || got[0].line != 3 {
+		t.Fatalf("b.py sinks=%v want [{3 sqli}]", got)
+	}
+}
+
+// TestSeedRoutesHandlerSpanAttribution verifies a sink is attributed only to the
+// route whose handler span encloses it, not every route in the file. Two routes
+// share app.py; the os.popen sink lives inside the second route's handler, so
+// only the second is class-typed rce — the first stays an idor lead.
+func TestSeedRoutesHandlerSpanAttribution(t *testing.T) {
+	ag := &Agent{scanCtx: scanctx.New("routes-span-"+t.Name(), "")}
+	routes := []codesearch.RouteMatch{
+		{Method: "GET", Path: "/healthz", File: "app.py", Line: 5, Framework: "flask"},
+		{Method: "GET", Path: "/run", File: "app.py", Line: 14, Framework: "flask"},
+	}
+	byFile := map[string][]fileSink{
+		// Sink at line 18: inside /run's span [14, ∞), NOT /healthz's span [5, 14).
+		"app.py": {{line: 18, vuln: "rce"}},
+	}
+
+	if seeded, correlated := ag.seedRoutes(routes, byFile); seeded != 2 || correlated != 1 {
+		t.Fatalf("expected seeded=2 correlated=1, got seeded=%d correlated=%d", seeded, correlated)
+	}
+	byEndpoint := map[string]scanctx.Hypothesis{}
+	for _, h := range ag.scanCtx.Ledger.All() {
+		byEndpoint[h.Endpoint] = h
+	}
+	if got := byEndpoint["/run"]; got.VulnClass != "rce" || got.Confidence != 0.45 {
+		t.Fatalf("/run should be rce@0.45 (encloses the sink), got %q @ %v", got.VulnClass, got.Confidence)
+	}
+	if got := byEndpoint["/healthz"]; got.VulnClass != "idor" || got.Confidence != 0.3 {
+		t.Fatalf("/healthz should be idor@0.3 (no enclosed sink), got %q @ %v", got.VulnClass, got.Confidence)
 	}
 }
 
