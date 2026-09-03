@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.40](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.40) — Black-box benchmark challenges are now crawler-discoverable (2026-09-02)
+
+### Changed
+- **The black-box benchmark challenges now expose their vulnerable endpoint (and parameter) from a realistic index, so the benchmark measures crawl-then-detect rather than parameter-name guessing.** Only the `idor` challenge previously linked its endpoint from a landing page; the other seven (`reflected-xss`, `open-redirect`, `error-sqli`, `ssrf`, `ssti`, `lfi`, `cmdi`) served their vulnerable behavior at a fixed path with nothing advertising the path or the parameter name — so a scan could fail purely because it never guessed `?q=`/`?url=`/`?file=`/etc., not because it couldn't detect the bug. Each now serves a realistic `/` index (a form and/or an example link, e.g. a search form for `reflected-xss`, a catalog of `/product?id=` links for `error-sqli`, a link-preview form for `ssrf`) that exposes the endpoint path and parameter the way a real app would, so the scanner's crawler discovers the attack surface and the benchmark isolates detection ability. The vulnerable behavior is unchanged and still served on the endpoint paths. Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.39](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.39) — Lock in the source scanner's multi-language route/sink detection (2026-09-02)
 
 ### Changed

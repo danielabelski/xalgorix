@@ -60,8 +60,14 @@ func Builtin() []Challenge {
 			Name: "reflected-xss", Class: "xss", Endpoint: "/search", Param: "q",
 			Desc: "Reflects the q parameter into the HTML response without encoding.",
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				q := r.URL.Query().Get("q")
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				if r.URL.Path == "/" {
+					// Realistic index: a search form + example link so a crawler
+					// discovers the vulnerable endpoint and its parameter.
+					_, _ = fmt.Fprint(w, `<html><body><h1>Search</h1><form action="/search" method="get"><input name="q" placeholder="query"><button>Search</button></form><p><a href="/search?q=example">recent search</a></p></body></html>`)
+					return
+				}
+				q := r.URL.Query().Get("q")
 				// Deliberately unescaped reflection.
 				_, _ = fmt.Fprintf(w, "<html><body><h1>Results</h1><p>You searched for: %s</p></body></html>", q)
 			}),
@@ -92,6 +98,13 @@ func Builtin() []Challenge {
 			Name: "open-redirect", Class: "open_redirect", Endpoint: "/redirect", Param: "url",
 			Desc: "Issues a 302 to an attacker-controlled url parameter.",
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					// Realistic index: a "continue to partner site" link exposes
+					// the redirect endpoint + url parameter to a crawler.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Home</h1><p><a href="/redirect?url=https://example.com/welcome">continue to partner site</a></p></body></html>`)
+					return
+				}
 				u := r.URL.Query().Get("url")
 				if u == "" {
 					u = "/"
@@ -107,8 +120,14 @@ func Builtin() []Challenge {
 			Name: "error-sqli", Class: "sqli", Endpoint: "/product", Param: "id",
 			Desc: "Leaks a database syntax error when the id parameter contains a quote.",
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				id := r.URL.Query().Get("id")
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				if r.URL.Path == "/" {
+					// Realistic catalog index linking product detail pages, so a
+					// crawler discovers /product?id=.
+					_, _ = fmt.Fprint(w, `<html><body><h1>Catalog</h1><ul><li><a href="/product?id=1">Product #1</a></li><li><a href="/product?id=2">Product #2</a></li></ul></body></html>`)
+					return
+				}
+				id := r.URL.Query().Get("id")
 				if containsQuote(id) {
 					w.WriteHeader(http.StatusInternalServerError)
 					_, _ = fmt.Fprintf(w, "Database error: You have an error in your SQL syntax; check the manual near '%s' at line 1", id)
@@ -121,6 +140,13 @@ func Builtin() []Challenge {
 			Name: "ssrf", Class: "ssrf", Endpoint: "/fetch", Param: "url",
 			Desc: "Fetches a user-supplied url; internal targets return cloud-metadata-like content.",
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					// Realistic link-preview index: a form + example link exposes
+					// the fetch endpoint + url parameter to a crawler.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Link Preview</h1><form action="/fetch" method="get"><input name="url" placeholder="https://..."><button>Preview</button></form><p><a href="/fetch?url=https://example.com/logo.png">preview example</a></p></body></html>`)
+					return
+				}
 				raw := r.URL.Query().Get("url")
 				host := ""
 				if u, err := url.Parse(raw); err == nil {
@@ -140,8 +166,14 @@ func Builtin() []Challenge {
 			Name: "ssti", Class: "ssti", Endpoint: "/greet", Param: "name",
 			Desc: "Evaluates a {{ a * b }} expression in the name parameter (template injection).",
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				name := r.URL.Query().Get("name")
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				if r.URL.Path == "/" {
+					// Realistic greeter index: a form + example link exposes the
+					// greet endpoint + name parameter to a crawler.
+					_, _ = fmt.Fprint(w, `<html><body><h1>Greeter</h1><form action="/greet" method="get"><input name="name" placeholder="your name"><button>Greet</button></form><p><a href="/greet?name=friend">say hi</a></p></body></html>`)
+					return
+				}
+				name := r.URL.Query().Get("name")
 				_, _ = fmt.Fprintf(w, "<html><body>Hello, %s!</body></html>", sstiRender(name))
 			}),
 		},
@@ -149,6 +181,13 @@ func Builtin() []Challenge {
 			Name: "lfi", Class: "lfi", Endpoint: "/download", Param: "file",
 			Desc: "Path traversal in the file parameter returns system file contents.",
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					// Realistic documents index linking downloadable files, so a
+					// crawler discovers /download?file=.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Documents</h1><ul><li><a href="/download?file=report.pdf">report.pdf</a></li><li><a href="/download?file=invoice.txt">invoice.txt</a></li></ul></body></html>`)
+					return
+				}
 				file := r.URL.Query().Get("file")
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				if strings.Contains(file, "..") && strings.Contains(file, "passwd") {
@@ -163,6 +202,13 @@ func Builtin() []Challenge {
 			Name: "cmdi", Class: "rce", Endpoint: "/ping", Param: "host",
 			Desc: "Command injection in the host parameter (shell metacharacters execute).",
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					// Realistic network-tools index: a form + example link exposes
+					// the ping endpoint + host parameter to a crawler.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Network Tools</h1><form action="/ping" method="get"><input name="host" placeholder="host"><button>Ping</button></form><p><a href="/ping?host=example.com">ping example.com</a></p></body></html>`)
+					return
+				}
 				host := r.URL.Query().Get("host")
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				out := fmt.Sprintf("PING %s: 56 data bytes\n64 bytes: icmp_seq=0 ttl=64 time=0.048 ms\n", host)
