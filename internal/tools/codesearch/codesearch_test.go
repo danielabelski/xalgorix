@@ -375,3 +375,42 @@ func TestRouteScanBounded(t *testing.T) {
 		t.Fatalf("max=2 must bound routes, got %d", len(routes))
 	}
 }
+
+func TestRouteScanIgnoresNonRouterGetCalls(t *testing.T) {
+	// Regression: the express pattern must not treat arbitrary .get()/.post()
+	// calls (request.args.get, dict.get, session.get) as HTTP routes — only
+	// router-like receivers (app, router, …) declare routes.
+	const ctx = "ctx-routescan-fp"
+	dir := t.TempDir()
+	src := "from flask import request\n" +
+		"def handler():\n" +
+		"    host = request.args.get('host', '')\n" +
+		"    k = data.get('secret_key')\n" +
+		"    v = session.get('token')\n" +
+		"    app.get('/users')\n" +
+		"    router.post('/login')\n"
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	SetSourceRoot(ctx, dir)
+	defer SetSourceRoot(ctx, "")
+
+	routes, err := RouteScan(ctx, 60)
+	if err != nil {
+		t.Fatalf("RouteScan: %v", err)
+	}
+	paths := map[string]bool{}
+	for _, r := range routes {
+		paths[r.Path] = true
+	}
+	// Real router route declarations are still found.
+	if !paths["/users"] || !paths["/login"] {
+		t.Fatalf("expected /users and /login routes, got %+v", routes)
+	}
+	// Non-router .get() argument strings must NOT be seeded as routes.
+	for _, bogus := range []string{"host", "secret_key", "token"} {
+		if paths[bogus] {
+			t.Fatalf("non-router .get() call must not yield a route %q; got %+v", bogus, routes)
+		}
+	}
+}

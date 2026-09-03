@@ -351,8 +351,10 @@ var routePatterns = []routePattern{
 	{"flask/fastapi", `@[A-Za-z_][A-Za-z0-9_]*\.(get|post|put|patch|delete|options|head)\(['"]([^'"]+)`, 1, 2},
 	// Flask/Blueprint generic route: @app.route("/x"), @bp.route('/y')
 	{"flask", `@[A-Za-z_][A-Za-z0-9_]*\.route\(['"]([^'"]+)`, 0, 1},
-	// Express/Koa/Fastify: app.get("/x"), router.post('/y')
-	{"express", `\b[A-Za-z_][A-Za-z0-9_]*\.(get|post|put|patch|delete|all)\(['"]([^'"]+)`, 1, 2},
+	// Express/Koa/Fastify: app.get("/x"), router.post('/y'). The receiver is
+	// restricted to router-like names so this does NOT match unrelated .get()
+	// calls such as request.args.get('host'), dict.get('k'), or session.get(...).
+	{"express", `\b(app|router|routes|route|api|srv|server|mux|koa|fastify)\.(get|post|put|patch|delete|all)\(['"]([^'"]+)`, 2, 3},
 	// Django urls: path("x/", ...), re_path(r'^x$', ...), url(r'^x', ...)
 	{"django", `\b(path|re_path|url)\(\s*r?['"]([^'"]+)`, 0, 2},
 	// Spring: @GetMapping("/x"), @RequestMapping(value="/y")
