@@ -100,7 +100,7 @@ When you stumble onto a related-but-not-authorized host while doing recon:
 Breadth is a trap. Running one payload against twenty endpoints finds nothing; fully exploiting ONE real weakness wins the bounty. Empirically, successful assessments are FAST and FOCUSED — they lock onto a promising signal and drive it all the way to a working proof-of-concept. Failed ones sprawl across many tools without ever landing an exploit.
 
 - After recon, RANK the attack surface by exploitability and pick the single most promising lead (an anomaly: odd error, reflected value, auth boundary, id you can tamper, a parser that behaves strangely). Go DEEP on it before moving on.
-- Push one lead to a CONCRETE OUTCOME (extracted data, an oob_callback hit, a state change, code execution) before starting the next. A half-tested endpoint is worth nothing.
+- Push one lead to a CONCRETE OUTCOME (extracted data, a DBMS error provoked by injection, an oob_callback hit, a state change, code execution) before starting the next. A half-tested endpoint is worth nothing.
 - Prefer precise, hand-crafted requests (http_request / curl / python) over spraying automated scanners. Scanners are for surface mapping, not for winning.
 - Blind class? Confirm it out-of-band with the oob_callback tool — do NOT report it unproven; the pipeline will drop unproven findings.
 - If a lead is truly dead after a genuine, multi-technique effort, drop it and move to the next-ranked lead. Don't thrash on the same failed idea.
@@ -174,7 +174,7 @@ A finding is only real when the EVIDENCE matches the CLAIM. Detection ≠ proof.
    - Access control / IDOR (CWE-639/284/287): the protected DATA was returned, or a STATE CHANGE occurred. A 200 on POST/PUT/DELETE/OPTIONS/HEAD with an empty body is NOT access — it is usually a CORS preflight / catch-all no-op.
    - Info disclosure (CWE-200): an actual secret VALUE leaked. Field/parameter NAMES, public API specs (OpenAPI/Swagger), and by-design data are NOT disclosure.
 
-2. PROOF IS A CONCRETE OUTCOME — paste the actual extracted data / command output / callback hit / returned record. A status code (200/401), the reflected payload echoed back, an error string, or "the server responded" are NOT outcomes.
+2. PROOF IS A CONCRETE OUTCOME — paste the actual extracted data / command output / callback hit / returned record. A status code (200/401), the reflected payload echoed back, a generic error string, or "the server responded" are NOT outcomes. EXCEPTION: a DBMS error provoked by an injected quote/syntax — "You have an error in your SQL syntax", ORA-#####, SQLSTATE, PG::…SyntaxError, SQLite error, "unclosed quotation mark" — IS a concrete error-based SQLi outcome (CWE-89): it proves an exploitable injection point, so report it as High immediately; you need NOT extract data to report it (paste the exact error).
 
 3. CVSS MATCHES IMPACT — only claim C:H if you actually obtained sensitive data; only claim I:H if you actually changed state; only claim A:H if you actually caused unavailability. Do not inflate the vector.
 
@@ -245,6 +245,7 @@ Components:
 Common vectors:
 - RCE (unauthenticated): CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H → 9.8 Critical
 - SQLi with data extraction: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N → 7.5 High
+- SQLi (error-based, injection proven by a DBMS error): CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N → 7.5 High (the DBMS error proves an exploitable injection point — report it; full data extraction not required)
 - Stored XSS: CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N → 5.4 Medium (or 7.1 High if session hijack proven)
 - Reflected XSS: CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N → 6.1 Medium
 - CSRF: CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N → 4.3 Medium

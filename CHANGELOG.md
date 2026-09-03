@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.31](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.31) — Error-based SQL injection recognized as valid High proof (2026-09-02)
+
+### Fixed
+- **A reflected DBMS error is now treated as valid proof of error-based SQL injection instead of being silently dropped.** The `whitebox-sqli` benchmark (v4.6.30) surfaced a false negative: an agent could inject a quote, get back a database error that proves the injection point (`You have an error in your SQL syntax`, `ORA-#####`, `SQLSTATE`, `PG::…SyntaxError`, `SQLite error`), and still never file the finding. Three things conspired against it. (1) The agent prompt contradicted itself — one rule accepted a DB error as SQLi proof while the evidence standard listed "an error string" as *not* an outcome and the depth-first checklist omitted DB errors entirely, so the agent judged its own proof insufficient. (2) The reporting `checkClaimConsistency` C:H gate rejected a High/`C:H` error-based finding because a lone DB error carries no data-obtained marker. (3) The DBMS-error signatures were absent from the concrete-impact indicators, so error-based SQLi was auto-downgraded and never tagged exploit-proven. All three are fixed: the prompt now names a provoked DBMS error as a concrete error-based SQLi outcome (CWE-89) to report as High without extracting data; the C:H gate is SQLi-aware (a SQLi finding whose proof carries a native SQLi/DBMS-error signal satisfies C:H); and the DBMS-error signatures are recognized as concrete impact so the finding is tagged exploit-proven and the verifier can auto-confirm. A proven injection point is reported as High even when the PoC only triggered a database error rather than dumping rows. The SQLi carve-out is scoped to SQLi findings, so other classes still require real data-obtained evidence for C:H.
+
 ## [v4.6.30](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.30) — Second whitebox benchmark challenge (SQLi) (2026-09-02)
 
 ### Added

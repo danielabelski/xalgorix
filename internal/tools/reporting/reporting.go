@@ -918,8 +918,17 @@ func checkClaimConsistency(title, cwe, method, cvssVector, severity, description
 	// 3) CVSS High Confidentiality (C:H) requires sensitive data actually obtained.
 	//    Command execution / RCE inherently grants confidentiality, so its markers
 	//    satisfy this check too (an RCE proof shows `uid=`, not "extracted data").
+	//    A proven SQL-injection point ALSO satisfies C:H: a native SQLi signal
+	//    (UNION / error-based DBMS error / blind) demonstrates the injection is
+	//    exploitable to read arbitrary data, even when the PoC only triggered a
+	//    database error rather than dumping rows.
 	if strings.Contains(vec, "C:H") {
-		if !anyContains(lp, "extracted", "extraction", "dumped", "leaked", "exfiltrat", "retrieved",
+		sqliClaim := cweL == "cwe-89" || strings.Contains(strings.ToLower(title), "sql injection") ||
+			strings.Contains(strings.ToLower(title), "sqli")
+		sqliProof := sqliClaim && anyContains(lp, "sql syntax", "you have an error in your sql",
+			"syntax error", "sqlstate", "ora-0", "extractvalue", "updatexml", "union select",
+			"information_schema", "sqlmap", "unclosed quotation mark", "quoted string not properly")
+		if !sqliProof && !anyContains(lp, "extracted", "extraction", "dumped", "leaked", "exfiltrat", "retrieved",
 			"read /etc", "/etc/passwd", "password", "credential", "token", "api key", "secret",
 			"pii", "ssn", "credit card", "information_schema", "union select", "another user",
 			"other user", "private key", "169.254", "/latest/meta-data", "internal", "session",
@@ -1840,6 +1849,16 @@ var concreteImpactIndicators = []string{
 	"windows ip configuration", "microsoft windows [version",
 	// SQL data extraction
 	"union select", "information_schema", "@@version", "sqlmap",
+	// Error-based SQLi: a DBMS error provoked by an injected quote/syntax proves
+	// an exploitable injection point. These strings are emitted by database
+	// engines (not benign web responses) when a broken query reaches the server:
+	//   MySQL → "you have an error in your sql", "sql syntax", "warning: mysql";
+	//   generic → "sqlstate";  Oracle → "ora-0";  Postgres → "psqlexception";
+	//   SQLite → "sqlite3::";  MSSQL → "unclosed quotation mark after the character string";
+	//   Postgres/others → "quoted string not properly terminated".
+	"you have an error in your sql", "sql syntax", "sqlstate", "ora-0",
+	"psqlexception", "sqlite3::", "unclosed quotation mark after the character string",
+	"quoted string not properly terminated", "warning: mysql",
 	// Credential / session theft (concrete)
 	"set-cookie:", "document.cookie", "session_id=", "access_token", "refresh_token",
 	// SSRF / internal access (concrete targets/content)
@@ -1865,6 +1884,11 @@ var reproducedImpactIndicators = []string{
 	"gnu/linux", "load average", "nt authority\\", "volume serial number",
 	"windows ip configuration", "microsoft windows [version",
 	"union select", "information_schema", "@@version", "sqlmap",
+	// Error-based SQLi DBMS errors (see concreteImpactIndicators for rationale):
+	// distinctive engine-emitted strings that prove an exploitable injection point.
+	"you have an error in your sql", "sql syntax", "sqlstate", "ora-0",
+	"psqlexception", "sqlite3::", "unclosed quotation mark after the character string",
+	"quoted string not properly terminated", "warning: mysql",
 	"169.254.169.254", "/latest/meta-data", "metadata.google.internal",
 	"callback received", "dns query", "burp collaborator",
 	"interact.sh", "interactsh", "oast", "http request received", "pingback",
