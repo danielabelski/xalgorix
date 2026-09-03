@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.38](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.38) — Cross-language whitebox benchmark challenge (Node/Express RCE) (2026-09-02)
+
+### Added
+- **A Node/Express whitebox benchmark challenge (`whitebox-node-rce`) validates the source-to-runtime bridge on a second source language.** The four existing whitebox challenges are all Python/Flask, so the bridge — source-sink discovery, route extraction, and route↔sink correlation — was only exercised for one language. This adds an equivalent command-injection challenge whose source is JavaScript: an `app.js` with an **UNLINKED** `app.get('/internal/ping')` Express route whose handler calls `child_process` `exec('ping -c1 ' + host)`. Solving it requires the bridge to work across languages: the code scanner must recognize the JS command-exec sink and the Express route declaration (`app.get(...)`, distinct from Flask's `@app.route` decorator), correlate the sink to that handler, probe the route live, and prove RCE via the injected command's output. The route is not linked from any page, so black-box crawling cannot reach it. Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.37](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.37) — Fourth whitebox benchmark challenge (LFI / path traversal) (2026-09-02)
 
 ### Added

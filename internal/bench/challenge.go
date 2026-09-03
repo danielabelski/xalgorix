@@ -367,6 +367,59 @@ func Builtin() []Challenge {
 				}
 			}),
 		},
+		{
+			// Whitebox challenge (RCE, Node/Express source): validates the
+			// source-to-runtime bridge on a SECOND language. The vulnerable
+			// diagnostics route is not linked from any page, so it is discoverable
+			// only via the attached JS source — the command-exec sink
+			// (child_process exec over concatenated user input) lives inside the
+			// app.get('/internal/ping') handler, which codesearch types as an rce
+			// sink and the Express route pattern discovers.
+			Name: "whitebox-node-rce", Class: "rce", Endpoint: "/internal/ping", Param: "host",
+			Desc: "Command injection on an UNLINKED Express route, discoverable only via the attached Node source.",
+			SourceFiles: map[string]string{
+				"app.js": "const express = require('express');\n" +
+					"const { exec } = require('child_process');\n" +
+					"const app = express();\n\n" +
+					"app.get('/', (req, res) => {\n" +
+					"  res.send('<html><body>Service</body></html>');\n" +
+					"});\n\n" +
+					"app.get('/healthz', (req, res) => {\n" +
+					"  res.send('ok');\n" +
+					"});\n\n" +
+					"// Internal diagnostics endpoint - intentionally not linked from any page.\n" +
+					"app.get('/internal/ping', (req, res) => {\n" +
+					"  const host = req.query.host || '';\n" +
+					"  // Vulnerable: user input flows into a shell command.\n" +
+					"  exec('ping -c1 ' + host, (err, stdout) => {\n" +
+					"    res.type('text/plain').send(stdout);\n" +
+					"  });\n" +
+					"});\n\n" +
+					"app.listen(3000);\n",
+			},
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/healthz":
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					_, _ = fmt.Fprint(w, "ok")
+				case "/internal/ping":
+					host := r.URL.Query().Get("host")
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					out := fmt.Sprintf("PING %s: 56 data bytes\n64 bytes: icmp_seq=0 ttl=64 time=0.041 ms\n", host)
+					if hasShellMeta(host) {
+						// Simulated command execution of the injected command.
+						out += "uid=0(root) gid=0(root) groups=0(root)\n"
+					}
+					_, _ = fmt.Fprint(w, out)
+				case "/":
+					// Index does NOT link the vulnerable diagnostics route.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Service</h1><p>See <a href="/healthz">health</a>.</p></body></html>`)
+				default:
+					http.NotFound(w, r)
+				}
+			}),
+		},
 	}
 }
 

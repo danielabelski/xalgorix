@@ -157,11 +157,11 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 			t.Fatalf("expected %s 0/1, got %v", c, byClass[c])
 		}
 	}
-	// rce (cmdi + whitebox-cmdi), sqli (error-sqli + whitebox-sqli), ssti
-	// (ssti + whitebox-ssti), and lfi (lfi + whitebox-lfi) each have two
-	// challenges, all unsolved by this fake.
-	if byClass["rce"] != [2]int{0, 2} {
-		t.Fatalf("expected rce 0/2, got %v", byClass["rce"])
+	// rce has three challenges (cmdi + whitebox-cmdi + whitebox-node-rce); sqli
+	// (error-sqli + whitebox-sqli), ssti (ssti + whitebox-ssti), and lfi
+	// (lfi + whitebox-lfi) each have two — all unsolved by this fake.
+	if byClass["rce"] != [2]int{0, 3} {
+		t.Fatalf("expected rce 0/3, got %v", byClass["rce"])
 	}
 	if byClass["sqli"] != [2]int{0, 2} {
 		t.Fatalf("expected sqli 0/2, got %v", byClass["sqli"])
@@ -263,10 +263,20 @@ func TestHarnessMaterializesSourceFiles(t *testing.T) {
 	seen := map[string]string{}
 	fake := func(_ context.Context, _, sourceDir, scanID string) ([]reporting.Vulnerability, error) {
 		seen[scanID] = sourceDir
-		// While the scan runs, a whitebox challenge's source must exist on disk.
+		// While the scan runs, each of the challenge's OWN declared source files
+		// must exist on disk (language-agnostic: app.py for Flask, app.js for
+		// Express, etc.).
 		if sourceDir != "" {
-			if _, err := os.Stat(filepath.Join(sourceDir, "app.py")); err != nil {
-				t.Errorf("expected app.py in materialized source dir %q: %v", sourceDir, err)
+			name := strings.TrimPrefix(scanID, "bench-")
+			for _, c := range Builtin() {
+				if c.Name != name {
+					continue
+				}
+				for f := range c.SourceFiles {
+					if _, err := os.Stat(filepath.Join(sourceDir, f)); err != nil {
+						t.Errorf("expected %s in materialized source dir %q: %v", f, sourceDir, err)
+					}
+				}
 			}
 		}
 		return nil, nil
@@ -380,6 +390,41 @@ func TestWhiteboxLfiChallengeExhibitsVuln(t *testing.T) {
 	}
 	// The index must NOT link the vulnerable route (whitebox-only discovery).
 	if body := httpGet(t, srv.URL+"/"); strings.Contains(body, "/internal/logs") {
+		t.Fatalf("index must not link the vulnerable route (whitebox-only), got %q", body)
+	}
+}
+
+func TestWhiteboxNodeRceChallengeExhibitsVuln(t *testing.T) {
+	wb := challengeByName(t, "whitebox-node-rce")
+
+	// The whitebox source is a Node/Express app: the command-exec sink
+	// (child_process exec over concatenated user input) lives inside the unlinked
+	// diagnostics route's handler, discovered via the Express route pattern.
+	src, ok := wb.SourceFiles["app.js"]
+	if !ok {
+		t.Fatal("whitebox-node-rce must ship app.js source")
+	}
+	if !strings.Contains(src, "child_process") || !strings.Contains(src, "app.get('/internal/ping'") {
+		t.Fatalf("app.js must contain the Express /internal/ping route and the child_process exec sink:\n%s", src)
+	}
+
+	srv := wb.Start()
+	defer srv.Close()
+
+	// A shell metacharacter in host triggers simulated command execution.
+	if body := httpGet(t, srv.URL+"/internal/ping?host=127.0.0.1%3Bid"); !strings.Contains(body, "uid=0") {
+		t.Fatalf("whitebox-node-rce did not execute the injected command: %q", body)
+	}
+	// A benign host does not.
+	if body := httpGet(t, srv.URL+"/internal/ping?host=localhost"); strings.Contains(body, "uid=0") {
+		t.Fatalf("benign host must not yield command output: %q", body)
+	}
+	// Health endpoint is benign.
+	if body := httpGet(t, srv.URL+"/healthz"); !strings.Contains(body, "ok") {
+		t.Fatalf("healthz should return ok, got %q", body)
+	}
+	// The index must NOT link the vulnerable route (whitebox-only discovery).
+	if body := httpGet(t, srv.URL+"/"); strings.Contains(body, "/internal/ping") {
 		t.Fatalf("index must not link the vulnerable route (whitebox-only), got %q", body)
 	}
 }
