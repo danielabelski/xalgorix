@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.36](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.36) — Benchmark classifier prefers the CWE over description keywords (2026-09-02)
+
+### Fixed
+- **The benchmark's finding classifier now trusts the CWE over description keywords, so a genuine SSTI finding is no longer scored as a miss.** A `whitebox-ssti` run confirmed the `verify_ssti` tool works end-to-end — the agent reported an exploit-proven `Server-Side Template Injection (SSTI) … CWE-1336` on the correct route — yet the scorecard marked the challenge `[FAIL]`. The cause was in the benchmark scorer, not the agent: `classifyFinding` matched title/description keywords **before** falling back to the CWE, and the broad `rce` keywords (`remote code execution`, `code execution`, `command injection`) precede `ssti` in the keyword list. Because a proper SSTI report describes the remote code execution it can be escalated to (exactly what the `verify_ssti` guidance recommends), the finding matched `rce` first and was classified as the wrong class, so it did not count as solving the SSTI challenge. `classifyFinding` now prefers the authoritative, structured CWE (`CWE-1336` → `ssti`) when it maps to a known class, and only falls back to title/description keywords for findings that carry no (or an unmapped) CWE. This makes the benchmark's per-class scoring accurate for classes whose impact overlaps another class's keywords (SSTI/XXE/SQLi that escalate to RCE). Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.35](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.35) — Deterministic server-side template injection confirmer (verify_ssti) (2026-09-02)
 
 ### Added
