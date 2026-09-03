@@ -1828,12 +1828,47 @@ func checkFalsePositive(title, description, severity, proof string) string {
 	return ""
 }
 
+// dbmsErrorSignatures are distinctive strings emitted by database engines when a
+// malformed query — typically an injected quote breaking the SQL syntax — reaches
+// the server. They are the tell of an error-based SQL-injection point:
+//
+//	MySQL             → "you have an error in your sql", "sql syntax", "warning: mysql"
+//	generic JDBC/ODBC → "sqlstate"
+//	Oracle            → "ora-0"
+//	Postgres          → "psqlexception", "quoted string not properly terminated"
+//	SQLite            → "sqlite3::"
+//	MSSQL             → "unclosed quotation mark after the character string"
+//
+// A benign web response does not emit these by accident, so a response that
+// contains one after a quote injection proves the input reaches a SQL query
+// unsanitized. Defined once here as the single source of truth: the concrete-
+// impact indicators below embed it, and the agent's verify_sqli tool matches on
+// it via LooksLikeSQLError so the detector and the reporting gate never drift.
+var dbmsErrorSignatures = []string{
+	"you have an error in your sql", "sql syntax", "sqlstate", "ora-0",
+	"psqlexception", "sqlite3::", "unclosed quotation mark after the character string",
+	"quoted string not properly terminated", "warning: mysql",
+}
+
+// LooksLikeSQLError reports whether text contains a DBMS error signature (see
+// dbmsErrorSignatures) — i.e. the response looks like a database engine choked on
+// a malformed query, the hallmark of error-based SQL injection.
+func LooksLikeSQLError(text string) bool {
+	lower := strings.ToLower(text)
+	for _, sig := range dbmsErrorSignatures {
+		if strings.Contains(lower, sig) {
+			return true
+		}
+	}
+	return false
+}
+
 // concreteImpactIndicators are unambiguous exploitation OUTCOMES. A match here
 // means the target actually produced impact (command output, extracted data,
 // stolen session material, an OOB hit). Used by hasStrongEvidence to gauge the
 // strength of the AGENT'S OWN first-party proof (where a Set-Cookie/token is
 // legitimately part of a demonstrated credential-theft exploit).
-var concreteImpactIndicators = []string{
+var concreteImpactIndicators = append([]string{
 	// Data exfiltration outcome
 	"extracted", "dumped", "exfiltrated",
 	// System file / command-execution output
@@ -1849,16 +1884,7 @@ var concreteImpactIndicators = []string{
 	"windows ip configuration", "microsoft windows [version",
 	// SQL data extraction
 	"union select", "information_schema", "@@version", "sqlmap",
-	// Error-based SQLi: a DBMS error provoked by an injected quote/syntax proves
-	// an exploitable injection point. These strings are emitted by database
-	// engines (not benign web responses) when a broken query reaches the server:
-	//   MySQL → "you have an error in your sql", "sql syntax", "warning: mysql";
-	//   generic → "sqlstate";  Oracle → "ora-0";  Postgres → "psqlexception";
-	//   SQLite → "sqlite3::";  MSSQL → "unclosed quotation mark after the character string";
-	//   Postgres/others → "quoted string not properly terminated".
-	"you have an error in your sql", "sql syntax", "sqlstate", "ora-0",
-	"psqlexception", "sqlite3::", "unclosed quotation mark after the character string",
-	"quoted string not properly terminated", "warning: mysql",
+	// (error-based SQLi DBMS errors are appended from dbmsErrorSignatures below)
 	// Credential / session theft (concrete)
 	"set-cookie:", "document.cookie", "session_id=", "access_token", "refresh_token",
 	// SSRF / internal access (concrete targets/content)
@@ -1866,7 +1892,7 @@ var concreteImpactIndicators = []string{
 	// Out-of-band callbacks
 	"callback received", "dns query", "burp collaborator",
 	"interact.sh", "interactsh", "oast", "http request received", "pingback",
-}
+}, dbmsErrorSignatures...)
 
 // reproducedImpactIndicators is the STRICT subset used to AUTO-CONFIRM a finding
 // from the independent verifier's own re-test output. It deliberately omits the
@@ -1876,7 +1902,7 @@ var concreteImpactIndicators = []string{
 // validate a finding the verifier never actually reproduced. Only unambiguous
 // command-execution, data-exfiltration, SQL-extraction, cloud-metadata, and
 // out-of-band-callback outcomes qualify here.
-var reproducedImpactIndicators = []string{
+var reproducedImpactIndicators = append([]string{
 	"extracted", "dumped", "exfiltrated",
 	"root:", "uid=", "gid=", "/etc/passwd", "/etc/shadow", "/proc/self",
 	"password hash", "/bin/bash",
@@ -1884,15 +1910,11 @@ var reproducedImpactIndicators = []string{
 	"gnu/linux", "load average", "nt authority\\", "volume serial number",
 	"windows ip configuration", "microsoft windows [version",
 	"union select", "information_schema", "@@version", "sqlmap",
-	// Error-based SQLi DBMS errors (see concreteImpactIndicators for rationale):
-	// distinctive engine-emitted strings that prove an exploitable injection point.
-	"you have an error in your sql", "sql syntax", "sqlstate", "ora-0",
-	"psqlexception", "sqlite3::", "unclosed quotation mark after the character string",
-	"quoted string not properly terminated", "warning: mysql",
+	// (error-based SQLi DBMS errors are appended from dbmsErrorSignatures below)
 	"169.254.169.254", "/latest/meta-data", "metadata.google.internal",
 	"callback received", "dns query", "burp collaborator",
 	"interact.sh", "interactsh", "oast", "http request received", "pingback",
-}
+}, dbmsErrorSignatures...)
 
 // HasConcreteImpact reports whether text contains an unambiguous, non-generic
 // exploitation outcome (see reproducedImpactIndicators). The verifier uses this
