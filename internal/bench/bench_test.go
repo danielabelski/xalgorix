@@ -428,3 +428,30 @@ func TestWhiteboxNodeRceChallengeExhibitsVuln(t *testing.T) {
 		t.Fatalf("index must not link the vulnerable route (whitebox-only), got %q", body)
 	}
 }
+
+// TestBlackboxChallengesDiscoverable verifies every black-box challenge exposes
+// its vulnerable endpoint (and, for query-parameter bugs, the parameter name)
+// from its "/" index, so a crawling scanner can discover the attack surface the
+// way it would on a real app — the benchmark measures crawl-then-detect, not
+// parameter-name guessing. Whitebox challenges are exempt (discovered via source).
+func TestBlackboxChallengesDiscoverable(t *testing.T) {
+	for _, c := range Builtin() {
+		if c.SourceFiles != nil {
+			continue
+		}
+		c := c
+		t.Run(c.Name, func(t *testing.T) {
+			srv := c.Start()
+			defer srv.Close()
+			body := httpGet(t, srv.URL+"/")
+			if !strings.Contains(body, c.Endpoint) {
+				t.Errorf("index must link endpoint %q so a crawler finds it; got %q", c.Endpoint, body)
+			}
+			// idor's object id is a path segment, not a query parameter, so it is
+			// exempt from the parameter-name check.
+			if c.Name != "idor" && c.Param != "" && !strings.Contains(body, c.Param) {
+				t.Errorf("index must expose parameter %q (form/link); got %q", c.Param, body)
+			}
+		})
+	}
+}
