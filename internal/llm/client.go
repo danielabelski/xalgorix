@@ -20,6 +20,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	"github.com/xalgord/xalgorix/v4/internal/providers"
 	"github.com/xalgord/xalgorix/v4/internal/resources"
 	"github.com/xalgord/xalgorix/v4/internal/safe"
 )
@@ -308,9 +309,19 @@ type anthropicResponse struct {
 // Validates: Requirements 2.2, 2.3, 11.2.
 func (c *Client) resolveRequestEndpoint(ctx context.Context) (Endpoint, error) {
 	if c.resolver != nil {
-		return c.resolver.Resolve(ctx)
+		ep, err := c.resolver.Resolve(ctx)
+		if err != nil {
+			return Endpoint{}, err
+		}
+		ep.Model = normalizeEndpointModel(c.cfg.LLMProvider, ep.URL, ep.Model)
+		return ep, nil
 	}
 	url, model := c.resolveEndpoint()
+	providerID := strings.TrimSpace(c.cfg.LLMProvider)
+	if providerID == "" {
+		providerID = c.provider
+	}
+	model = normalizeEndpointModel(providerID, url, model)
 	hs := "openai"
 	switch {
 	case c.usesGeminiAPI(url):
@@ -418,7 +429,8 @@ func applyAuthHeaders(req *http.Request, ep Endpoint) {
 
 // resolveEndpoint returns the full chat completions URL and clean model name.
 // Handles provider prefixes like "minimax/", "openai/", "anthropic/", etc.
-// Auto-appends /v1/chat/completions if the base doesn't already contain /v1.
+// Appends the OpenAI-compatible chat path while preserving an explicit API
+// version already present in the base (for example Z.AI's /v4).
 // Also supports custom providers - just set XALGORIX_API_BASE to your endpoint.
 //
 // This is the legacy single-call resolver kept on the Client so
@@ -438,12 +450,14 @@ func (c *Client) resolveEndpoint() (string, string) {
 	// Provider prefix in model name is the source of truth for API base.
 	// However, if a non-empty API base was explicitly set (e.g., from web UI), use it.
 	providerBases := map[string]string{
-		"openai":    "https://api.openai.com/v1",
-		"anthropic": "https://api.anthropic.com",
-		"minimax":   "https://api.minimax.io/v1",
-		"deepseek":  "https://api.deepseek.com/v1",
-		"groq":      "https://api.groq.com/openai/v1",
-		"ollama":    "http://localhost:11434/v1",
+		"openai":          "https://api.openai.com/v1",
+		"anthropic":       "https://api.anthropic.com",
+		"minimax":         "https://api.minimax.io/v1",
+		"deepseek":        "https://api.deepseek.com/v1",
+		"groq":            "https://api.groq.com/openai/v1",
+		"ollama":          "http://localhost:11434/v1",
+		"zai":             "https://api.z.ai/api/paas/v4",
+		"zai-coding-plan": "https://api.z.ai/api/coding/paas/v4",
 		// Google's chat endpoint is /v1beta/models/MODEL:generateContent — we
 		// store the bare host here and append the version segment below.
 		"google": "https://generativelanguage.googleapis.com",
@@ -479,12 +493,7 @@ func (c *Client) resolveEndpoint() (string, string) {
 		url = strings.TrimSuffix(url, "/v1")
 		url += "/v1beta/models/" + model + ":generateContent"
 	} else {
-		if !strings.HasSuffix(strings.ToLower(url), "/chat/completions") {
-			if !strings.HasSuffix(apiBase, "/v1") && !strings.Contains(apiBase, "/v1/") {
-				url += "/v1"
-			}
-			url += "/chat/completions"
-		}
+		url = providers.OpenAICompatibleURL(apiBase, "chat/completions")
 	}
 
 	return url, model

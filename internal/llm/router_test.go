@@ -180,6 +180,33 @@ func TestRouter_Route(t *testing.T) {
 	}
 }
 
+func TestRouter_Route_ZAICodingPlanPreservesV4(t *testing.T) {
+	dir := t.TempDir()
+	ks, err := NewKeyStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := ks.Set(ctx, ProviderKey{
+		ProviderID: "zai-coding-plan",
+		APIKey:     "zai-key",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	router := NewRouter(providers.NewService(), ks)
+	ep, err := router.Route(ctx, "zai-coding-plan/Glm-5.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ep.URL != "https://api.z.ai/api/coding/paas/v4/chat/completions" {
+		t.Fatalf("URL = %q, want Z.AI /v4/chat/completions", ep.URL)
+	}
+	if ep.Model != "glm-5.3" || ep.APIKey != "zai-key" {
+		t.Fatalf("endpoint = %+v", ep)
+	}
+}
+
 func TestRouter_Route_NoKey(t *testing.T) {
 	dir := t.TempDir()
 	ks, err := NewKeyStore(dir)

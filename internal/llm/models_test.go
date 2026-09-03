@@ -17,6 +17,8 @@ func TestResolveProvider_ExplicitPrefix(t *testing.T) {
 		{"deepseek/deepseek-chat", "deepseek", "deepseek-chat", true},
 		{"groq/llama-3.3-70b-versatile", "groq", "llama-3.3-70b-versatile", true},
 		{"xai/grok-3", "xai", "grok-3", true},
+		{"zai/glm-5.3", "zai", "glm-5.3", true},
+		{"zai-coding-plan/glm-5.3", "zai-coding-plan", "glm-5.3", true},
 	}
 
 	for _, tt := range tests {
@@ -88,6 +90,7 @@ func TestResolveProvider_PatternMatch(t *testing.T) {
 		{"open-mistral-nemo", "mistral", true},
 		// Qwen patterns
 		{"qwen-max-1201", "qwen", true},
+		{"glm-5.3", "zai", true},
 		// Unknown model → no match
 		{"my-custom-model", "", false},
 		{"", "", false},

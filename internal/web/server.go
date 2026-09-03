@@ -3703,6 +3703,10 @@ func llmProviderLabel(model, apiBase string) string {
 		return "Groq"
 	case "ollama":
 		return "Ollama"
+	case "zai":
+		return "Z.AI"
+	case "zai-coding-plan":
+		return "Z.AI Coding Plan"
 	case "":
 		return "Not configured"
 	default:
@@ -3741,6 +3745,10 @@ func llmProviderKey(model, apiBase string) string {
 		return "openai"
 	case strings.Contains(apiBase, "ollama") || strings.Contains(apiBase, "localhost:11434"):
 		return "ollama"
+	case strings.Contains(apiBase, "api.z.ai/api/coding/"):
+		return "zai-coding-plan"
+	case strings.Contains(apiBase, "api.z.ai"):
+		return "zai"
 	case model != "":
 		return model
 	default:

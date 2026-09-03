@@ -55,14 +55,16 @@ func (e *ConfigError) Error() string { return e.Msg }
 // the v4.4.21 client.resolveEndpoint so the legacy resolver
 // produces byte-identical URL results to the pre-feature path.
 var legacyProviderBases = map[string]string{
-	"openai":    "https://api.openai.com/v1",
-	"anthropic": "https://api.anthropic.com",
-	"minimax":   "https://api.minimax.io/v1",
-	"deepseek":  "https://api.deepseek.com/v1",
-	"groq":      "https://api.groq.com/openai/v1",
-	"ollama":    "http://localhost:11434/v1",
-	"google":    "https://generativelanguage.googleapis.com",
-	"gemini":    "https://generativelanguage.googleapis.com",
+	"openai":          "https://api.openai.com/v1",
+	"anthropic":       "https://api.anthropic.com",
+	"minimax":         "https://api.minimax.io/v1",
+	"deepseek":        "https://api.deepseek.com/v1",
+	"groq":            "https://api.groq.com/openai/v1",
+	"ollama":          "http://localhost:11434/v1",
+	"google":          "https://generativelanguage.googleapis.com",
+	"gemini":          "https://generativelanguage.googleapis.com",
+	"zai":             "https://api.z.ai/api/paas/v4",
+	"zai-coding-plan": "https://api.z.ai/api/coding/paas/v4",
 }
 
 // LegacyProviderBaseURL returns the canonical legacy API base URL
@@ -293,7 +295,6 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 		provider = strings.ToLower(model[:idx])
 		model = model[idx+1:]
 	}
-
 	if apiBase == "" {
 		if knownBase, ok := legacyProviderBases[provider]; ok {
 			apiBase = knownBase
@@ -316,13 +317,9 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 		url = strings.TrimSuffix(url, "/v1")
 		url += "/v1beta/models/" + model + ":generateContent"
 	default:
-		if !strings.HasSuffix(strings.ToLower(url), "/chat/completions") {
-			if !strings.HasSuffix(apiBase, "/v1") && !strings.Contains(apiBase, "/v1/") {
-				url += "/v1"
-			}
-			url += "/chat/completions"
-		}
+		url = providers.OpenAICompatibleURL(apiBase, "chat/completions")
 	}
+	model = normalizeEndpointModel(provider, url, model)
 
 	return Endpoint{
 		URL:         url,
@@ -337,7 +334,7 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 // three values the LLM client switch dispatches on.
 func legacyHeaderStyle(provider, apiBase string) string {
 	switch provider {
-	case "openai", "minimax", "deepseek", "groq", "ollama":
+	case "openai", "minimax", "deepseek", "groq", "ollama", "zai", "zai-coding-plan":
 		return "openai"
 	case "anthropic":
 		return "anthropic"
@@ -410,7 +407,6 @@ func BuildCatalogEndpoint(entry providers.Entry, prof auth.Profile, preferModel,
 	if model == "" && len(entry.Models) > 0 {
 		model = entry.Models[0]
 	}
-
 	apiBase := entry.BaseURL
 	if prof.Type == auth.APIKey && prof.APIBaseOverride != "" {
 		apiBase = prof.APIBaseOverride
@@ -437,12 +433,7 @@ func BuildCatalogEndpoint(entry providers.Entry, prof auth.Profile, preferModel,
 		url = strings.TrimSuffix(url, "/v1")
 		url += "/v1beta/models/" + model + ":generateContent"
 	case "openai":
-		if !strings.HasSuffix(strings.ToLower(url), "/chat/completions") {
-			if !strings.HasSuffix(apiBase, "/v1") && !strings.Contains(apiBase, "/v1/") {
-				url += "/v1"
-			}
-			url += "/chat/completions"
-		}
+		url = providers.OpenAICompatibleURL(apiBase, "chat/completions")
 	case "openai_responses":
 		// OpenAI Responses API (Codex / ChatGPT subscription backend).
 		// The base URL already encodes the backend root (e.g.
@@ -456,6 +447,7 @@ func BuildCatalogEndpoint(entry providers.Entry, prof auth.Profile, preferModel,
 			Msg: "catalog resolver: unsupported headerStyle " + entry.HeaderStyle + " for entry " + entry.ID,
 		}
 	}
+	model = normalizeEndpointModel(entry.ID, url, model)
 
 	// Fail fast when the assembled URL is not absolute (missing
 	// scheme or host). This is the deterministic config bug behind

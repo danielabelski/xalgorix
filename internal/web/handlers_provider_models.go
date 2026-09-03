@@ -182,6 +182,9 @@ func providerModelsURLs(entry providers.Entry) ([]string, error) {
 	for _, suffix := range []string{"/chat/completions", "/responses", "/messages", "/models"} {
 		base = strings.TrimSuffix(base, suffix)
 	}
+	if entry.HeaderStyle == "openai" {
+		base = providers.OpenAICompatibleURL(base, "models")
+	}
 	u, err := url.Parse(base)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("provider has no valid model discovery URL")
@@ -189,13 +192,12 @@ func providerModelsURLs(entry providers.Entry) ([]string, error) {
 	if entry.HeaderStyle == "anthropic" && !strings.HasSuffix(u.Path, "/v1") {
 		u.Path = strings.TrimRight(u.Path, "/") + "/v1"
 	}
-	if entry.HeaderStyle == "openai" && !strings.HasSuffix(u.Path, "/v1") && !strings.Contains(u.Path, "/v1/") {
-		u.Path = strings.TrimRight(u.Path, "/") + "/v1"
-	}
 	if entry.HeaderStyle == "gemini" && !strings.HasSuffix(u.Path, "/v1beta") && !strings.Contains(u.Path, "/v1beta/") {
 		u.Path = strings.TrimRight(u.Path, "/") + "/v1beta"
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/models"
+	if entry.HeaderStyle != "openai" {
+		u.Path = strings.TrimRight(u.Path, "/") + "/models"
+	}
 	if entry.HeaderStyle == "openai_responses" {
 		query := u.Query()
 		query.Set("client_version", codexModelsClientVersion)

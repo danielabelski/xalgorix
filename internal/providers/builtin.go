@@ -4,7 +4,7 @@
 // operator-editable catalog file, no openclaw importer, and no
 // startup catalog write.
 //
-// The 45 entries are sorted alphabetically by ID and end with the
+// The entries are sorted alphabetically by ID and end with the
 // "custom" sentinel so the LLM tab dropdown ordering matches the
 // data ordering one-to-one ("custom" is alphabetically last by
 // design — it represents user-supplied endpoints rather than a
@@ -20,7 +20,7 @@
 //   - OAuth-capable entries have Flow set; for the four flows we
 //     wired fully (anthropic, google, copilot, xai) the endpoint
 //     fields are populated from public docs. Other OAuth-capable
-//     entries (codex, opencode, openai, opencode, qwen, zai,
+//     entries (codex, opencode, openai, opencode, qwen,
 //     huggingface) keep the OAuth fields empty and document the
 //     beta status via Notes — the existing PKCE / device-code
 //     drivers surface "endpoint not configured" errors to the
@@ -397,12 +397,19 @@ var builtinList = []Entry{
 	},
 	{
 		ID:          "zai",
-		DisplayName: "Z.AI",
-		BaseURL:     "",
+		DisplayName: "Z.AI (standard API)",
+		BaseURL:     "https://api.z.ai/api/paas/v4",
 		HeaderStyle: "openai",
-		AuthMethods: []string{"api_key", "oauth"},
-		Flow:        "pkce",
-		Notes:       "OAuth flow is beta — Z.AI OAuth client metadata is not publicly stable yet; API key path is fully tested.",
+		AuthMethods: []string{"api_key"},
+		Notes:       "Standard usage-based Z.AI API. For a GLM Coding Plan subscription, select Z.AI Coding Plan instead. Recommended model: glm-5.3.",
+	},
+	{
+		ID:          "zai-coding-plan",
+		DisplayName: "Z.AI Coding Plan",
+		BaseURL:     "https://api.z.ai/api/coding/paas/v4",
+		HeaderStyle: "openai",
+		AuthMethods: []string{"api_key"},
+		Notes:       "GLM Coding Plan subscription endpoint. Use the API key from the subscribed Z.AI account. Current models include glm-5.3 and glm-5.3-flash; usage remains subject to Z.AI's supported-tool policy.",
 	},
 	// Custom is the explicit "operator-supplied endpoint" entry.
 	// Always last in the LLM tab dropdown.
