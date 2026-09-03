@@ -184,6 +184,10 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 	if byClass["lfi"] != [2]int{1, 3} {
 		t.Fatalf("expected lfi 1/3, got %v", byClass["lfi"])
 	}
+	// xxe = xxe (positive, unsolved by this fake) + safe-import (negative, clean) => 1/2.
+	if byClass["xxe"] != [2]int{1, 2} {
+		t.Fatalf("expected xxe 1/2, got %v", byClass["xxe"])
+	}
 }
 
 func TestNewBuiltinChallengesExhibitVuln(t *testing.T) {
@@ -581,5 +585,44 @@ func TestNegativeControlsAreSafe(t *testing.T) {
 	defer si.Close()
 	if body := httpGet(t, si.URL+"/api/orders/1042"); strings.Contains(body, "card_last4") || strings.Contains(body, `"owner"`) {
 		t.Fatalf("safe-idor must not return an order record, got %q", body)
+	}
+
+	// safe-import: an XXE payload does not resolve any external entity (no file content).
+	simp := challengeByName(t, "safe-import").Start()
+	defer simp.Close()
+	xxePayload := `<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>`
+	if body := httpPost(t, simp.URL+"/import", xxePayload); strings.Contains(body, "root:") {
+		t.Fatalf("safe-import must not resolve external entities, got %q", body)
+	}
+}
+
+// httpPost sends an XML body to url and returns the response body as a string.
+func httpPost(t *testing.T, url, body string) string {
+	t.Helper()
+	resp, err := http.Post(url, "application/xml", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return string(b)
+}
+
+func TestXxeChallengeExhibitsVuln(t *testing.T) {
+	xxe := challengeByName(t, "xxe").Start()
+	defer xxe.Close()
+
+	// An external-entity payload resolves the referenced local file.
+	payload := `<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>`
+	if body := httpPost(t, xxe.URL+"/import", payload); !strings.Contains(body, "root:") {
+		t.Fatalf("xxe did not resolve the external entity: %q", body)
+	}
+	// A benign XML document does not leak file content.
+	if body := httpPost(t, xxe.URL+"/import", `<?xml version="1.0"?><records><r>ok</r></records>`); strings.Contains(body, "root:") {
+		t.Fatalf("benign XML must not leak file content: %q", body)
+	}
+	// The index advertises the import endpoint so a crawler discovers it.
+	if body := httpGet(t, xxe.URL+"/"); !strings.Contains(body, "/import") {
+		t.Fatalf("index must link the import endpoint, got %q", body)
 	}
 }

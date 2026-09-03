@@ -13,6 +13,7 @@ package bench
 import (
 	"fmt"
 	"html"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -643,7 +644,59 @@ func Builtin() []Challenge {
 				_, _ = fmt.Fprint(w, "forbidden: not your order")
 			}),
 		},
+		{
+			// XXE: POST an XML document to /import. A DOCTYPE that declares an
+			// external entity pointing at a local file is resolved, and the file
+			// content comes back in the response (simulated /etc/passwd read).
+			Name: "xxe", Class: "xxe", Endpoint: "/import", Param: "",
+			Desc: "Resolves external XML entities in a posted document (XXE file read).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Data Import</h1><p>POST an XML document to <a href="/import">/import</a> to import records.</p><form action="/import" method="post"><textarea name="xml"></textarea><button>Import</button></form></body></html>`)
+					return
+				}
+				body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				if hasXXEPayload(string(body)) {
+					// Simulated external-entity resolution: the referenced local
+					// file is read and echoed back in the import result.
+					_, _ = fmt.Fprint(w, "imported 1 record: root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n")
+					return
+				}
+				_, _ = fmt.Fprint(w, "imported 0 records\n")
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (xxe): the XML parser has external-entity
+			// resolution disabled, so a DOCTYPE/SYSTEM entity is never expanded
+			// and no file content is ever returned.
+			Name: "safe-import", Class: "xxe", Endpoint: "/import", Param: "", Negative: true,
+			Desc: "NEGATIVE CONTROL: external entities disabled; DOCTYPE ignored (no XXE).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Data Import</h1><p>POST an XML document to <a href="/import">/import</a> to import records.</p><form action="/import" method="post"><textarea name="xml"></textarea><button>Import</button></form></body></html>`)
+					return
+				}
+				_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 1<<20))
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				// SAFE: external entities are disabled — a DOCTYPE is ignored and
+				// never expanded, so no local file is ever read.
+				_, _ = fmt.Fprint(w, "imported 0 records\n")
+			}),
+		},
 	}
+}
+
+// hasXXEPayload reports whether an XML document declares an external entity that
+// pulls in a local file — the classic XXE payload: a DOCTYPE with a SYSTEM
+// identifier referencing a file: URL (or /etc/passwd directly). A benign
+// document declares no such external entity.
+func hasXXEPayload(body string) bool {
+	b := strings.ToLower(body)
+	return strings.Contains(b, "<!doctype") && strings.Contains(b, "system") &&
+		(strings.Contains(b, "file:") || strings.Contains(b, "/etc/passwd"))
 }
 
 // looksLikePasswdTraversal reports whether a file parameter uses ../ traversal to

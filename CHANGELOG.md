@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.44](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.44) — Benchmark now covers XXE (positive + negative) (2026-09-03)
+
+### Added
+- **The black-box benchmark now exercises XXE detection — a class the finding classifier already recognized but no challenge tested.** Adds an `xxe` positive challenge: a `/import` endpoint that accepts a POSTed XML document and, when the document declares an external entity pointing at a local file (a `DOCTYPE` with a `SYSTEM` `file://` identifier), resolves it and reflects the file content in the import result (a simulated `/etc/passwd` read). A matching `safe-import` negative control exposes the same endpoint but with external-entity resolution disabled, so a `DOCTYPE` is ignored and no file content is ever returned — reporting XXE there is a false positive. Both advertise the XML import endpoint from a crawlable `/` index. The benchmark now covers XXE alongside the existing classes (23 challenges: 14 positive + 9 negative). Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.43](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.43) — Native Z.AI (Zhipu GLM) provider support (2026-09-03)
 
 ### Added
