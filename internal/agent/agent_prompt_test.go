@@ -53,7 +53,7 @@ func TestSystemPromptIncludesCollectableMultiAgentWorkflow(t *testing.T) {
 func TestWhiteboxGuidanceText(t *testing.T) {
 	const root = "/tmp/src"
 
-	bridge := []string{"claim_next_hypothesis", "probe_hypothesis", "verify_sqli", "verify_xss", "verify_oob", "seeded"}
+	bridge := []string{"claim_next_hypothesis", "probe_hypothesis", "verify_sqli", "verify_ssti", "verify_xss", "verify_oob", "seeded"}
 	for _, mode := range []CodeScanMode{CodeScanNone, CodeScanProvision} {
 		g := whiteboxGuidanceText(mode, root, "127.0.0.1:8080")
 		if !strings.Contains(g, root) {
@@ -74,7 +74,7 @@ func TestWhiteboxGuidanceText(t *testing.T) {
 	// Source-review mode has NO live target: it must NOT push live-only tools,
 	// but should retain the static code_search methodology.
 	rev := whiteboxGuidanceText(CodeScanReview, root, "")
-	for _, unwanted := range []string{"probe_hypothesis", "verify_sqli", "verify_xss", "verify_oob"} {
+	for _, unwanted := range []string{"probe_hypothesis", "verify_sqli", "verify_ssti", "verify_xss", "verify_oob"} {
 		if strings.Contains(rev, unwanted) {
 			t.Errorf("source-review guidance must NOT mention live-only tool %q", unwanted)
 		}

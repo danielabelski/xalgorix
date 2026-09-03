@@ -91,7 +91,7 @@ func (a *Agent) verifySQLiTool(args map[string]string) (tools.Result, error) {
 		baseHint = strings.TrimSpace(h.Target)
 	}
 
-	absURL, err := a.resolveSQLiURL(rawEP, baseHint)
+	absURL, err := a.resolveInjectionURL(rawEP, baseHint)
 	if err != nil {
 		return tools.Result{Error: "verify_sqli: " + err.Error()}, nil
 	}
@@ -128,21 +128,21 @@ func (a *Agent) verifySQLiTool(args map[string]string) (tools.Result, error) {
 		return tools.Result{Error: "verify_sqli: could not build injection URLs for parameter " + parameter}, nil
 	}
 
-	baselineBody, _, bErr := a.sendSQLiProbe(method, baselineURL, headers)
+	baselineBody, _, bErr := a.sendInjectionProbe(method, baselineURL, headers)
 	if bErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_sqli: baseline request failed: %v", bErr)}, nil
 	}
-	if stop := a.sqliInterRequestGate(); stop != "" {
+	if stop := a.injectionRateGate(); stop != "" {
 		return tools.Result{Error: stop}, nil
 	}
-	brokenBody, brokenReqLine, kErr := a.sendSQLiProbe(method, brokenURL, headers)
+	brokenBody, brokenReqLine, kErr := a.sendInjectionProbe(method, brokenURL, headers)
 	if kErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_sqli: single-quote request failed: %v", kErr)}, nil
 	}
-	if stop := a.sqliInterRequestGate(); stop != "" {
+	if stop := a.injectionRateGate(); stop != "" {
 		return tools.Result{Error: stop}, nil
 	}
-	balancedBody, _, lErr := a.sendSQLiProbe(method, balancedURL, headers)
+	balancedBody, _, lErr := a.sendInjectionProbe(method, balancedURL, headers)
 	if lErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_sqli: doubled-quote request failed: %v", lErr)}, nil
 	}
@@ -216,11 +216,11 @@ func sqliErrorVerdict(baseline, broken, balanced string) (confirmed bool, confid
 	return true, 0.95, "the DBMS error appeared only on the single-quote request and vanished when the quote was balanced — the classic error-based SQL-injection signature."
 }
 
-// resolveSQLiURL turns a raw endpoint (a url arg or a hypothesis endpoint) into
+// resolveInjectionURL turns a raw endpoint (a url arg or a hypothesis endpoint) into
 // an absolute URL to test. It rejects source-location (file:line) endpoints,
 // uses an absolute URL as-is, and otherwise joins a path against the base hint
 // (the hypothesis target) or the scan target.
-func (a *Agent) resolveSQLiURL(rawEP, baseHint string) (string, error) {
+func (a *Agent) resolveInjectionURL(rawEP, baseHint string) (string, error) {
 	ep := strings.TrimSpace(rawEP)
 	if ep == "" {
 		return "", fmt.Errorf("no url/endpoint to test")
@@ -253,12 +253,12 @@ func (a *Agent) resolveSQLiURL(rawEP, baseHint string) (string, error) {
 	return bu.ResolveReference(ref).String(), nil
 }
 
-// sqliInterRequestGate applies the scan's request-rate delay and reports a stop
+// injectionRateGate applies the scan's request-rate delay and reports a stop
 // reason if the scan is shutting down, so the three probes honor rate policy and
 // cancellation exactly as probe_hypothesis does.
-func (a *Agent) sqliInterRequestGate() string {
+func (a *Agent) injectionRateGate() string {
 	if a.ctx != nil && a.ctx.Err() != nil {
-		return "verify_sqli: scan is shutting down"
+		return "injection verifier: scan is shutting down"
 	}
 	if a.scanCtx != nil {
 		if d := a.scanCtx.RequestRatePolicy().Delay(); d > 0 {
@@ -268,9 +268,9 @@ func (a *Agent) sqliInterRequestGate() string {
 	return ""
 }
 
-// sendSQLiProbe issues one scope-agnostic request (the host was scope-checked by
+// sendInjectionProbe issues one scope-agnostic request (the host was scope-checked by
 // the caller) and returns the response body as a string plus the request line.
-func (a *Agent) sendSQLiProbe(method, rawURL string, headers map[string]string) (body, reqLine string, err error) {
+func (a *Agent) sendInjectionProbe(method, rawURL string, headers map[string]string) (body, reqLine string, err error) {
 	reqLine = method + " " + rawURL
 	resp, e := httpclient.SendRaw(httpclient.RawRequest{
 		Method:          method,
