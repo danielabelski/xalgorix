@@ -1550,8 +1550,23 @@ func (a *Agent) whiteboxGuidance() string {
 	if root == "" {
 		return ""
 	}
+	hostport := ""
+	if a.codeScanMode == CodeScanProvision {
+		bind := "127.0.0.1"
+		hostport = bind
+		if len(a.activityHosts) > 0 {
+			if port := portFromTarget(a.activityHosts[0]); port > 0 {
+				hostport = fmt.Sprintf("%s:%d", bind, port)
+			}
+		}
+	}
+	return whiteboxGuidanceText(a.codeScanMode, root, hostport)
+}
 
-	switch a.codeScanMode {
+// whiteboxGuidanceText renders the source-assisted methodology briefing for a
+// given code-scan mode. Pure (takes no Agent state) so it is unit-testable.
+func whiteboxGuidanceText(mode CodeScanMode, root, hostport string) string {
+	switch mode {
 	case CodeScanReview:
 		// Option 1 — source review / SAST with NO live target. Findings are
 		// statically verified: proven reachable in code, not runtime-exploited.
@@ -1568,21 +1583,12 @@ When you report_vulnerability, set the PoC to the concrete source-level data-flo
 
 	case CodeScanProvision:
 		// Option 2 — build & run from source, then DAST the running instance.
-		port := 0
-		if len(a.activityHosts) > 0 {
-			port = portFromTarget(a.activityHosts[0])
-		}
-		bind := "127.0.0.1"
-		hostport := bind
-		if port > 0 {
-			hostport = fmt.Sprintf("%s:%d", bind, port)
-		}
 		return fmt.Sprintf(`
 ## PROVISION + DAST MODE — build the target from source (at %s), run it, then pentest it
 You have the source AND you must stand the app up locally, then attack the RUNNING instance for exploit-verified findings. Methodology:
 1. INSPECT: read README, Dockerfile/compose, package manifest, and start scripts to learn how to build and run this app.
 2. BUILD & RUN: use terminal_execute to install dependencies and start the app. BIND IT TO %s (this exact loopback host:port is the only one you are permitted to reach). Prefer Docker/compose when present; otherwise the native run command. Run it in the background and confirm it's listening (curl -sI http://%s).
-3. WHITEBOX-GUIDED DAST: use code_search to find sinks (sinks=rce|cmdi|sqli|deserialization|ssrf|fileio|template|secrets|auth|redirect|crypto), trace each to a reachable route, then EXPLOIT it against http://%s and prove impact (extracted data, oob_callback hit, state change, command output).
+3. WHITEBOX-GUIDED DAST — WORK THE SEEDED LEDGER FIRST: the start-of-scan source sweep already seeded the hypothesis ledger with the sinks and the routes that reach them (a route whose handler holds a sink is seeded class-typed). claim_next_hypothesis to take the top correlated source→route lead, probe_hypothesis it against http://%s to confirm it is live, then CONFIRM the class deterministically — verify_sqli (error-based SQLi), verify_xss (browser-executed XSS), verify_oob (blind RCE/SQLi/SSRF/XXE) — each records exploit-proven evidence. Use code_search + manual exploitation only for what is not already seeded; prove impact (extracted data, oob_callback hit, state change, command output).
 4. If the app cannot be built/run after reasonable effort, fall back to SOURCE REVIEW: report source-verified findings from the data-flow trace and say runtime provisioning failed.
 Report findings with a working PoC against the running instance (the verifier will re-test). Source proves the bug EXISTS; the live PoC proves it's EXPLOITABLE — get both when the app runs.
 `, root, hostport, hostport, hostport)
@@ -1590,12 +1596,14 @@ Report findings with a working PoC against the running instance (the verifier wi
 
 	return fmt.Sprintf(`
 ## WHITEBOX MODE — you have the target's SOURCE CODE (at %s)
-This is your biggest advantage: you can SEE the vulnerable code, not just guess from responses. Methodology:
-1. MAP: identify the framework, routing, and how user input enters (route handlers, params, body, headers).
-2. HUNT SINKS: use the code_search tool (sinks=rce|cmdi|sqli|deserialization|ssrf|fileio|template|secrets|auth|redirect|crypto) to locate dangerous calls, and grep for hardcoded secrets/keys.
-3. TRACE REACHABILITY: for each sink, trace BACKWARD to a user-reachable HTTP route and confirm the tainted input reaches it without sanitization. Note the exact route + parameter.
-4. EXPLOIT ON THE LIVE TARGET: build a concrete PoC against the running target and prove impact (extracted data, oob_callback hit, state change, command output). Source proves the bug EXISTS; the live PoC proves it's EXPLOITABLE — you need both.
-5. Prioritize: RCE / command & template injection / insecure deserialization / hardcoded secrets / SSRF / auth bypass — the classes source access finds that black-box misses.
+This is your biggest advantage: you can SEE the vulnerable code, not just guess from responses.
+
+WORK THE SEEDED LEDGER FIRST. At scan start the source was swept and the hypothesis ledger was AUTO-SEEDED with the dangerous sinks and the HTTP routes that reach them; a route whose handler contains a sink is seeded CLASS-TYPED (rce/sqli/ssrf/…) at high confidence. These correlated source→route hypotheses are your highest-value leads — pursue them BEFORE any black-box crawling:
+1. CLAIM: claim_next_hypothesis (optionally vuln_class=…) takes the top correlated lead and marks it yours; read_ledger lists them all. If the ledger looks empty, run scan_source_sinks then scan_source_routes to (re)seed it from the code.
+2. PROBE: probe_hypothesis the lead to confirm the route is live and reachable on the target (it reuses the scan session, so authenticated routes are probed authenticated).
+3. CONFIRM DETERMINISTICALLY — do not hand-craft payloads when a confirmer exists: verify_sqli proves error-based SQL injection (it sends a benign/single-quote/balanced trio and reads the DBMS error), verify_xss proves browser-EXECUTED XSS, verify_oob proves blind RCE/SQLi/SSRF/XXE via an out-of-band callback. Each records exploit-proven evidence for you.
+4. REPORT with that proof (the verifier re-tests). Source proves the bug EXISTS; the live PoC proves it is EXPLOITABLE — get both.
+Only once the seeded correlated leads are worked should you widen to broad black-box crawling and manual code_search. Prioritize RCE / command & template injection / insecure deserialization / SQLi / SSRF / auth bypass — the classes source access finds that black-box misses.
 Report findings ONLY with a working live-target PoC (the verifier will re-test).
 `, root)
 }
