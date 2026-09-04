@@ -906,6 +906,54 @@ func Builtin() []Challenge {
 				_, _ = fmt.Fprint(w, `{"users":[{"id":1,"email":"alice@corp.example","role":"admin","ssn_last4":"6789"},{"id":2,"email":"bob@corp.example","role":"user","ssn_last4":"4321"}]}`)
 			}),
 		},
+		{
+			// Business-logic flaw: /checkout computes total = quantity * unit price
+			// with NO validation that quantity is positive, so a NEGATIVE quantity
+			// yields a NEGATIVE total the store still "places" — a refund/credit
+			// exploit (the buyer is effectively paid to order). Class
+			// business_logic. The item is HTML-escaped and quantity is parsed as an
+			// int, so the ONLY signal is the negative total (no XSS/injection red
+			// herring).
+			Name: "business-logic-negative-qty", Class: "business_logic", Endpoint: "/checkout", Param: "quantity",
+			Desc: "Checkout accepts a negative quantity, producing a negative order total (refund abuse).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				if r.URL.Path == "/" {
+					_, _ = fmt.Fprint(w, `<html><body><h1>Widget Store</h1><p>Widget — $100 each.</p><form action="/checkout" method="get"><input type="hidden" name="item" value="widget"><input name="quantity" value="1"><button>Buy</button></form><p><a href="/checkout?item=widget&quantity=1">buy one widget</a></p></body></html>`)
+					return
+				}
+				item := html.EscapeString(r.URL.Query().Get("item"))
+				qty, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("quantity")))
+				const unit = 100
+				// VULNERABLE: no check that qty > 0, so a negative quantity yields a
+				// negative total and the order is still placed.
+				_, _ = fmt.Fprintf(w, `<html><body><h1>Checkout</h1><p>Order placed: %d x %s @ $%d each = total $%d.00</p></body></html>`, qty, item, unit, qty*unit)
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (business_logic): checkout validates that quantity is
+			// a positive integer, rejecting non-positive/non-numeric values with
+			// 400, so no negative/zero total is ever produced.
+			Name: "safe-checkout", Class: "business_logic", Endpoint: "/checkout", Param: "quantity", Negative: true,
+			Desc: "NEGATIVE CONTROL: checkout rejects non-positive quantity (400); no business-logic flaw.",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				if r.URL.Path == "/" {
+					_, _ = fmt.Fprint(w, `<html><body><h1>Widget Store</h1><p>Widget — $100 each.</p><form action="/checkout" method="get"><input type="hidden" name="item" value="widget"><input name="quantity" value="1"><button>Buy</button></form><p><a href="/checkout?item=widget&quantity=1">buy one widget</a></p></body></html>`)
+					return
+				}
+				item := html.EscapeString(r.URL.Query().Get("item"))
+				qty, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("quantity")))
+				const unit = 100
+				// SAFE: reject non-positive or non-numeric quantities before pricing.
+				if err != nil || qty <= 0 {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = fmt.Fprint(w, "invalid quantity")
+					return
+				}
+				_, _ = fmt.Fprintf(w, `<html><body><h1>Checkout</h1><p>Order placed: %d x %s @ $%d each = total $%d.00</p></body></html>`, qty, item, unit, qty*unit)
+			}),
+		},
 	}
 }
 

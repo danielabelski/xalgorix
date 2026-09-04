@@ -97,6 +97,13 @@ func TestClassifyFinding(t *testing.T) {
 		{"Server-Side Template Injection via name", "template injection", "", "ssti"},
 		{"Path traversal in download", "local file inclusion", "", "lfi"},
 		{"Command injection in ping", "os command executed", "", "rce"},
+		{"Broken Function Level Authorization on /api/admin/users", "regular user reached admin function", "CWE-862", "idor"},
+		{"Business logic flaw in checkout", "negative quantity yields a negative total", "", "business_logic"},
+		{"Price manipulation at checkout", "", "CWE-840", "business_logic"},
+		// The exact phrasing a real agent produced for this challenge (no CWE) —
+		// must classify as business_logic via the "quantity tampering"/"store
+		// credit" keywords, not fall through to unclassified.
+		{"Negative / zero / overflow quantity accepted at checkout (price/quantity tampering → store credit & overflow)", "", "", "business_logic"},
 		{"Mystery bug", "no class keyword", "CWE-79", "xss"},   // CWE fallback
 		{"Mystery bug", "no class keyword", "CWE-639", "idor"}, // CWE fallback
 		{"Mystery bug", "no class keyword", "CWE-99999", ""},   // unmapped
@@ -816,5 +823,37 @@ func TestBFLAChallengeBehavior(t *testing.T) {
 	}
 	if st, _ := get(safe.URL, ""); st != http.StatusUnauthorized {
 		t.Fatalf("safe-bfla: anonymous must be 401, got %d", st)
+	}
+}
+
+// TestBusinessLogicChallengeBehavior locks in the negative-quantity business
+// logic flaw: the positive challenge accepts a negative quantity and returns a
+// negative total, while the negative control rejects it with 400.
+func TestBusinessLogicChallengeBehavior(t *testing.T) {
+	// Positive: a negative quantity produces a negative order total.
+	bl := challengeByName(t, "business-logic-negative-qty").Start()
+	defer bl.Close()
+	if body := httpGet(t, bl.URL+"/checkout?item=widget&quantity=-5"); !strings.Contains(body, "total $-500.00") {
+		t.Fatalf("business-logic: negative quantity must yield a negative total; got %q", body)
+	}
+	// A normal order is still priced correctly (so the flaw is specifically the
+	// missing non-negative check, not a broken endpoint).
+	if body := httpGet(t, bl.URL+"/checkout?item=widget&quantity=2"); !strings.Contains(body, "total $200.00") {
+		t.Fatalf("business-logic: a normal order must price correctly; got %q", body)
+	}
+
+	// Negative control: a non-positive quantity is rejected with 400.
+	safe := challengeByName(t, "safe-checkout").Start()
+	defer safe.Close()
+	resp, err := http.Get(safe.URL + "/checkout?item=widget&quantity=-5")
+	if err != nil {
+		t.Fatalf("safe-checkout request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("safe-checkout: negative quantity must be 400, got %d", resp.StatusCode)
+	}
+	if body := httpGet(t, safe.URL+"/checkout?item=widget&quantity=2"); !strings.Contains(body, "total $200.00") {
+		t.Fatalf("safe-checkout: a valid order must still succeed; got %q", body)
 	}
 }

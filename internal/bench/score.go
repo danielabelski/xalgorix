@@ -193,6 +193,12 @@ var classKeywords = []classMatch{
 	{"ssti", []string{"ssti", "template injection"}},
 	{"xxe", []string{"xxe", "xml external entity"}},
 	{"csrf", []string{"csrf", "cross-site request forgery"}},
+	{"business_logic", []string{
+		"business logic", "logic flaw",
+		"negative quantity", "negative price", "negative total", "negative amount",
+		"price manipulation", "price tampering", "quantity tampering",
+		"store credit", "workflow bypass",
+	}},
 }
 
 // canonicalClass normalizes a class label to the benchmark's canonical set.
@@ -203,6 +209,8 @@ func canonicalClass(c string) string {
 		return "idor"
 	case "openredirect", "open-redirect":
 		return "open_redirect"
+	case "business-logic", "businesslogic", "logic":
+		return "business_logic"
 	default:
 		return c
 	}
@@ -231,6 +239,8 @@ func cweClass(cwe string) string {
 		return "ssti"
 	case "284", "285", "639", "862", "863", "566":
 		return "idor"
+	case "840", "841":
+		return "business_logic"
 	default:
 		return ""
 	}
