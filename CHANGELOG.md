@@ -1,5 +1,8 @@
 # Changelog
 
+## [v4.6.64](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.64) — Benchmark: CORS misconfiguration class + credentialed-reflect challenge (2026-09-04)
+### Added
+- **A `cors` class and a credentialed cross-origin challenge extend the benchmark to CORS misconfiguration**, a pervasive real-world API bug. The new `cors-credentialed-reflect` challenge exposes an `/api/account` endpoint that reflects *any* request `Origin` into `Access-Control-Allow-Origin` while also setting `Access-Control-Allow-Credentials: true` — the classic exploitable pattern (reflected origin + credentials, not a harmless wildcard) — so a page on any attacker origin can make a credentialed cross-origin read of the victim's authenticated data (an email + `api_token`). The `safe-cors` negative control allows credentialed reads only from a single fixed trusted origin and never reflects an arbitrary caller `Origin`, so an over-reporting scanner fails it. The scorer recognizes `cors` via a specific text signal (`CORS` / `cross-origin resource sharing` / `access-control-allow-origin`) checked **before** the CWE — because agents often tag a CORS finding with a generic access-control CWE (e.g. CWE-284) that would otherwise fold it into `idor` — plus CWE-942/346. Operator-only benchmark tooling; the shipped binary is unchanged.
 ## [v4.6.63](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.63) — Benchmark: NoSQL injection (operator-injection auth bypass) class + challenge (2026-09-04)
 
 ### Added
