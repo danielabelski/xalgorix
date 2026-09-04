@@ -1,5 +1,12 @@
 # Changelog
 
+## [v4.6.49](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.49) — Benchmark: SSTI challenges are single-signal (no incidental XSS) (2026-09-03)
+
+### Fixed
+- **The `ssti` and `whitebox-ssti` benchmark challenges no longer expose an incidental reflected XSS.** `sstiRender` reflected the `name` parameter unescaped, so the app exhibited both template injection AND a browser-confirmable reflected XSS. Now that the agent reliably confirms XSS (v4.6.46), a real run reported the easier XSS (CWE-79) and never scored the intended `ssti` class. `sstiRender` now HTML-escapes the input before evaluating `{{ a * b }}` (braces, digits, spaces, and `*` are untouched by escaping, so the `{{7*7}} → 49` probe still confirms), so the only signal is template injection — one unambiguous vulnerability per challenge.
+
+Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.48](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.48) — Reach for the deterministic verifiers on first signal (2026-09-03)
 
 ### Changed
