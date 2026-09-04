@@ -2151,3 +2151,133 @@ func TestLedgerBrowserXSSProof(t *testing.T) {
 		t.Fatal("reportLooksLikeXSS must not classify SQLi as XSS")
 	}
 }
+
+// TestReportVulnClass checks the finding→verifier-class mapping used to fold a
+// deterministic verify_* confirmation into a report.
+func TestReportVulnClass(t *testing.T) {
+	cases := []struct {
+		title, desc, cwe string
+		want             string
+	}{
+		{"CSRF on POST /account/email", "forged cross-site request", "CWE-352", "csrf"},
+		{"Cross-Site Request Forgery", "", "", "csrf"},
+		{"Error-based SQL injection in id", "", "CWE-89", "sqli"},
+		{"SQLi via search", "", "", "sqli"},
+		{"Server-Side Template Injection in name", "", "CWE-1336", "ssti"},
+		{"XXE in the import endpoint", "xml external entity", "CWE-611", "xxe"},
+		{"Reflected XSS in q", "", "CWE-79", "xss"},
+		{"Open redirect in next", "", "CWE-601", ""},
+		{"Missing security header", "", "", ""},
+	}
+	for _, c := range cases {
+		if got := reportVulnClass(c.title, c.desc, c.cwe); got != c.want {
+			t.Errorf("reportVulnClass(%q,%q,%q) = %q, want %q", c.title, c.desc, c.cwe, got, c.want)
+		}
+	}
+}
+
+// TestLedgerVerifierProof confirms the general bridge returns a verify_*
+// confirmation summary for the matching class and ignores non-verifier or
+// wrong-class ledger entries.
+func TestLedgerVerifierProof(t *testing.T) {
+	sc := scanctx.New("rep-verifier-bridge", "")
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(sc.ID)
+
+	// No confirmation yet.
+	if got := ledgerVerifierProof(sc.ID, "csrf"); got != "" {
+		t.Fatalf("expected empty before any confirmation, got %q", got)
+	}
+	// A raw probe (non-verifier origin, no "confirmed" evidence) must NOT count.
+	hp := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "lead", VulnClass: "csrf", Endpoint: "/probe-only", Origin: "probe_hypothesis"})
+	sc.Ledger.AddEvidence(hp.ID, scanctx.Evidence{Kind: "exploit", Summary: "reflected a token; needs follow-up"})
+	if got := ledgerVerifierProof(sc.ID, "csrf"); got != "" {
+		t.Fatalf("a non-verify_ origin without a confirmation must not count, got %q", got)
+	}
+	// A genuine verify_csrf confirmation counts (origin-based match).
+	h := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "CSRF at /x", VulnClass: "csrf", Endpoint: "/x", Origin: "verify_csrf"})
+	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{Kind: "exploit", Summary: "Cross-Site Request Forgery CONFIRMED at /x."})
+	if got := ledgerVerifierProof(sc.ID, "csrf"); !strings.Contains(got, "CONFIRMED") {
+		t.Fatalf("expected the verify_csrf confirmation summary, got %q", got)
+	}
+	// Robustness: a hypothesis whose origin is NOT verify_ (e.g. a probe the
+	// verifier's Upsert merged onto) but which carries a CONFIRMED exploit
+	// evidence still counts — the confirmation lives in the evidence.
+	hm := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "SSTI at /m", VulnClass: "ssti", Endpoint: "/m", Origin: "probe_hypothesis"})
+	sc.Ledger.AddEvidence(hm.ID, scanctx.Evidence{Kind: "exploit", Summary: "Server-side template injection CONFIRMED on parameter \"q\" at /m."})
+	if got := ledgerVerifierProof(sc.ID, "ssti"); !strings.Contains(got, "CONFIRMED") {
+		t.Fatalf("expected the merged-origin SSTI confirmation via evidence, got %q", got)
+	}
+	// Class isolation: a csrf confirmation must not answer an xxe query.
+	if got := ledgerVerifierProof(sc.ID, "xxe"); got != "" {
+		t.Fatalf("class isolation failed: answered an xxe query with %q", got)
+	}
+}
+
+// TestReportVuln_VerifierLedgerProofMarksExploitProven is the integration
+// guarantee: a deterministic verify_csrf confirmation in the ledger makes the
+// reported CSRF finding exploit-proven (Verified=true, TagExploitProven) even
+// when the independent LLM verifier is inconclusive and the pasted proof has no
+// concrete-impact marker on its own — closing the gap where a confirmed CSRF was
+// wrongly flagged needs-manual-verification.
+func TestReportVuln_VerifierLedgerProofMarksExploitProven(t *testing.T) {
+	ctx := "verifier-ledger-csrf"
+	CleanupContext(ctx)
+	defer CleanupContext(ctx)
+
+	sc := scanctx.New(ctx, "https://example.com")
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(ctx)
+
+	h := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title:     "Cross-Site Request Forgery at /account/email",
+		VulnClass: "csrf",
+		Endpoint:  "/account/email",
+		Origin:    "verify_csrf",
+		Status:    scanctx.HypothesisTesting,
+	})
+	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
+		Kind:       "exploit",
+		Summary:    "Cross-Site Request Forgery CONFIRMED at /account/email: the server accepted a state-changing POST with a forged cross-site Origin and no anti-CSRF token (CWE-352).",
+		Confidence: 0.75,
+		AgentID:    "agent",
+	})
+
+	// Independent verifier is inconclusive → without the ledger bridge this would
+	// be flagged needs-manual-verification.
+	SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+		return VerificationVerdict{Inconclusive: true, Reason: "no cross-site browser context to replay"}
+	})
+
+	args := map[string]string{
+		"title":               "CSRF on POST /account/email",
+		"severity":            "high",
+		"description":         "The change-email endpoint accepts a POST request from any origin with no anti-CSRF token, letting an attacker page change the victim's account email.",
+		"exploitation_proof":  "the endpoint accepted the forged cross-origin request and returned HTTP 200",
+		"verification_method": "exploited",
+		"impact":              "Account email takeover via a forged cross-site request.",
+		"target":              "https://example.com",
+		"endpoint":            "https://example.com/account/email",
+		"method":              "POST",
+		"cwe_id":              "CWE-352",
+		"cvss":                "4.3",
+		"cvss_vector":         "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+	}
+	res, err := reportVulnWithContextID(ctx, args)
+	if err != nil {
+		t.Fatalf("report error: %v", err)
+	}
+	vulns := GetVulnerabilitiesForContext(ctx)
+	if len(vulns) != 1 {
+		t.Fatalf("expected 1 vuln persisted, got %d (%s)", len(vulns), res.Output)
+	}
+	if !vulns[0].Verified {
+		t.Fatalf("expected Verified=true from the verify_csrf ledger proof; tags=%v output=%s", vulns[0].Tags, res.Output)
+	}
+	if !containsTag(vulns[0].Tags, TagExploitProven) {
+		t.Fatalf("expected TagExploitProven from the verifier ledger proof, got tags=%v", vulns[0].Tags)
+	}
+	if strings.Contains(res.Output, "RECORDED as UNVERIFIED") {
+		t.Fatalf("must NOT flag manual review when a deterministic verifier confirmed it, got: %s", res.Output)
+	}
+}
