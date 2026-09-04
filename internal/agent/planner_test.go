@@ -352,3 +352,55 @@ func contains(list []string, s string) bool {
 	}
 	return false
 }
+
+// TestUpdatePlanToolTolerance covers the friction-reducing inference: a model
+// that omits status or task_id (the two shapes it botches most) no longer burns
+// an iteration on a "missing required parameter" rejection.
+func TestUpdatePlanToolTolerance(t *testing.T) {
+	newAgent := func() *Agent {
+		a := &Agent{state: NewScanState()}
+		a.state.Plan = AutoPlan([]string{"/x"}, nil)
+		return a
+	}
+
+	// status omitted → defaults to active.
+	a := newAgent()
+	if res, _ := a.updatePlanTool(map[string]string{"task_id": "recon"}); res.Error != "" {
+		t.Fatalf("omitted status should default to active, got error: %s", res.Error)
+	}
+	if got := a.state.Plan.Get("recon"); got == nil || got.Status != TaskActive {
+		t.Fatalf("recon should be active after status-defaulted update, got %v", got)
+	}
+
+	// task_id omitted with a single active task → applies to that task.
+	if res, _ := a.updatePlanTool(map[string]string{"status": "completed"}); res.Error != "" {
+		t.Fatalf("task_id inference (single active) should succeed, got error: %s", res.Error)
+	}
+	if got := a.state.Plan.Get("recon"); got == nil || got.Status != TaskCompleted {
+		t.Fatalf("recon should be completed via single-active inference, got %v", got)
+	}
+
+	// task_id omitted, none active, status=active → the next pending task.
+	a2 := newAgent()
+	if res, _ := a2.updatePlanTool(map[string]string{"status": "active"}); res.Error != "" {
+		t.Fatalf("marking the next pending task active should succeed, got error: %s", res.Error)
+	}
+	if _, active, _, _ := a2.state.Plan.Counts(); active != 1 {
+		t.Fatalf("exactly one task should be active after next-pending inference, got %d", active)
+	}
+
+	// task_id omitted, multiple active → ambiguous → a helpful error (not a silent wrong update).
+	a3 := newAgent()
+	a3.state.Plan.SetStatus("recon", TaskActive)
+	var other string
+	for _, tk := range a3.state.Plan.Tasks {
+		if tk.ID != "recon" {
+			other = tk.ID
+			break
+		}
+	}
+	a3.state.Plan.SetStatus(other, TaskActive)
+	if res, _ := a3.updatePlanTool(map[string]string{"status": "completed"}); res.Error == "" {
+		t.Fatal("ambiguous task_id (multiple active) should error with a task-id hint")
+	}
+}
