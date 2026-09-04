@@ -97,6 +97,13 @@ func TestClassifyFinding(t *testing.T) {
 		{"Server-Side Template Injection via name", "template injection", "", "ssti"},
 		{"Path traversal in download", "local file inclusion", "", "lfi"},
 		{"Command injection in ping", "os command executed", "", "rce"},
+		// NoSQL must win over sqli despite "nosql injection" containing "sql
+		// inject" (nosqli is ordered before sqli in classKeywords).
+		{"NoSQL injection authentication bypass", "operator injection with $ne bypassed login", "", "nosqli"},
+		{"Auth bypass via MongoDB operator", "password[$ne] matched any password", "", "nosqli"},
+		{"Login bypass", "", "CWE-943", "nosqli"},
+		// Regression: a plain SQLi must STILL classify as sqli, not nosqli.
+		{"SQL injection in id parameter", "union select 1,2,3", "", "sqli"},
 		{"Broken Function Level Authorization on /api/admin/users", "regular user reached admin function", "CWE-862", "idor"},
 		{"Business logic flaw in checkout", "negative quantity yields a negative total", "", "business_logic"},
 		{"Price manipulation at checkout", "", "CWE-840", "business_logic"},
@@ -855,5 +862,47 @@ func TestBusinessLogicChallengeBehavior(t *testing.T) {
 	}
 	if body := httpGet(t, safe.URL+"/checkout?item=widget&quantity=2"); !strings.Contains(body, "total $200.00") {
 		t.Fatalf("safe-checkout: a valid order must still succeed; got %q", body)
+	}
+}
+
+// TestNoSQLiChallengeBehavior locks in the NoSQL operator-injection auth bypass:
+// the positive challenge authenticates on an operator payload (without the
+// password) but rejects normal wrong credentials, while the negative control
+// rejects the operator payload with 400.
+func TestNoSQLiChallengeBehavior(t *testing.T) {
+	post := func(base, body string) (int, string) {
+		t.Helper()
+		resp, err := http.Post(base+"/api/login", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("POST /api/login: %v", err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+
+	// Positive: operator injection authenticates without knowing the password.
+	nl := challengeByName(t, "nosqli-auth-bypass").Start()
+	defer nl.Close()
+	if st, body := post(nl.URL, `{"username":"admin","password":{"$ne":null}}`); st != 200 || !strings.Contains(body, `"authenticated":true`) {
+		t.Fatalf("nosqli: operator injection must authenticate; status=%d body=%q", st, body)
+	}
+	// Normal wrong credentials are rejected — so the only way in is the injection.
+	if st, _ := post(nl.URL, `{"username":"admin","password":"wrong"}`); st != http.StatusUnauthorized {
+		t.Fatalf("nosqli: normal wrong credentials must be 401, got %d", st)
+	}
+	// The bracketed form-encoding also bypasses (Express qs style).
+	if resp, err := http.Post(nl.URL+"/api/login", "application/x-www-form-urlencoded", strings.NewReader("username=admin&password[$ne]=x")); err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("nosqli: bracketed operator form must authenticate, got %d", resp.StatusCode)
+		}
+	}
+
+	// Negative control: the operator payload is rejected (400) — no bypass.
+	safe := challengeByName(t, "safe-login").Start()
+	defer safe.Close()
+	if st, _ := post(safe.URL, `{"username":"admin","password":{"$ne":null}}`); st != http.StatusBadRequest {
+		t.Fatalf("safe-login: operator injection must be 400, got %d", st)
 	}
 }
