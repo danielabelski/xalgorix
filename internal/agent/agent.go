@@ -423,6 +423,14 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// the scan target, and the ledger.
 	a.registerVerifyXXETool(reg)
 
+	// Register the Cross-Site Request Forgery confirmer (verify_csrf): given a
+	// url (or hypothesis) and the state-change body, it replays the request with
+	// a forged cross-site Origin/Referer and no anti-CSRF token, and confirms
+	// CSRF when the server accepts it — declining when the endpoint is protected
+	// by an Authorization header (not CSRF-able). Agent-bound: needs the scope
+	// config, session auth, the scan target, and the ledger.
+	a.registerVerifyCSRFTool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests
