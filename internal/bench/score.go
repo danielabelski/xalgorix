@@ -184,6 +184,9 @@ type classMatch struct {
 // matters only in that the first hit wins; keep the more specific phrases first.
 var classKeywords = []classMatch{
 	{"xss", []string{"xss", "cross-site scripting", "cross site scripting", "script injection"}},
+	// NoSQL must precede sqli: "nosql injection" contains the substring "sql
+	// inject", so the sqli row would otherwise misclassify it.
+	{"nosqli", []string{"nosql injection", "nosql inject", "nosqli", "nosql", "mongodb injection", "mongo injection", "operator injection", "$ne", "$gt", "$where"}},
 	{"sqli", []string{"sql injection", "sqli", "sql inject", "union select", "blind sql"}},
 	{"open_redirect", []string{"open redirect", "unvalidated redirect", "url redirect"}},
 	{"idor", []string{"idor", "insecure direct object", "bola", "broken object level", "broken access control", "unauthorized access"}},
@@ -211,6 +214,8 @@ func canonicalClass(c string) string {
 		return "open_redirect"
 	case "business-logic", "businesslogic", "logic":
 		return "business_logic"
+	case "nosql", "nosql-injection", "nosql_injection":
+		return "nosqli"
 	default:
 		return c
 	}
@@ -223,6 +228,8 @@ func cweClass(cwe string) string {
 		return "xss"
 	case "89":
 		return "sqli"
+	case "943":
+		return "nosqli"
 	case "601":
 		return "open_redirect"
 	case "918":

@@ -954,7 +954,78 @@ func Builtin() []Challenge {
 				_, _ = fmt.Fprintf(w, `<html><body><h1>Checkout</h1><p>Order placed: %d x %s @ $%d each = total $%d.00</p></body></html>`, qty, item, unit, qty*unit)
 			}),
 		},
+		{
+			// NoSQL injection: the login endpoint feeds the request's password
+			// straight into a Mongo-style query, so an operator object (JSON
+			// {"$ne": null} or the bracketed form password[$ne]=) matches ANY
+			// password and authenticates without knowing it — a classic auth
+			// bypass. Normal (wrong) credentials the attacker doesn't know are
+			// rejected with 401, so the ONLY way in is the operator injection.
+			Name: "nosqli-auth-bypass", Class: "nosqli", Endpoint: "/api/login", Param: "password",
+			Desc: "Login is vulnerable to NoSQL operator injection ({\"$ne\":...}), bypassing authentication.",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Login</h1><form action="/api/login" method="post"><input name="username" placeholder="username"><input name="password" type="password"><button>Sign in</button></form></body></html>`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if hasNoSQLOperator(r) {
+					// VULNERABLE: the operator matches any password → authenticated.
+					_, _ = fmt.Fprint(w, `{"authenticated":true,"user":"admin","token":"sess_9f2a3c_admin"}`)
+					return
+				}
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = fmt.Fprint(w, `{"authenticated":false,"error":"invalid credentials"}`)
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (nosqli): the login validates that credentials are
+			// plain strings and rejects operator objects with 400, so operator
+			// injection cannot bypass authentication.
+			Name: "safe-login", Class: "nosqli", Endpoint: "/api/login", Param: "password", Negative: true,
+			Desc: "NEGATIVE CONTROL: login rejects operator/non-string credentials (400); no NoSQL injection.",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Login</h1><form action="/api/login" method="post"><input name="username" placeholder="username"><input name="password" type="password"><button>Sign in</button></form></body></html>`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if hasNoSQLOperator(r) {
+					// SAFE: input validation rejects operator objects / non-strings.
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = fmt.Fprint(w, `{"error":"invalid input: credentials must be strings"}`)
+					return
+				}
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = fmt.Fprint(w, `{"authenticated":false,"error":"invalid credentials"}`)
+			}),
+		},
 	}
+}
+
+// hasNoSQLOperator reports whether the request smuggles a MongoDB-style query
+// operator into its credentials — via a JSON object ({"$ne": null}), the
+// bracketed form-encoding (password[$ne]=), or a URL-encoded variant. A normal
+// string login never contains these tokens, so their presence is the NoSQL
+// operator-injection signal both nosqli challenges key off.
+func hasNoSQLOperator(r *http.Request) bool {
+	parts := []string{r.URL.RawQuery}
+	if dec, err := url.QueryUnescape(r.URL.RawQuery); err == nil {
+		parts = append(parts, dec)
+	}
+	if r.Body != nil {
+		b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		parts = append(parts, string(b))
+	}
+	s := strings.ToLower(strings.Join(parts, "\n"))
+	for _, op := range []string{"$ne", "$gt", "$gte", "$lt", "$lte", "$regex", "$where", "$in", "$nin", "$exists"} {
+		if strings.Contains(s, op) {
+			return true
+		}
+	}
+	return false
 }
 
 // bflaRole maps the Bearer token on a request to a role for the BFLA
