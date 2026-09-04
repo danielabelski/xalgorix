@@ -839,7 +839,86 @@ func Builtin() []Challenge {
 				_, _ = fmt.Fprintf(w, `{"order_id":%q,"owner":%q,"total":"1240.00","card_last4":"4242"}`, id, user)
 			}),
 		},
+		{
+			// Authenticated BFLA (Broken Function Level Authorization): an
+			// admin-only function is reachable by ANY authenticated user. The
+			// handler checks authentication but never the caller's ROLE — role A
+			// (admin) is meant to use it, but role B (a regular user) gets the
+			// same privileged response, which is vertical privilege escalation.
+			// Anonymous is refused, so the flaw is strictly the missing role
+			// check. Class idor (BFLA canonicalizes to idor).
+			Name: "bfla", Class: "idor", Endpoint: "/api/admin/users", Param: "",
+			Desc: "An admin-only user-list function is reachable by any authenticated user (no role check).",
+			Auth: Auth{
+				A: map[string]string{"Authorization": "Bearer admin-token-a1"},
+				B: map[string]string{"Authorization": "Bearer user-token-b2"},
+			},
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/admin/users" {
+					// Index (crawled as the admin session) links the admin function.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Admin console</h1><a href="/api/admin/users">manage users</a></body></html>`)
+					return
+				}
+				if bflaRole(r) == "" {
+					w.Header().Set("WWW-Authenticate", "Bearer")
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = fmt.Fprint(w, `{"error":"authentication required"}`)
+					return
+				}
+				// VULNERABLE: any authenticated caller gets the admin user list —
+				// no check that the caller's role is admin, so a regular user (role
+				// B) sees the same privileged data (emails, SSN fragments).
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, `{"users":[{"id":1,"email":"alice@corp.example","role":"admin","ssn_last4":"6789"},{"id":2,"email":"bob@corp.example","role":"user","ssn_last4":"4321"}]}`)
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (idor/BFLA): the admin function enforces a role
+			// check — a regular user (role B) is refused with 403 — so there is no
+			// privilege escalation to report.
+			Name: "safe-bfla", Class: "idor", Endpoint: "/api/admin/users", Param: "", Negative: true,
+			Desc: "NEGATIVE CONTROL: admin function enforces a role check; regular users get 403 (no BFLA).",
+			Auth: Auth{
+				A: map[string]string{"Authorization": "Bearer admin-token-a1"},
+				B: map[string]string{"Authorization": "Bearer user-token-b2"},
+			},
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/admin/users" {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Admin console</h1><a href="/api/admin/users">manage users</a></body></html>`)
+					return
+				}
+				role := bflaRole(r)
+				if role == "" {
+					w.Header().Set("WWW-Authenticate", "Bearer")
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = fmt.Fprint(w, `{"error":"authentication required"}`)
+					return
+				}
+				// SAFE: enforce the role — only an admin may call the admin function.
+				if role != "admin" {
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = fmt.Fprint(w, `{"error":"forbidden: admin role required"}`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, `{"users":[{"id":1,"email":"alice@corp.example","role":"admin","ssn_last4":"6789"},{"id":2,"email":"bob@corp.example","role":"user","ssn_last4":"4321"}]}`)
+			}),
+		},
 	}
+}
+
+// bflaRole maps the Bearer token on a request to a role for the BFLA
+// challenges, or "" when the request carries no recognized session.
+func bflaRole(r *http.Request) string {
+	switch strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer")) {
+	case "admin-token-a1":
+		return "admin"
+	case "user-token-b2":
+		return "user"
+	}
+	return ""
 }
 
 // bolaUser maps the Bearer token on a request to a user name for the BOLA

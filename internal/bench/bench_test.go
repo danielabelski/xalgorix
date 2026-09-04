@@ -170,10 +170,10 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 	if byClass["xss"] != [2]int{2, 2} {
 		t.Fatalf("expected xss 2/2, got %v", byClass)
 	}
-	// idor = idor (solved) + bola (positive, unsolved by this fake) + safe-idor +
-	// safe-bola (both clean negatives) => 3/4.
-	if byClass["idor"] != [2]int{3, 4} {
-		t.Fatalf("expected idor 3/4, got %v", byClass["idor"])
+	// idor = idor (solved) + bola + bfla (positives, unsolved by this fake) +
+	// safe-idor + safe-bola + safe-bfla (three clean negatives) => 4/6.
+	if byClass["idor"] != [2]int{4, 6} {
+		t.Fatalf("expected idor 4/6, got %v", byClass["idor"])
 	}
 	// open_redirect and ssrf each have a positive (unsolved by this fake) plus a
 	// negative control (correctly clean) => 1/2.
@@ -768,5 +768,53 @@ func TestHarnessPassesChallengeAuth(t *testing.T) {
 	}
 	if s := seen["bench-reflected-xss"]; s.A != nil || s.B != nil {
 		t.Fatalf("stateless challenge must pass an empty Auth, got %+v", s)
+	}
+}
+
+// TestBFLAChallengeBehavior locks in the two-account behavior of the bfla
+// positive and safe-bfla negative control: a regular user (role B) reaching the
+// admin-only function is the flaw, anonymous is always refused, and the negative
+// control enforces the role check.
+func TestBFLAChallengeBehavior(t *testing.T) {
+	get := func(base, token string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, base+"/api/admin/users", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /api/admin/users: %v", err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+
+	// Positive BFLA: a regular user (role B) reaches the admin-only function and
+	// gets the privileged data.
+	bfla := challengeByName(t, "bfla").Start()
+	defer bfla.Close()
+	if st, body := get(bfla.URL, "user-token-b2"); st != 200 || !strings.Contains(body, "ssn_last4") {
+		t.Fatalf("bfla: a regular user must reach the admin function; status=%d body=%q", st, body)
+	}
+	if st, _ := get(bfla.URL, ""); st != http.StatusUnauthorized {
+		t.Fatalf("bfla: anonymous must be 401, got %d", st)
+	}
+
+	// Negative control: the role check is enforced — a regular user is refused.
+	safe := challengeByName(t, "safe-bfla").Start()
+	defer safe.Close()
+	if st, _ := get(safe.URL, "user-token-b2"); st != http.StatusForbidden {
+		t.Fatalf("safe-bfla: a regular user must be 403, got %d", st)
+	}
+	if st, body := get(safe.URL, "admin-token-a1"); st != 200 || !strings.Contains(body, "ssn_last4") {
+		t.Fatalf("safe-bfla: admin must reach the function; status=%d body=%q", st, body)
+	}
+	if st, _ := get(safe.URL, ""); st != http.StatusUnauthorized {
+		t.Fatalf("safe-bfla: anonymous must be 401, got %d", st)
 	}
 }
