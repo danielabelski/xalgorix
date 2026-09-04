@@ -1263,3 +1263,56 @@ func TestDelegationCoordinatorSkipsDiscoveryAndExistingDelegation(t *testing.T) 
 		t.Fatalf("coordinator with an existing delegation was nudged again: %q", result.Nudge)
 	}
 }
+
+// ── slow-recon guard tests ───────────────────────────────────────────────────
+
+func TestThrottledFullPortNmap(t *testing.T) {
+	throttled := []string{
+		"nmap -sV -sC -T2 --max-rate 2 --scan-delay 500ms -p- --open 127.0.0.1",
+		"nmap --scan-delay 200ms -p 1-65535 target",
+		"nmap --max-rate 5 -p- target",
+		"nmap -p0-65535 --scan-delay 100ms target",
+	}
+	for _, c := range throttled {
+		if !throttledFullPortNmap(c) {
+			t.Errorf("expected throttled full-port scan for %q", c)
+		}
+	}
+	ok := []string{
+		"nmap -sV -sC --top-ports 200 --open target",  // bounded (the recommended fix)
+		"nmap -sV -p- -T4 target",                      // full-port but NOT throttled -> fine
+		"nmap --max-rate 2 --top-ports 100 target",     // throttled but bounded -> fine
+		"nmap -p 8080,8443 --scan-delay 500ms target",  // specific ports, not a full sweep
+		"nmap --max-rate 5000 -p- target",              // full sweep at a high rate -> not throttled
+		"curl -s http://target/",                       // not nmap
+	}
+	for _, c := range ok {
+		if throttledFullPortNmap(c) {
+			t.Errorf("did NOT expect a throttled full-port scan for %q", c)
+		}
+	}
+}
+
+func TestHookSlowReconGuard(t *testing.T) {
+	// Pathological command → force-skipped with a corrective nudge.
+	res := hookSlowReconGuard(NewScanState(), map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   "nmap -sV -sC -T2 --max-rate 2 --scan-delay 500ms -p- --open 127.0.0.1",
+	})
+	if !res.ForceSkip || !strings.Contains(res.Nudge, "top-ports") {
+		t.Fatalf("expected force-skip + a top-ports nudge, got %+v", res)
+	}
+	// Bounded --top-ports scan (even with rate flags) → allowed.
+	if r := hookSlowReconGuard(NewScanState(), map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   "nmap -sV --top-ports 200 --max-rate 2 --scan-delay 500ms target",
+	}); r.ForceSkip {
+		t.Fatal("a bounded --top-ports scan must not be skipped")
+	}
+	// A non-terminal tool is ignored.
+	if r := hookSlowReconGuard(NewScanState(), map[string]string{
+		"tool_name": "verify_sqli", "command": "nmap -p- --scan-delay 1s x",
+	}); r.ForceSkip {
+		t.Fatal("a non-terminal tool call must be ignored")
+	}
+}
