@@ -1362,13 +1362,25 @@ func checkFalsePositive(title, description, severity, proof string) string {
 	// the full redirect callback and showing the CLIENT app accepts a state it
 	// never issued (forced login / account linking with a usable session). Fire
 	// at medium+ only when there is no callback/session evidence.
-	isStateCSRF := (strings.Contains(lower, "csrf") || strings.Contains(lower, "cross-site request forgery")) &&
-		strings.Contains(lower, "state")
-	isStateCSRF = isStateCSRF ||
-		strings.Contains(lower, "state parameter") ||
+	//
+	// This is specifically about the OAuth `state` parameter, so it REQUIRES an
+	// OAuth/authorization context. A plain CSRF on a state-CHANGING action is the
+	// ordinary way to describe any CSRF — and is exactly what verify_csrf's own
+	// proof summary says ("accepted a state-changing POST …") — so "csrf" + the
+	// word "state" alone must NOT trip this gate, or a genuine, deterministically
+	// confirmed CSRF would be dropped before it is ever reported.
+	oauthCtx := strings.Contains(lower, "oauth") ||
+		strings.Contains(lower, "openid") ||
+		strings.Contains(lower, "/authorize") ||
+		strings.Contains(lower, "authorize endpoint") ||
+		strings.Contains(lower, "authorization server") ||
+		strings.Contains(lower, "/oauth2/") ||
+		strings.Contains(lower, "single sign-on") ||
+		strings.Contains(lower, "sso")
+	isStateCSRF := strings.Contains(lower, "state parameter") ||
 		strings.Contains(lower, "missing state validation") ||
 		strings.Contains(lower, "state validation") ||
-		(strings.Contains(lower, "oauth") && strings.Contains(lower, "state"))
+		(oauthCtx && strings.Contains(lower, "state"))
 	if isStateCSRF && isHighSev {
 		lowerProof := strings.ToLower(proof + " " + description)
 		// Evidence that the CLIENT app (not just the authorize endpoint)
