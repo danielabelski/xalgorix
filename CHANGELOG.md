@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.48](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.48) — Reach for the deterministic verifiers on first signal (2026-09-03)
+
+### Changed
+- **The depth-first methodology now steers the agent to the fast deterministic verifiers the moment a class signal appears** — `verify_sqli` (single-quote provokes a DBMS error), `verify_ssti` (a `{{a*b}}` expression that evaluates to its product), `verify_xss` (a nonce that actually executes in the browser), `verify_oob` (a blind RCE/SQLi/SSRF/XXE callback) — instead of hand-crafting a long PoC or launching sqlmap first. Each is a one-to-two-turn confirmation that records exploit-proven, gate-passing evidence, so a confirmed finding is reported far sooner. It also reinforces reporting a strong in-band signal (a reflected `/etc/passwd`, a `uid=0(root)` command output, a raw DBMS error) directly rather than stalling on an out-of-band callback that may never arrive. Surfaced by running the benchmark against the real agent: a run had burned its entire budget on manual probes and sqlmap without ever confirming an obvious error-based SQLi; with the guidance the same challenge now confirms via `verify_sqli` and reports an independently `verified` finding.
+
 ## [v4.6.47](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.47) — Benchmark: agent-event diagnostics + single-signal error-SQLi challenge (2026-09-03)
 
 ### Changed
