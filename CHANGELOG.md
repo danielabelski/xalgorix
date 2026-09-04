@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.50](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.50) — verify_xxe: a deterministic XML External Entity confirmer (2026-09-03)
+
+### Added
+- **`verify_xxe`, a one-call deterministic XXE confirmer — the sibling of `verify_sqli` / `verify_ssti`.** Given a URL or a ledger hypothesis id, it POSTs a benign baseline XML document and then an XXE payload (a `DOCTYPE` declaring an external `SYSTEM file://` entity referenced in the body), and confirms the vulnerability when the target file's contents appear in the probe response but not the baseline — a parser with external entities disabled echoes the literal entity, never the file. On success it records exploit-proven CWE-611 evidence in the scan ledger for the agent to report (it does not auto-report). Same safety envelope as the other injection verifiers: it scope-checks the internally resolved host and refuses the operator's own machine/local network, honors the scan's request-rate policy and cancellation, uses the scan session auth, does not follow redirects, and is disabled in passive mode. XXE previously lacked the fast confirmation path the other injection classes had, so the agent hand-crafted payloads and chased out-of-band callbacks until it ran out of budget; with `verify_xxe` a file-read XXE now confirms and reports an independently verified finding in one to two turns.
+
 ## [v4.6.49](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.49) — Benchmark: SSTI challenges are single-signal (no incidental XSS) (2026-09-03)
 
 ### Fixed
