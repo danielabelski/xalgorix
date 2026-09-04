@@ -46,6 +46,28 @@ func TestCheckFalsePositive_OAuthStateCSRF(t *testing.T) {
 			proof:      "",
 			wantReject: false,
 		},
+		{
+			// Regression: a GENUINE CSRF on a state-CHANGING action must NOT be
+			// caught by the OAuth-state gate just because it says "state". There
+			// is no OAuth/authorization context here — it is an ordinary
+			// cookie-auth form CSRF.
+			name:       "genuine CSRF on a state-changing POST is NOT an OAuth-state FP",
+			title:      "CSRF on POST /account/email",
+			desc:       "The change-email endpoint accepts a state-changing POST from any origin with no anti-CSRF token.",
+			severity:   "high",
+			proof:      "Forged cross-site POST with a spoofed Origin and no token was accepted (HTTP 200), changing the account email.",
+			wantReject: false,
+		},
+		{
+			// Regression: verify_csrf's own confirmation wording (which literally
+			// contains "state-changing") must pass the gate.
+			name:       "verify_csrf confirmation wording passes",
+			title:      "Cross-Site Request Forgery at /account/email",
+			desc:       "Cross-Site Request Forgery CONFIRMED: the server accepted a state-changing POST with a forged cross-site Origin and no anti-CSRF token (CWE-352).",
+			severity:   "high",
+			proof:      "Forged request (cross-site Origin, no CSRF token) -> HTTP 200 (accepted).",
+			wantReject: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
