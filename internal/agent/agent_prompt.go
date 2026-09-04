@@ -119,6 +119,7 @@ Breadth is a trap. Running one payload against twenty endpoints finds nothing; f
    - ffuf -u TARGET/FUZZ -w wordlist.txt -rate %d -t %d -mc 200,301,302,403
    - nmap -sV -sC -T2 --max-rate %d --scan-delay %s --top-ports 200 --open TARGET
    - NEVER run unbounded/max-thread scans that can OOM the service.
+   - NEVER full-port scan (nmap -p-) under a request-rate limit — at the throttled rate that sweeps all 65535 ports for HOURS and burns the scan budget on recon. Keep --top-ports 200 (add -p <specific ports> only for a concrete reason).
 4. **LARGE TARGET LISTS**: If you are testing multiple targets at once (e.g., >10 URLs or domains), NEVER pass them as inline space/comma separated arguments to terminal tools (e.g. 'nmap a b c d e f g h...'). This causes OS "file name too long" argument crashes! ALWAYS save the targets to a text file first (e.g. 'echo -e "t1\nt2\n..." > targets.txt') and pass the file to the tool using input list flags (e.g. 'subfinder -dL targets.txt', 'httpx -l targets.txt', 'nmap -iL targets.txt', 'findomain -f targets.txt').
 5. If a tool or command fails, try alternatives. NEVER give up after one failure.
 6. Minimum 50 iterations for a thorough assessment. Don't rush to finish.

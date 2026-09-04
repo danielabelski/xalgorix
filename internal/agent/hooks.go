@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -365,6 +366,7 @@ func floatPtr(f float64) *float64 { return &f }
 func RegisterDefaultHooks(reg *HookRegistry) {
 	// Order matters: tracking → detection → policy → reset
 	reg.Register(OnToolCall, hookReportRetryGuard)
+	reg.Register(OnToolCall, hookSlowReconGuard)
 	reg.Register(OnToolCall, hookWorkTracker)
 	reg.Register(OnToolCall, hookStuckTracker)
 	reg.Register(OnToolCall, hookCurlPreference)
@@ -396,6 +398,58 @@ const maxReportRepairAttempts = 3
 // let malformed report calls continue indefinitely while the finish gate
 // insisted on a successful re-report, creating the post-reset loop seen in
 // the Leather export.
+// throttledFullPortNmap reports whether cmd is an nmap FULL-port scan (-p- /
+// -p 1-65535) run under a request-rate throttle (any --scan-delay, or a low
+// --max-rate). That combination scans all 65535 ports at a crawl — hours of
+// wall-clock — and has repeatedly consumed an entire scan's turn/time budget on
+// recon before any testing happened. Under a throttle a bounded --top-ports
+// scan is the right move; a full sweep is not worth the budget.
+func throttledFullPortNmap(cmd string) bool {
+	lc := strings.ToLower(cmd)
+	if !strings.Contains(lc, "nmap") {
+		return false
+	}
+	fullPort := strings.Contains(lc, "-p-") ||
+		strings.Contains(lc, "-p 1-65535") || strings.Contains(lc, "-p1-65535") ||
+		strings.Contains(lc, "-p 0-65535") || strings.Contains(lc, "-p0-65535")
+	if !fullPort {
+		return false
+	}
+	// Any per-probe scan-delay over 65535 ports is pathologically slow.
+	if strings.Contains(lc, "--scan-delay") {
+		return true
+	}
+	// A low --max-rate (packets/sec) throttles the full sweep into hours.
+	if i := strings.Index(lc, "--max-rate"); i >= 0 {
+		rest := strings.TrimLeft(lc[i+len("--max-rate"):], " =")
+		end := 0
+		for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+			end++
+		}
+		if n, err := strconv.Atoi(rest[:end]); err == nil && n > 0 && n < 200 {
+			return true
+		}
+	}
+	return false
+}
+
+// hookSlowReconGuard force-skips a rate-throttled full-port nmap scan BEFORE it
+// runs and steers the agent to the bounded --top-ports scan. Fires on
+// OnToolCall. The rate policy injects --max-rate/--scan-delay into recon
+// commands (correct for respecting a target), but combined with a full-port
+// sweep (-p-) that means all 65535 ports at the throttled rate — hours that burn
+// the scan budget and starve detection. This is a deterministic backstop for the
+// prompt guidance (which the model sometimes overrides with -p-).
+func hookSlowReconGuard(state *ScanState, args map[string]string) HookResult {
+	if args["tool_name"] != "terminal_execute" || !throttledFullPortNmap(args["command"]) {
+		return HookResult{}
+	}
+	return HookResult{
+		ForceSkip: true,
+		Nudge: "⛔ Blocked a rate-throttled FULL-port nmap scan (`-p-` with `--scan-delay`/low `--max-rate`): at the throttled rate that scans all 65535 ports for HOURS and would burn your scan budget on recon before any testing. Re-run it BOUNDED — `nmap -sV -sC --top-ports 200 --open TARGET` (the rate flags are fine to keep) — and add specific extra ports with `-p 8080,8443,...` only when you have a concrete reason. Then move on to actually testing the app.",
+	}
+}
+
 func hookReportRetryGuard(state *ScanState, args map[string]string) HookResult {
 	if state == nil || args["tool_name"] != "report_vulnerability" || !state.ReportRetryLimitReached {
 		return HookResult{}
