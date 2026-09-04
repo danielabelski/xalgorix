@@ -155,6 +155,18 @@ func Solved(expectedClass string, findings []reporting.Vulnerability) (bool, str
 // reporting package's private classifier) so the benchmark's notion of "right
 // class" is explicit and stable.
 func classifyFinding(f reporting.Vulnerability) string {
+	text := strings.ToLower(f.Title + " " + f.Description)
+	// CORS is identified by an UNAMBIGUOUS textual signal (a reflected
+	// Access-Control-Allow-Origin / "cross-origin resource sharing" / "CORS
+	// misconfiguration"), checked BEFORE the CWE. Agents frequently tag a CORS
+	// finding with a GENERIC access-control CWE (e.g. CWE-284, which cweClass
+	// maps to idor), so a CWE-first rule would absorb CORS into idor. The CORS
+	// wording is far more specific than a generic CWE, and each benchmark app
+	// hosts exactly one bug, so this override cannot steal a genuine idor/other
+	// finding.
+	if isCORSSignal(text) {
+		return "cors"
+	}
 	// Prefer the CWE: it is the authoritative, structured class signal. A finding
 	// tagged CWE-1336 is SSTI even when its description also mentions the remote
 	// code execution it can escalate to — which would otherwise match the broader
@@ -164,7 +176,6 @@ func classifyFinding(f reporting.Vulnerability) string {
 	if c := cweClass(f.CWE); c != "" {
 		return c
 	}
-	text := strings.ToLower(f.Title + " " + f.Description)
 	for _, m := range classKeywords {
 		for _, kw := range m.keywords {
 			if strings.Contains(text, kw) {
@@ -216,9 +227,22 @@ func canonicalClass(c string) string {
 		return "business_logic"
 	case "nosql", "nosql-injection", "nosql_injection":
 		return "nosqli"
+	case "cors-misconfiguration", "cors-misconfig", "cors_misconfiguration", "cors misconfiguration":
+		return "cors"
 	default:
 		return c
 	}
+}
+
+// isCORSSignal reports whether a finding's text unambiguously describes a CORS
+// misconfiguration. classifyFinding consults this BEFORE the CWE so a CORS
+// finding an agent happened to tag with a generic access-control CWE (e.g.
+// CWE-284) is not miscounted as idor. The phrases are CORS-specific — a genuine
+// idor/xss/etc. finding does not contain them — so the override is safe.
+func isCORSSignal(text string) bool {
+	return strings.Contains(text, "cors") ||
+		strings.Contains(text, "cross-origin resource sharing") ||
+		strings.Contains(text, "access-control-allow-origin")
 }
 
 // cweClass maps a CWE identifier to a canonical class, or "" when unmapped.
@@ -230,6 +254,10 @@ func cweClass(cwe string) string {
 		return "sqli"
 	case "943":
 		return "nosqli"
+	case "942", "346":
+		// CWE-942 (Permissive Cross-domain Policy) / CWE-346 (Origin Validation
+		// Error) — the structured signals for a CORS misconfiguration.
+		return "cors"
 	case "601":
 		return "open_redirect"
 	case "918":

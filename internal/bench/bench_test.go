@@ -104,6 +104,16 @@ func TestClassifyFinding(t *testing.T) {
 		{"Login bypass", "", "CWE-943", "nosqli"},
 		// Regression: a plain SQLi must STILL classify as sqli, not nosqli.
 		{"SQL injection in id parameter", "union select 1,2,3", "", "sqli"},
+		// CORS: the specific wording classifies as cors, and — critically — wins
+		// over a GENERIC access-control CWE (CWE-284) an agent might attach, which
+		// would otherwise map to idor. CWE-942/346 also map to cors.
+		{"CORS misconfiguration allows credential theft", "reflects arbitrary Origin with Access-Control-Allow-Credentials: true", "CWE-942", "cors"},
+		{"Cross-Origin Resource Sharing misconfiguration", "any origin is reflected", "", "cors"},
+		{"Reflected Access-Control-Allow-Origin with credentials", "attacker origin can read the response", "CWE-284", "cors"},
+		{"Origin validation error on /api/account", "cors policy reflects any origin", "CWE-346", "cors"},
+		// Regression: a genuine access-control finding WITHOUT CORS wording must
+		// still classify as idor (the CORS override must not steal it).
+		{"Broken access control on /api/orders", "unauthorized access to another user's order", "CWE-284", "idor"},
 		{"Broken Function Level Authorization on /api/admin/users", "regular user reached admin function", "CWE-862", "idor"},
 		{"Business logic flaw in checkout", "negative quantity yields a negative total", "", "business_logic"},
 		{"Price manipulation at checkout", "", "CWE-840", "business_logic"},
@@ -904,5 +914,64 @@ func TestNoSQLiChallengeBehavior(t *testing.T) {
 	defer safe.Close()
 	if st, _ := post(safe.URL, `{"username":"admin","password":{"$ne":null}}`); st != http.StatusBadRequest {
 		t.Fatalf("safe-login: operator injection must be 400, got %d", st)
+	}
+}
+
+// TestCORSChallengeBehavior locks in the CORS misconfiguration: the positive
+// challenge reflects an ARBITRARY attacker Origin into
+// Access-Control-Allow-Origin together with Access-Control-Allow-Credentials:
+// true (a credentialed cross-origin read of authenticated data), while the
+// negative control reflects ONLY a single fixed trusted origin.
+func TestCORSChallengeBehavior(t *testing.T) {
+	getOrigin := func(base, origin string) (int, http.Header, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, base+"/api/account", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /api/account: %v", err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, resp.Header, string(b)
+	}
+
+	// Positive: an arbitrary attacker origin is reflected WITH credentials, so
+	// the attacker page can read the authenticated response (the api_token).
+	cors := challengeByName(t, "cors-credentialed-reflect").Start()
+	defer cors.Close()
+	st, hdr, body := getOrigin(cors.URL, "https://evil.example")
+	if st != 200 {
+		t.Fatalf("cors: expected 200, got %d", st)
+	}
+	if hdr.Get("Access-Control-Allow-Origin") != "https://evil.example" {
+		t.Fatalf("cors: attacker Origin must be reflected into ACAO, got %q", hdr.Get("Access-Control-Allow-Origin"))
+	}
+	if hdr.Get("Access-Control-Allow-Credentials") != "true" {
+		t.Fatalf("cors: ACAC must be true, got %q", hdr.Get("Access-Control-Allow-Credentials"))
+	}
+	if !strings.Contains(body, "api_token") {
+		t.Fatalf("cors: response must carry the authenticated data an attacker steals, got %q", body)
+	}
+	// The index links the account API so a crawler discovers the surface.
+	if idx := httpGet(t, cors.URL+"/"); !strings.Contains(idx, "/api/account") {
+		t.Fatalf("cors: index must link /api/account, got %q", idx)
+	}
+
+	// Negative control: an arbitrary attacker origin is NOT reflected (only the
+	// one trusted origin is ever allowed), so there is no CORS flaw.
+	safe := challengeByName(t, "safe-cors").Start()
+	defer safe.Close()
+	if _, shdr, _ := getOrigin(safe.URL, "https://evil.example"); shdr.Get("Access-Control-Allow-Origin") == "https://evil.example" || shdr.Get("Access-Control-Allow-Origin") == "*" {
+		t.Fatalf("safe-cors: must NOT reflect an arbitrary origin, got ACAO=%q", shdr.Get("Access-Control-Allow-Origin"))
+	}
+	// The one trusted origin IS allowed, so it is a working API (not just broken).
+	if _, thdr, _ := getOrigin(safe.URL, "https://app.corp.example"); thdr.Get("Access-Control-Allow-Origin") != "https://app.corp.example" {
+		t.Fatalf("safe-cors: the trusted origin must be allowed, got ACAO=%q", thdr.Get("Access-Control-Allow-Origin"))
 	}
 }

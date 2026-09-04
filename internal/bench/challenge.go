@@ -1002,6 +1002,67 @@ func Builtin() []Challenge {
 				_, _ = fmt.Fprint(w, `{"authenticated":false,"error":"invalid credentials"}`)
 			}),
 		},
+		{
+			// CORS misconfiguration: the account API reflects ANY request Origin
+			// into Access-Control-Allow-Origin AND sets
+			// Access-Control-Allow-Credentials: true, so a page on any attacker
+			// origin can make a credentialed cross-origin request to /api/account
+			// and read the victim's authenticated data (email + API token). This
+			// is the classic EXPLOITABLE CORS bug — reflected origin + credentials
+			// — as opposed to a harmless wildcard without credentials. The
+			// response carries a token so an exploit PoC naturally proves theft.
+			// Class cors.
+			Name: "cors-credentialed-reflect", Class: "cors", Endpoint: "/api/account", Param: "",
+			Desc: "Reflects any Origin into ACAO with Access-Control-Allow-Credentials: true (credentialed cross-origin read of authenticated data).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					// Index tells a crawler the SPA reads the account API
+					// cross-origin, exposing /api/account as the surface to test.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Account</h1><p>Our single-page app loads your profile from <a href="/api/account">/api/account</a> with a credentialed cross-origin fetch.</p></body></html>`)
+					return
+				}
+				// VULNERABLE: echo the caller's Origin back and allow credentials,
+				// so ANY origin can read this authenticated response. With no
+				// Origin header (e.g. a bare curl) fall back to "*" so the
+				// reflection is still observable.
+				origin := r.Header.Get("Origin")
+				if origin == "" {
+					origin = "*"
+				}
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, `{"user":"admin","email":"admin@corp.example","api_token":"sk_live_9f2a3c7b1e"}`)
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (cors): the account API allows credentialed
+			// cross-origin reads ONLY from a single fixed, trusted origin and
+			// never reflects an arbitrary caller Origin, so an attacker page
+			// cannot read the response — there is no CORS flaw to report.
+			Name: "safe-cors", Class: "cors", Endpoint: "/api/account", Param: "", Negative: true,
+			Desc: "NEGATIVE CONTROL: ACAO is a single fixed trusted origin; arbitrary origins are never reflected (no CORS flaw).",
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Account</h1><p>Our single-page app loads your profile from <a href="/api/account">/api/account</a> with a credentialed cross-origin fetch.</p></body></html>`)
+					return
+				}
+				// SAFE: only ever allow the one trusted first-party origin; an
+				// arbitrary attacker Origin is not reflected and is granted no
+				// credentialed access.
+				const trusted = "https://app.corp.example"
+				if r.Header.Get("Origin") == trusted {
+					w.Header().Set("Access-Control-Allow-Origin", trusted)
+					w.Header().Set("Access-Control-Allow-Credentials", "true")
+				}
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, `{"user":"admin","email":"admin@corp.example","api_token":"sk_live_9f2a3c7b1e"}`)
+			}),
+		},
 	}
 }
 
