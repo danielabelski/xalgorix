@@ -22,6 +22,17 @@ import (
 	"strings"
 )
 
+// Auth carries per-account credential headers for an AUTHENTICATED challenge.
+// A is the primary session (role A) — auto-applied to the scan's requests; B is
+// a SECOND account (role B) the scanner uses to prove horizontal access-control
+// flaws (BOLA/IDOR/BFLA) by replaying role A's requests as role B. Both are
+// nil for a stateless, single-user challenge. The values are header name→value
+// (e.g. {"Authorization": "Bearer alice-token"}).
+type Auth struct {
+	A map[string]string
+	B map[string]string
+}
+
 // Challenge is one benchmark task: a self-contained, deliberately vulnerable web
 // app plus the finding a correct scan is expected to produce against it.
 type Challenge struct {
@@ -31,6 +42,12 @@ type Challenge struct {
 	Param    string       // the vulnerable parameter, when applicable
 	Desc     string       // one-line human description
 	Handler  http.Handler // the deliberately vulnerable app
+
+	// Auth seeds the scan with authenticated identities (role A, and optionally a
+	// second account role B) so a challenge can exercise real authorization
+	// flaws: the harness wires A as the scan's session and B as the matrix's
+	// comparison identity. Zero value = stateless/single-user challenge.
+	Auth Auth
 
 	// SourceFiles is the whitebox source tree for the app, as relative path →
 	// file content. When set, the harness materializes it to a temp directory
@@ -738,7 +755,116 @@ func Builtin() []Challenge {
 				_, _ = fmt.Fprintf(w, `<html><body><h1>Account settings</h1><p>Change the email on your account.</p><form action="/account/email" method="post"><input type="hidden" name="csrf_token" value="%s"><input name="email" type="email"><button>Save</button></form></body></html>`, csrfToken)
 			}),
 		},
+		{
+			// Authenticated BOLA (Broken Object Level Authorization): every order
+			// is readable by ANY logged-in user — the handler authenticates the
+			// caller but never checks the order belongs to them. Role A (alice)
+			// owns order 1001; role B (bob) owns 1002. The scan is seeded with
+			// BOTH sessions (Auth), so authz_matrix can replay a request for
+			// alice's own order (1001, surfaced on the index) as bob and see bob
+			// get alice's data. Anonymous is refused, so the ONLY flaw is the
+			// cross-account read. Class idor (BOLA canonicalizes to idor).
+			Name: "bola", Class: "idor", Endpoint: "/api/orders", Param: "id",
+			Desc: "Any authenticated user can read any order by id (no per-object ownership check).",
+			Auth: Auth{
+				A: map[string]string{"Authorization": "Bearer alice-token-a1"},
+				B: map[string]string{"Authorization": "Bearer bob-token-b2"},
+			},
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				const prefix = "/api/orders/"
+				if !strings.HasPrefix(r.URL.Path, prefix) {
+					// Index links the CALLER's own order so an authenticated crawl
+					// discovers a concrete object id to test cross-account.
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Your orders</h1><a href="/api/orders/1001">view your recent order #1001</a></body></html>`)
+					return
+				}
+				user := bolaUser(r)
+				if user == "" {
+					// No/unrecognized session — orders require authentication.
+					w.Header().Set("WWW-Authenticate", "Bearer")
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = fmt.Fprint(w, `{"error":"authentication required"}`)
+					return
+				}
+				id := strings.TrimPrefix(r.URL.Path, prefix)
+				if id == "" {
+					http.NotFound(w, r)
+					return
+				}
+				// VULNERABLE: any authenticated user gets any order — no check that
+				// the order's owner matches the caller, so bob reading order 1001
+				// (alice's) returns alice's data verbatim.
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"order_id":%q,"owner":%q,"total":"1240.00","card_last4":"4242"}`, id, orderOwner(id))
+			}),
+		},
+		{
+			// NEGATIVE CONTROL (idor/BOLA): the handler enforces per-object
+			// ownership — a logged-in user may read ONLY their own orders; another
+			// user's order returns 403. Replaying alice's request for 1001 as bob
+			// is denied, so a precise scanner reports nothing.
+			Name: "safe-bola", Class: "idor", Endpoint: "/api/orders", Param: "id", Negative: true,
+			Desc: "NEGATIVE CONTROL: orders enforce per-object ownership; other users' orders return 403 (no BOLA).",
+			Auth: Auth{
+				A: map[string]string{"Authorization": "Bearer alice-token-a1"},
+				B: map[string]string{"Authorization": "Bearer bob-token-b2"},
+			},
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				const prefix = "/api/orders/"
+				if !strings.HasPrefix(r.URL.Path, prefix) {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprint(w, `<html><body><h1>Your orders</h1><a href="/api/orders/1001">view your recent order #1001</a></body></html>`)
+					return
+				}
+				user := bolaUser(r)
+				if user == "" {
+					w.Header().Set("WWW-Authenticate", "Bearer")
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = fmt.Fprint(w, `{"error":"authentication required"}`)
+					return
+				}
+				id := strings.TrimPrefix(r.URL.Path, prefix)
+				if id == "" {
+					http.NotFound(w, r)
+					return
+				}
+				// SAFE: enforce ownership — only the order's owner may read it.
+				if orderOwner(id) != user {
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = fmt.Fprint(w, `{"error":"forbidden"}`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"order_id":%q,"owner":%q,"total":"1240.00","card_last4":"4242"}`, id, user)
+			}),
+		},
 	}
+}
+
+// bolaUser maps the Bearer token on a request to a user name for the BOLA
+// challenges, or "" when the request carries no recognized session.
+func bolaUser(r *http.Request) string {
+	switch strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer")) {
+	case "alice-token-a1":
+		return "alice"
+	case "bob-token-b2":
+		return "bob"
+	}
+	return ""
+}
+
+// orderOwner returns the owner of an order id for the BOLA challenges. Order
+// 1001 belongs to alice (role A) and 1002 to bob (role B); any other id maps to
+// a distinct synthetic user so it is never coincidentally the caller's.
+func orderOwner(id string) string {
+	switch id {
+	case "1001":
+		return "alice"
+	case "1002":
+		return "bob"
+	}
+	return "user-" + id
 }
 
 // hasXXEPayload reports whether an XML document declares an external entity that

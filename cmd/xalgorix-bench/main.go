@@ -72,7 +72,7 @@ func filterChallenges(all []bench.Challenge, csv string) []bench.Challenge {
 // and returns the findings it produced. Mirrors the production scan wiring
 // (internal/web/scan_session.go) minus the dashboard plumbing.
 func realScan(instruction string) bench.ScanFunc {
-	return func(ctx context.Context, target, sourceDir, scanID string) ([]reporting.Vulnerability, error) {
+	return func(ctx context.Context, target, sourceDir, scanID string, auth bench.Auth) ([]reporting.Vulnerability, error) {
 		cfg := config.Get()
 
 		scanDir := filepath.Join(os.TempDir(), "xalgorix-bench", scanID)
@@ -123,6 +123,18 @@ func realScan(instruction string) bench.ScanFunc {
 		ag := agent.NewAgent(cfg, "XalgorixBench", events, guard, sc)
 		ag.SetPhaseRestrictions(nil)
 		ag.SetActivityPolicy("active", "active", []string{target})
+		// Authenticated challenge: wire the seeded identities so the scan carries
+		// role A as its session and authz_matrix can replay requests as role B —
+		// the setup real BOLA/BFLA/IDOR proof needs (mirrors production's
+		// XALGORIX_TARGET_AUTH / _B). Stateless challenges pass an empty Auth.
+		if lines := headerLines(auth.A); lines != "" {
+			ag.SetTargetAuth(lines)
+			fmt.Fprintf(os.Stderr, "  [bench] %s → role A session seeded (%d header(s))\n", scanID, len(auth.A))
+		}
+		if lines := headerLines(auth.B); lines != "" {
+			ag.SetTargetAuthSecondary(lines)
+			fmt.Fprintf(os.Stderr, "  [bench] %s → role B (second account) seeded (%d header(s))\n", scanID, len(auth.B))
+		}
 		// Whitebox challenge: wire the materialized source tree so the scan can
 		// use the source-to-runtime bridge (auto-seed + scan_source_sinks/routes
 		// + probe_hypothesis), mirroring production's per-scan source repo.
@@ -193,6 +205,25 @@ func briefArgs(args map[string]string) string {
 		parts = append(parts, k+"="+truncate(v, 100))
 	}
 	return truncate(strings.Join(parts, " "), 300)
+}
+
+// headerLines renders credential headers as newline-joined "Name: value" lines
+// (sorted for determinism) — the format SetTargetAuth / SetTargetAuthSecondary
+// parse. Returns "" for an empty set.
+func headerLines(h map[string]string) string {
+	if len(h) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, k := range keys {
+		lines = append(lines, k+": "+h[k])
+	}
+	return strings.Join(lines, "\n")
 }
 
 // oneLine collapses whitespace/newlines so a multi-line value stays on one log

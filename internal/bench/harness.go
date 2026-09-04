@@ -16,7 +16,7 @@ import (
 // so the harness stays free of the heavy, non-hermetic agent machinery: the
 // real implementation (cmd/xalgorix-bench) drives the LLM agent and makes live
 // calls, while tests pass a deterministic fake.
-type ScanFunc func(ctx context.Context, target, sourceDir, scanID string) ([]reporting.Vulnerability, error)
+type ScanFunc func(ctx context.Context, target, sourceDir, scanID string, auth Auth) ([]reporting.Vulnerability, error)
 
 // DefaultChallengeTimeout bounds how long a single challenge scan may run. A
 // scan against a trivial challenge app should finish quickly; without a bound a
@@ -67,7 +67,7 @@ func runOne(parent context.Context, c Challenge, scan ScanFunc, timeout time.Dur
 
 	res := Result{Name: c.Name, Class: canonicalClass(c.Class), Negative: c.Negative}
 	start := time.Now()
-	findings, err := scan(ctx, srv.URL, sourceDir, "bench-"+c.Name)
+	findings, err := scan(ctx, srv.URL, sourceDir, "bench-"+c.Name, c.Auth)
 	res.Elapsed = time.Since(start)
 	res.Findings = len(findings)
 	if ctx.Err() == context.DeadlineExceeded {
