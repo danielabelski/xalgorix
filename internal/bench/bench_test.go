@@ -218,6 +218,12 @@ func TestNewBuiltinChallengesExhibitVuln(t *testing.T) {
 	if body := httpGet(t, ssti.URL+"/greet?name={{7*7}}"); !strings.Contains(body, "Hello, 49!") {
 		t.Fatalf("ssti did not evaluate the template expression: %q", body)
 	}
+	// ssti exposes ONLY the template-injection signal — a <script> payload is
+	// HTML-escaped, so there is no reflected-XSS red herring to pull a scanner
+	// off the SSTI onto the easier (browser-confirmable) XSS.
+	if body := httpGet(t, ssti.URL+"/greet?name=<script>alert(1)</script>"); strings.Contains(body, "<script>alert(1)</script>") {
+		t.Fatalf("ssti must HTML-escape name (no XSS red herring), got %q", body)
+	}
 
 	// lfi: path traversal to passwd returns fabricated passwd content.
 	lfi := challengeByName(t, "lfi").Start()
@@ -379,6 +385,10 @@ func TestWhiteboxSstiChallengeExhibitsVuln(t *testing.T) {
 	// A benign name is echoed literally, not evaluated.
 	if body := httpGet(t, srv.URL+"/internal/preview?name=alice"); !strings.Contains(body, "alice") || strings.Contains(body, "49") {
 		t.Fatalf("benign name must be echoed literally, not evaluated: %q", body)
+	}
+	// Exposes ONLY the SSTI signal — a <script> payload is HTML-escaped (no XSS red herring).
+	if body := httpGet(t, srv.URL+"/internal/preview?name=%3Cscript%3Ealert(1)%3C%2Fscript%3E"); strings.Contains(body, "<script>alert(1)</script>") {
+		t.Fatalf("whitebox-ssti must HTML-escape name (no XSS red herring), got %q", body)
 	}
 	// Health endpoint is benign.
 	if body := httpGet(t, srv.URL+"/healthz"); !strings.Contains(body, "ok") {
