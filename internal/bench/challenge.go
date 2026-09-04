@@ -784,9 +784,14 @@ var sstiExpr = regexp.MustCompile(`\{\{\s*(\d+)\s*\*\s*(\d+)\s*\}\}`)
 
 // sstiRender evaluates any {{ a * b }} expressions in s (returning the product),
 // simulating a template engine that evaluates attacker input — so the classic
-// {{7*7}} → 49 probe is confirmable.
+// {{7*7}} → 49 probe is confirmable. The input is HTML-escaped FIRST so the
+// challenge exposes ONLY its template-injection signal and not an accidental
+// reflected-XSS red herring (html.EscapeString leaves {, }, *, digits, and
+// spaces untouched, so a {{7*7}} payload still matches and evaluates, while any
+// injected markup like <script> is neutralized).
 func sstiRender(s string) string {
-	return sstiExpr.ReplaceAllStringFunc(s, func(m string) string {
+	escaped := html.EscapeString(s)
+	return sstiExpr.ReplaceAllStringFunc(escaped, func(m string) string {
 		parts := sstiExpr.FindStringSubmatch(m)
 		a, _ := strconv.Atoi(parts[1])
 		b, _ := strconv.Atoi(parts[2])
