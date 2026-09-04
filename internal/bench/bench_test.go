@@ -139,7 +139,7 @@ func TestSolved(t *testing.T) {
 func TestRunWithFakeScanFunc(t *testing.T) {
 	// Fake solves xss and idor, leaves open-redirect and error-sqli unsolved,
 	// and errors on nothing.
-	fake := func(_ context.Context, target, _, scanID string) ([]reporting.Vulnerability, error) {
+	fake := func(_ context.Context, target, _, scanID string, _ Auth) ([]reporting.Vulnerability, error) {
 		switch scanID {
 		case "bench-reflected-xss":
 			return []reporting.Vulnerability{{ID: "XALG-1", Title: "Reflected XSS in search", Endpoint: target + "/search"}}, nil
@@ -167,8 +167,13 @@ func TestRunWithFakeScanFunc(t *testing.T) {
 	// Each class now pairs its positive challenge(s) with a negative control.
 	// xss = reflected-xss (solved) + safe-search (clean) = 2/2. idor = idor
 	// (solved) + safe-idor (clean) = 2/2.
-	if byClass["xss"] != [2]int{2, 2} || byClass["idor"] != [2]int{2, 2} {
-		t.Fatalf("expected xss 2/2 and idor 2/2, got %v", byClass)
+	if byClass["xss"] != [2]int{2, 2} {
+		t.Fatalf("expected xss 2/2, got %v", byClass)
+	}
+	// idor = idor (solved) + bola (positive, unsolved by this fake) + safe-idor +
+	// safe-bola (both clean negatives) => 3/4.
+	if byClass["idor"] != [2]int{3, 4} {
+		t.Fatalf("expected idor 3/4, got %v", byClass["idor"])
 	}
 	// open_redirect and ssrf each have a positive (unsolved by this fake) plus a
 	// negative control (correctly clean) => 1/2.
@@ -243,7 +248,7 @@ func TestNewBuiltinChallengesExhibitVuln(t *testing.T) {
 func TestRunWithTimeoutMarksTimedOut(t *testing.T) {
 	// A scan that blocks past the per-challenge deadline is stopped and marked
 	// timed out (and, with no findings, not solved).
-	blocking := func(ctx context.Context, _, _, _ string) ([]reporting.Vulnerability, error) {
+	blocking := func(ctx context.Context, _, _, _ string, _ Auth) ([]reporting.Vulnerability, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -297,7 +302,7 @@ func TestWhiteboxChallengeExhibitsVuln(t *testing.T) {
 func TestHarnessMaterializesSourceFiles(t *testing.T) {
 	// Capture the sourceDir handed to each challenge's scan.
 	seen := map[string]string{}
-	fake := func(_ context.Context, _, sourceDir, scanID string) ([]reporting.Vulnerability, error) {
+	fake := func(_ context.Context, _, sourceDir, scanID string, _ Auth) ([]reporting.Vulnerability, error) {
 		seen[scanID] = sourceDir
 		// While the scan runs, each of the challenge's OWN declared source files
 		// must exist on disk (language-agnostic: app.py for Flask, app.js for
@@ -487,10 +492,12 @@ func TestBlackboxChallengesDiscoverable(t *testing.T) {
 			if !strings.Contains(body, c.Endpoint) {
 				t.Errorf("index must link endpoint %q so a crawler finds it; got %q", c.Endpoint, body)
 			}
-			// The IDOR challenges' object id is a path segment (/api/orders/1042),
-			// not a query parameter, so they are exempt from the param-name check
-			// (the index still links the object, exposing the surface).
-			if c.Name != "idor" && c.Name != "safe-idor" && c.Param != "" && !strings.Contains(body, c.Param) {
+			// The IDOR/BOLA challenges' object id is a path segment
+			// (/api/orders/1042), not a query parameter, so they are exempt from
+			// the param-name check (the index still links the object, exposing the
+			// surface).
+			pathIDChallenge := c.Name == "idor" || c.Name == "safe-idor" || c.Name == "bola" || c.Name == "safe-bola"
+			if !pathIDChallenge && c.Param != "" && !strings.Contains(body, c.Param) {
 				t.Errorf("index must expose parameter %q (form/link); got %q", c.Param, body)
 			}
 		})
@@ -502,7 +509,7 @@ func TestBlackboxChallengesDiscoverable(t *testing.T) {
 // counted), while reporting nothing keeps every negative control clean.
 func TestNegativeControlsScoring(t *testing.T) {
 	// A scan that (wrongly) reports XSS on the safe-search negative control.
-	fpFake := func(_ context.Context, target, _, scanID string) ([]reporting.Vulnerability, error) {
+	fpFake := func(_ context.Context, target, _, scanID string, _ Auth) ([]reporting.Vulnerability, error) {
 		if scanID == "bench-safe-search" {
 			return []reporting.Vulnerability{{ID: "XALG-9", Title: "Reflected XSS", CWE: "CWE-79", Endpoint: target + "/search"}}, nil
 		}
@@ -526,7 +533,7 @@ func TestNegativeControlsScoring(t *testing.T) {
 	}
 
 	// A scan that reports nothing keeps every negative control clean.
-	cleanFake := func(context.Context, string, string, string) ([]reporting.Vulnerability, error) {
+	cleanFake := func(context.Context, string, string, string, Auth) ([]reporting.Vulnerability, error) {
 		return nil, nil
 	}
 	clean := Run(context.Background(), Builtin(), cleanFake)
@@ -690,5 +697,76 @@ func TestCsrfChallengeExhibitsVuln(t *testing.T) {
 	status, resp := httpPostForm(t, csrf.URL+"/account/email", "email=attacker@evil.example")
 	if status != http.StatusOK || !strings.Contains(resp, "updated") {
 		t.Fatalf("csrf endpoint must accept a tokenless state change, got status=%d body=%q", status, resp)
+	}
+}
+
+// TestBOLAChallengeBehavior locks in the two-account authorization behavior of
+// the bola positive and safe-bola negative control: role B (bob) reading role
+// A's (alice's) object is the flaw, anonymous is always refused, and the
+// negative control enforces per-object ownership.
+func TestBOLAChallengeBehavior(t *testing.T) {
+	get := func(base, path, token string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, base+path, nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+
+	// Positive BOLA: bob (role B) reads alice's order 1001 and gets HER data.
+	bola := challengeByName(t, "bola").Start()
+	defer bola.Close()
+	if st, body := get(bola.URL, "/api/orders/1001", "bob-token-b2"); st != 200 || !strings.Contains(body, `"owner":"alice"`) {
+		t.Fatalf("bola: bob must read alice's order 1001; status=%d body=%q", st, body)
+	}
+	if st, _ := get(bola.URL, "/api/orders/1001", ""); st != http.StatusUnauthorized {
+		t.Fatalf("bola: anonymous must be 401, got %d", st)
+	}
+	if st, body := get(bola.URL, "/api/orders/1001", "alice-token-a1"); st != 200 || !strings.Contains(body, `"owner":"alice"`) {
+		t.Fatalf("bola: alice must read her own order 1001; status=%d body=%q", st, body)
+	}
+
+	// Negative control: per-object ownership is enforced — bob is denied alice's
+	// order, so there is no BOLA to report.
+	safe := challengeByName(t, "safe-bola").Start()
+	defer safe.Close()
+	if st, _ := get(safe.URL, "/api/orders/1001", "bob-token-b2"); st != http.StatusForbidden {
+		t.Fatalf("safe-bola: bob reading alice's order must be 403, got %d", st)
+	}
+	if st, body := get(safe.URL, "/api/orders/1001", "alice-token-a1"); st != 200 || !strings.Contains(body, `"owner":"alice"`) {
+		t.Fatalf("safe-bola: alice must read her own order; status=%d body=%q", st, body)
+	}
+	if st, _ := get(safe.URL, "/api/orders/1001", ""); st != http.StatusUnauthorized {
+		t.Fatalf("safe-bola: anonymous must be 401, got %d", st)
+	}
+}
+
+// TestHarnessPassesChallengeAuth verifies the harness plumbs a challenge's
+// seeded identities through to the ScanFunc, so an authenticated challenge's
+// role A / role B credentials actually reach the scan (and stateless challenges
+// pass an empty Auth).
+func TestHarnessPassesChallengeAuth(t *testing.T) {
+	seen := map[string]Auth{}
+	fake := func(_ context.Context, _, _, scanID string, auth Auth) ([]reporting.Vulnerability, error) {
+		seen[scanID] = auth
+		return nil, nil
+	}
+	Run(context.Background(), Builtin(), fake)
+
+	if a := seen["bench-bola"]; a.A["Authorization"] != "Bearer alice-token-a1" || a.B["Authorization"] != "Bearer bob-token-b2" {
+		t.Fatalf("bola challenge auth not passed to scan: %+v", a)
+	}
+	if s := seen["bench-reflected-xss"]; s.A != nil || s.B != nil {
+		t.Fatalf("stateless challenge must pass an empty Auth, got %+v", s)
 	}
 }
