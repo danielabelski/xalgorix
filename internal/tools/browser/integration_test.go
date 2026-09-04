@@ -2,6 +2,8 @@ package browser
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -574,5 +576,62 @@ func TestBrowserSnapshot_Full(t *testing.T) {
 	_, err = browserActionWithContext(ctxID, map[string]string{"command": "click", "selector": "@e2"})
 	if err != nil {
 		t.Fatalf("Semantic click failed: %v", err)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════
+// 3.10 verify_xss POST path (POST-based reflected XSS)
+// ═══════════════════════════════════════════════════════════
+
+// TestVerifyXSS_POST_Reflected exercises the POST path of verify_xss end-to-end
+// against a local endpoint that reflects the POSTed `q` parameter unescaped —
+// a POST-based reflected XSS. The endpoint reflects ONLY on POST (a GET yields a
+// benign page), so a pass proves the real form-POST navigation, not a GET
+// fallback. This is the exact shape that previously forced the agent to
+// hand-drive dozens of browser_action steps because verify_xss was GET-only.
+func TestVerifyXSS_POST_Reflected(t *testing.T) {
+	nonce := "XV-post-42"
+	payload := "<script>alert('" + nonce + "')</script>"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reflected := ""
+		if r.Method == http.MethodPost {
+			_ = r.ParseForm()
+			reflected = r.PostFormValue("q") // reflected unescaped, POST only
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, "<!doctype html><html><body>results for: %s</body></html>", reflected)
+	}))
+	defer srv.Close()
+
+	ctxID := "int-verifyxss-post"
+	sc := scanctx.New(ctxID, srv.URL)
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(ctxID)
+	launchCtx(t, ctxID, "")
+
+	res, err := browserActionWithContext(ctxID, map[string]string{
+		"command":   "verify_xss",
+		"url":       srv.URL + "/search",
+		"data":      "q=" + payload,
+		"nonce":     nonce,
+		"parameter": "q",
+	})
+	if err != nil {
+		t.Fatalf("verify_xss POST returned error: %v", err)
+	}
+	if ok, _ := res.Metadata["xss_confirmed"].(bool); !ok {
+		t.Fatalf("expected POST-reflected XSS to be confirmed; output=%q error=%q", res.Output, res.Error)
+	}
+	// The confirmation must be recorded as browser-origin exploit evidence so the
+	// reporting bridge can fold it into the finding.
+	found := false
+	for _, h := range sc.Ledger.All() {
+		if strings.EqualFold(h.VulnClass, "xss") && h.Origin == "verify_xss" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a verify_xss xss hypothesis in the ledger, got %d", sc.Ledger.Len())
 	}
 }
