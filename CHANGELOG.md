@@ -1,5 +1,15 @@
 # Changelog
 
+## [v4.6.47](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.47) — Benchmark: agent-event diagnostics + single-signal error-SQLi challenge (2026-09-03)
+
+### Changed
+- **The operator benchmark runner (`cmd/xalgorix-bench`) now logs the agent's tool calls, verifier/report outcomes, errors, and finish reason** instead of silently discarding every agent event. A failing challenge is now diagnosable end to end — you can see whether the agent discovered the route, which verifier ran, what proof it pasted, and why the reporting gate accepted or rejected the finding.
+
+### Fixed
+- **The error-based SQLi benchmark challenge no longer reflects its `id` parameter unescaped.** That unescaped reflection was an accidental reflected-XSS red herring that pulled the scanner off the SQL injection the challenge is meant to measure (a real run spent its whole budget chasing the reflection and never confirmed the SQLi). The `id` is now HTML-escaped in both the normal and the SQL-error response paths, so the only signal is the SQL syntax error on quote injection — one unambiguous vulnerability per challenge.
+
+Operator-only benchmark tooling; the shipped binary is unchanged (releases build only `./cmd/xalgorix`).
+
 ## [v4.6.46](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.46) — Browser-backed XSS detection: use system Chrome, stop dropping confirmed XSS (2026-09-03)
 
 ### Fixed

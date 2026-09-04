@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/xalgord/xalgorix/v4/internal/agent"
@@ -86,12 +87,34 @@ func realScan(instruction string) bench.ScanFunc {
 			reporting.CleanupContext(sc.ID)
 		}()
 
-		// Drain agent events so the agent never blocks on emit.
+		// Drain agent events. Logging the agent's tool calls, verifier/report
+		// outcomes, errors, and finish reason to stderr is what makes a failing
+		// challenge diagnosable — without it the run is a black box (only infra
+		// logs show). Kept compact (one line per event, args/outputs truncated)
+		// and prefixed with the scan id so a multi-challenge run stays readable.
 		events := make(chan agent.Event, 512)
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			for range events {
+			for ev := range events {
+				switch ev.Type {
+				case "tool_call":
+					fmt.Fprintf(os.Stderr, "  [ev %s] → %s %s\n", scanID, ev.ToolName, briefArgs(ev.ToolArgs))
+				case "tool_result":
+					if ev.ToolResult.Error != "" {
+						fmt.Fprintf(os.Stderr, "  [ev %s] ✗ %s: %s\n", scanID, ev.ToolName, truncate(oneLine(ev.ToolResult.Error), 240))
+					} else if isDiagResultTool(ev.ToolName) {
+						fmt.Fprintf(os.Stderr, "  [ev %s] ✓ %s: %s\n", scanID, ev.ToolName, truncate(oneLine(ev.ToolResult.Output), 240))
+					}
+				case "error":
+					fmt.Fprintf(os.Stderr, "  [ev %s] ERROR %s\n", scanID, truncate(oneLine(ev.Content), 240))
+				case "finished":
+					if ev.Aborted {
+						fmt.Fprintf(os.Stderr, "  [ev %s] FINISHED aborted=%s %s\n", scanID, ev.AbortReason, truncate(oneLine(ev.Content), 160))
+					} else {
+						fmt.Fprintf(os.Stderr, "  [ev %s] FINISHED %s\n", scanID, truncate(oneLine(ev.Content), 160))
+					}
+				}
 			}
 		}()
 
@@ -134,4 +157,55 @@ func realScan(instruction string) bench.ScanFunc {
 		}
 		return findings, nil
 	}
+}
+
+// isDiagResultTool reports whether a tool's successful result is worth logging
+// in full for diagnosis (verifiers, reporting, OOB polling, authz) — as opposed
+// to noisy recon output (curl/ffuf/nuclei) whose call args already tell the
+// story.
+func isDiagResultTool(name string) bool {
+	switch name {
+	case "verify_xss", "verify_sqli", "verify_ssti", "verify_oob",
+		"report_vulnerability", "oob_callback", "probe_hypothesis", "authz_matrix":
+		return true
+	}
+	return false
+}
+
+// briefArgs renders tool args as a compact, deterministic "k=v" list with each
+// value shortened, so a tool_call line shows what mattered (the URL, payload,
+// title, severity, …) without dumping large request bodies.
+func briefArgs(args map[string]string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		v := oneLine(args[k])
+		if v == "" {
+			continue
+		}
+		parts = append(parts, k+"="+truncate(v, 100))
+	}
+	return truncate(strings.Join(parts, " "), 300)
+}
+
+// oneLine collapses whitespace/newlines so a multi-line value stays on one log
+// line.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// truncate shortens s to at most n runes, appending an ellipsis when cut.
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }

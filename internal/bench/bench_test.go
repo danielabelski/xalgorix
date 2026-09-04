@@ -62,6 +62,16 @@ func TestBuiltinChallengesExhibitVuln(t *testing.T) {
 	if body := httpGet(t, sqli.URL+"/product?id=1'"); !strings.Contains(strings.ToLower(body), "sql syntax") {
 		t.Fatalf("error-sqli did not leak a SQL error: %q", body)
 	}
+	// error-sqli must expose ONLY the SQLi signal — no reflected-XSS red herring.
+	// The id is HTML-escaped in both the normal and the SQL-error path, so a
+	// <script> payload is never reflected raw (which would distract a scanner
+	// onto XSS instead of the SQL injection this challenge tests).
+	if body := httpGet(t, sqli.URL+"/product?id=<script>alert(1)</script>"); strings.Contains(body, "<script>alert(1)</script>") {
+		t.Fatalf("error-sqli must HTML-escape id (no XSS red herring), got %q", body)
+	}
+	if body := httpGet(t, sqli.URL+"/product?id='<script>alert(1)</script>"); strings.Contains(body, "<script>alert(1)</script>") {
+		t.Fatalf("error-sqli must HTML-escape id in the SQL-error path too, got %q", body)
+	}
 }
 
 func httpGet(t *testing.T, url string) string {

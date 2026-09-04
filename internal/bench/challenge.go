@@ -137,12 +137,17 @@ func Builtin() []Challenge {
 					return
 				}
 				id := r.URL.Query().Get("id")
+				// HTML-escape the reflected id in BOTH paths so this challenge
+				// exposes exactly one unambiguous signal — the SQL error on quote
+				// injection — and NOT an accidental reflected-XSS red herring that
+				// pulls a scanner off the SQLi it is meant to detect.
+				safeID := html.EscapeString(id)
 				if containsQuote(id) {
 					w.WriteHeader(http.StatusInternalServerError)
-					_, _ = fmt.Fprintf(w, "Database error: You have an error in your SQL syntax; check the manual near '%s' at line 1", id)
+					_, _ = fmt.Fprintf(w, "Database error: You have an error in your SQL syntax; check the manual near '%s' at line 1", safeID)
 					return
 				}
-				_, _ = fmt.Fprintf(w, "<html><body>Product #%s</body></html>", id)
+				_, _ = fmt.Fprintf(w, "<html><body>Product #%s</body></html>", safeID)
 			}),
 		},
 		{
