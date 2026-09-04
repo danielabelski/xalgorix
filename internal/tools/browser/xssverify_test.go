@@ -141,11 +141,62 @@ func TestVerifyXSSErrorPaths(t *testing.T) {
 	ctxID := "xss-err-" + t.Name()
 
 	// Missing nonce → corrective error, no browser needed.
-	if res, _ := verifyXSS(ctxID, "https://app/x", "", ""); res.Error == "" || !strings.Contains(res.Error, "nonce is required") {
+	if res, _ := verifyXSS(ctxID, "https://app/x", "", "", "", ""); res.Error == "" || !strings.Contains(res.Error, "nonce is required") {
 		t.Fatalf("expected nonce-required error, got %#v", res)
 	}
 	// Nonce present but no browser launched → clear "launch first" error.
-	if res, _ := verifyXSS(ctxID, "https://app/x", "XV-1", ""); res.Error == "" || !strings.Contains(res.Error, "browser not launched") {
+	if res, _ := verifyXSS(ctxID, "https://app/x", "XV-1", "", "", ""); res.Error == "" || !strings.Contains(res.Error, "browser not launched") {
 		t.Fatalf("expected browser-not-launched error, got %#v", res)
+	}
+}
+
+func TestParseFormBody(t *testing.T) {
+	// Order + duplicates preserved; empty pairs skipped; leading '?' tolerated.
+	got := parseFormBody("?a=1&b=2&a=3&&c=")
+	want := [][2]string{{"a", "1"}, {"b", "2"}, {"a", "3"}, {"c", ""}}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d pairs, got %d (%#v)", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pair %d: expected %v, got %v", i, want[i], got[i])
+		}
+	}
+
+	// A percent-encoded value is decoded once (so the browser re-encodes cleanly).
+	if got := parseFormBody("q=%3Cscript%3E"); len(got) != 1 || got[0] != [2]string{"q", "<script>"} {
+		t.Fatalf("expected single-decoded value, got %#v", got)
+	}
+
+	// A bare key with no '=' is a present-but-empty field.
+	if got := parseFormBody("flag"); len(got) != 1 || got[0] != [2]string{"flag", ""} {
+		t.Fatalf("expected bare key as empty-valued field, got %#v", got)
+	}
+
+	if got := parseFormBody("   "); got != nil {
+		t.Fatalf("expected nil for blank body, got %#v", got)
+	}
+}
+
+func TestBuildXSSFormHTMLPOST(t *testing.T) {
+	// The action and a payload carrying '<', '>', quotes must be HTML-escaped in
+	// the attribute context so the markup stays well-formed (the browser decodes
+	// the attribute back to the raw payload and URL-encodes it at submit).
+	h := buildXSSFormHTML("https://app/search", `q=<svg onload=alert('XV-1')>`)
+	for _, want := range []string{
+		`method="POST"`,
+		`action="https://app/search"`,
+		`id="xssverify"`,
+		`name="q"`,
+		`value="&lt;svg onload=alert(&#39;XV-1&#39;)&gt;"`,
+	} {
+		if !strings.Contains(h, want) {
+			t.Fatalf("expected form HTML to contain %q, got:\n%s", want, h)
+		}
+	}
+	// The raw, unescaped payload must NOT leak into the markup (that would break
+	// the attribute and change what gets submitted).
+	if strings.Contains(h, "<svg onload=") {
+		t.Fatalf("payload must be HTML-escaped in the attribute, got:\n%s", h)
 	}
 }

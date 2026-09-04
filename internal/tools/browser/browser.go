@@ -219,7 +219,7 @@ ACTIONS:
   new_tab      — Open a new browser tab
   switch_tab   — Switch between tabs
   close        — Close browser
-  verify_xss   — CONFIRM an XSS payload actually executes in the browser (proof of execution, not reflection). Navigate to a URL whose payload emits a unique nonce and pass nonce=<that value>; confirmed only if the nonce is observed executing. Three oracles are accepted: a JS dialog (alert/confirm/prompt('XV-8f3a')), a console call (console.log('XV-8f3a')) — useful when a filter strips alert — or a DOM marker (document.title='XV-8f3a' or window.name='XV-8f3a') for DOM-only sinks. Use before reporting XSS.
+  verify_xss   — CONFIRM an XSS payload actually executes in the browser (proof of execution, not reflection). Point it at a payload that emits a unique nonce and pass nonce=<that value>; confirmed only if the nonce is observed executing. Three oracles are accepted: a JS dialog (alert/confirm/prompt('XV-8f3a')), a console call (console.log('XV-8f3a')) — useful when a filter strips alert — or a DOM marker (document.title='XV-8f3a' or window.name='XV-8f3a') for DOM-only sinks. GET (default): pass url=<URL carrying the payload>. POST-reflected XSS: pass url=<form action> plus data=<urlencoded body, e.g. search=<payload>> (method defaults to POST when data is set) — this performs a real form POST and confirms in ONE call, so do NOT hand-build form submissions with browser_action. Use before reporting XSS.
 
 SIGNUP/LOGIN WORKFLOW:
   1. launch url=https://target.com/signup
@@ -240,6 +240,8 @@ SIGNUP/LOGIN WORKFLOW:
 			{Name: "code", Description: "JavaScript code to execute (for execute_js)", Required: false},
 			{Name: "nonce", Description: "Unique marker your XSS payload emits (for verify_xss) via a dialog (alert/confirm/prompt), console.log(), or a DOM marker (document.title / window.name). Execution is confirmed only if this nonce is observed executing.", Required: false},
 			{Name: "parameter", Description: "The injected parameter under test (for verify_xss), used to label the ledger hypothesis.", Required: false},
+			{Name: "data", Description: "Request body for POST-based verify_xss: a urlencoded form body like search=<payload>&x=1 (values are decoded once, then the browser re-encodes them at submit). Providing data makes verify_xss submit a real form POST to url and confirm POST-reflected XSS in one call.", Required: false},
+			{Name: "method", Description: "HTTP method for verify_xss: GET (default) navigates to url; POST (default when data is set) submits url as a form POST with body=data. Use POST for reflected XSS that only triggers on form submission.", Required: false},
 			{Name: "direction", Description: "Scroll direction: up or down (for scroll)", Required: false},
 			{Name: "tab_id", Description: "Tab ID (for switch_tab)", Required: false},
 			{Name: "proxy", Description: "Proxy: 'caido', 'none', or proxy URL", Required: false},
@@ -664,7 +666,7 @@ func browserActionWithContext(ctxID string, args map[string]string) (tools.Resul
 	case "close":
 		return closeBrowser(ctxID)
 	case "verify_xss":
-		return verifyXSS(ctxID, args["url"], args["nonce"], args["parameter"])
+		return verifyXSS(ctxID, args["url"], args["nonce"], args["parameter"], args["data"], args["method"])
 	default:
 		return tools.Result{}, fmt.Errorf("unknown browser action: %s. Available: launch, goto, snapshot, click, type, submit, scroll, screenshot, get_html, execute_js, get_cookies, set_cookie, save_session, load_session, list_sessions, wait, select, fill_form, get_url, iframe, main_frame, extract_links, new_tab, switch_tab, close, verify_xss", command)
 	}

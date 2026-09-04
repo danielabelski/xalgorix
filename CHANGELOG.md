@@ -1,6 +1,12 @@
 # Changelog
 
-## [v4.6.52](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.52) — verify_csrf completes the deterministic confirmer family (2026-09-03)
+## [v4.6.53](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.53) — verify_xss confirms POST-based reflected XSS in one call (2026-09-04)
+
+### Added
+- **`verify_xss` now confirms POST-based reflected XSS**, not just GET. Pass the form action as `url` and the request body as `data` (a urlencoded form body such as `search=<payload>`); `method` defaults to `POST` whenever `data` is present. The verifier stages a self-submitting, cross-origin form and lets the browser perform a real top-level POST navigation, so the response renders as a document and a POST-reflected payload actually executes — exactly as it would for a victim, which a `fetch()`/XHR can never reproduce. The execution oracle is unchanged (a dialog/console/DOM marker carrying the nonce), so the verdict stays proof-of-execution, and a confirmation records the same browser-origin CWE-79 evidence the reporting bridge already folds into findings.
+
+### Fixed
+- **Removed the biggest black-box budget sink on form-driven targets.** Because `verify_xss` was GET-only, a reflected XSS reachable only through a POST form could not be confirmed with the tool, so the agent hand-drove the confirmation with dozens of `browser_action` steps (and often hand-rolled scripts) — on one real target that single gap consumed the large majority of the scan's tool budget and still failed to produce an independently verified finding. POST-based reflected XSS now confirms in a single `verify_xss` call, returning that budget to broader probing and reporting.
 
 ### Added
 - **`verify_csrf`, a Cross-Site Request Forgery confirmer** — the last member of the deterministic verifier family (`verify_sqli` / `verify_ssti` / `verify_xss` / `verify_xxe` / `verify_oob`), so every common injectable or forgeable class now has a one-call path that records exploit-proven evidence. Given a URL (or ledger hypothesis) and the state-change body, it replays the request the way an attacker's page would — a forged `Origin`/`Referer` and no anti-CSRF token, reusing the scan session's cookies — and confirms CSRF when the server accepts it (2xx/3xx with no token/forbidden rejection). It records CWE-352 evidence in the ledger and does not auto-report. It is deliberately production-safe: it **declines** when the endpoint is protected by an `Authorization` header (Bearer/Basic), which a cross-site attacker's browser never attaches, so it will not false-positive on token-auth APIs. Same safety envelope as the other verifiers (internal-host scope check, request-rate gate, no redirect following, disabled in passive mode).
