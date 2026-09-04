@@ -8,10 +8,68 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	oobsrv "github.com/xalgord/xalgorix/v4/internal/oob"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
+
+// Consecutive empty polls per callback token are tracked so the tool can tell
+// the agent to STOP polling a dead callback and pivot to in-band confirmation.
+// Filtered egress is common on real targets, and unbounded OOB polling is a
+// recurring black-box budget sink (a real scan burned ~18 probes for zero
+// callbacks; a benchmark run polled a dead token repeatedly instead of
+// reporting). Keyed by token (unique per callback), reset when a hit finally
+// arrives, and bounded so a long-lived server process cannot grow it without
+// limit.
+var (
+	pollMu         sync.Mutex
+	emptyPollCount = map[string]int{}
+)
+
+const (
+	// First gentle "egress may be filtered, consider pivoting" hint.
+	emptyPollNudgeAt = 3
+	// Hard "stop polling, pivot now" directive.
+	emptyPollStopAt = 5
+	// Cap on distinct tracked tokens; cleared wholesale when exceeded (the
+	// counts are advisory, so dropping them is harmless).
+	emptyPollTokenCap = 512
+)
+
+// recordEmptyPoll increments and returns the consecutive-empty-poll count for a
+// token.
+func recordEmptyPoll(token string) int {
+	pollMu.Lock()
+	defer pollMu.Unlock()
+	if len(emptyPollCount) > emptyPollTokenCap {
+		emptyPollCount = map[string]int{}
+	}
+	emptyPollCount[token]++
+	return emptyPollCount[token]
+}
+
+// resetEmptyPoll clears the counter once a callback finally lands, so a later
+// dry spell on the same token is judged fresh.
+func resetEmptyPoll(token string) {
+	pollMu.Lock()
+	defer pollMu.Unlock()
+	delete(emptyPollCount, token)
+}
+
+// emptyPollGuidance returns escalating guidance appended to a no-interaction
+// poll result. It steers the agent off a dead callback and toward in-band
+// confirmation once polling has clearly stopped paying off.
+func emptyPollGuidance(consecutiveEmpty int) string {
+	switch {
+	case consecutiveEmpty >= emptyPollStopAt:
+		return fmt.Sprintf("\n\n🛑 STOP polling this callback — %d empty polls means the target almost certainly cannot reach the OAST oracle (filtered egress is common on real targets). Do NOT poll it again. Pivot now to IN-BAND confirmation: differential timing or error-based injection (verify_sqli), a reflected internal resource returned BY THE TARGET (e.g. 169.254.169.254 in the response body), or drop this blind lead and move to the next-ranked attack surface.", consecutiveEmpty)
+	case consecutiveEmpty >= emptyPollNudgeAt:
+		return fmt.Sprintf("\n\n⚠️ %d empty polls on this callback. Egress may be filtered. If you JUST planted the payload, wait briefly and poll once more; otherwise stop polling and pivot to in-band confirmation instead of waiting on a callback you may never get.", consecutiveEmpty)
+	default:
+		return ""
+	}
+}
 
 // Register adds the oob_callback tool to the registry.
 func Register(r *tools.Registry) {
@@ -60,8 +118,15 @@ When polling, HTTP interactions are labeled as scanner-origin, origin-unassessed
 		}
 		hits := oobsrv.Poll(token)
 		if len(hits) == 0 {
-			return tools.Result{Output: fmt.Sprintf("No OOB interactions for token %s yet. If you just sent the payload, wait a few seconds and poll again. No callback after several tries = the sink is not reaching us (not blind-exploitable via HTTP egress, or egress is filtered).", token)}, nil
+			consecutiveEmpty := recordEmptyPoll(token)
+			base := fmt.Sprintf("No OOB interactions for token %s yet. If you just sent the payload, wait a few seconds and poll again. No callback after several tries = the sink is not reaching us (not blind-exploitable via HTTP egress, or egress is filtered).", token)
+			return tools.Result{
+				Output:   base + emptyPollGuidance(consecutiveEmpty),
+				Metadata: map[string]any{"oob_hits": 0, "oob_token": token, "consecutive_empty_polls": consecutiveEmpty},
+			}, nil
 		}
+		// A callback finally arrived — clear the dry-spell counter for this token.
+		resetEmptyPoll(token)
 		var sb strings.Builder
 		scannerOriginHTTPCount := 0
 		dnsOnlyCount := 0
