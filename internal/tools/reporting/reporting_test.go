@@ -2166,6 +2166,9 @@ func TestReportVulnClass(t *testing.T) {
 		{"Server-Side Template Injection in name", "", "CWE-1336", "ssti"},
 		{"XXE in the import endpoint", "xml external entity", "CWE-611", "xxe"},
 		{"Reflected XSS in q", "", "CWE-79", "xss"},
+		{"IDOR on /api/orders exposes other users' data", "insecure direct object reference", "CWE-639", "idor"},
+		{"BOLA: any authenticated user reads any order", "broken object level authorization", "", "idor"},
+		{"Broken access control on /admin", "", "CWE-285", "idor"},
 		{"Open redirect in next", "", "CWE-601", ""},
 		{"Missing security header", "", "", ""},
 	}
@@ -2211,6 +2214,30 @@ func TestLedgerVerifierProof(t *testing.T) {
 	// Class isolation: a csrf confirmation must not answer an xxe query.
 	if got := ledgerVerifierProof(sc.ID, "xxe"); got != "" {
 		t.Fatalf("class isolation failed: answered an xxe query with %q", got)
+	}
+	// authz_matrix's HIGH-confidence BOLA/IDOR signal (a lower identity got the
+	// SAME successful response — its exploit summary says "broken access
+	// control") counts as an idor confirmation.
+	ha := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "role B can access /api/orders/1001", VulnClass: "idor", Endpoint: "/api/orders/1001", Origin: "authz_matrix"})
+	sc.Ledger.AddEvidence(ha.ID, scanctx.Evidence{Kind: "exploit", Summary: "role A → status 200, 88 bytes; role B (second account) got status 200 / 88 bytes for the same request — SAME successful response as the authorized identity — likely broken access control"})
+	if got := ledgerVerifierProof(sc.ID, "idor"); !strings.Contains(got, "broken access control") {
+		t.Fatalf("expected the authz_matrix broken-access confirmation, got %q", got)
+	}
+}
+
+// TestLedgerVerifierProof_AuthzMatrixWeakSignalIgnored ensures the authz_matrix
+// WEAK heuristic ("accessible while the baseline was not successful — verify")
+// is NOT treated as proof — that differential can simply be the other
+// identity's own object, so it must not auto-mark a finding exploit-proven.
+func TestLedgerVerifierProof_AuthzMatrixWeakSignalIgnored(t *testing.T) {
+	sc := scanctx.New("rep-authz-weak", "")
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(sc.ID)
+
+	hw := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "role B can access /api/orders/2002", VulnClass: "idor", Endpoint: "/api/orders/2002", Origin: "authz_matrix"})
+	sc.Ledger.AddEvidence(hw.ID, scanctx.Evidence{Kind: "exploit", Summary: "role A → status 403, 0 bytes; role B got status 200 / 90 bytes for the same request — accessible (2xx) while the authorized baseline was not successful — verify"})
+	if got := ledgerVerifierProof(sc.ID, "idor"); got != "" {
+		t.Fatalf("authz_matrix weak heuristic must NOT count as proof, got %q", got)
 	}
 }
 
@@ -2279,5 +2306,72 @@ func TestReportVuln_VerifierLedgerProofMarksExploitProven(t *testing.T) {
 	}
 	if strings.Contains(res.Output, "RECORDED as UNVERIFIED") {
 		t.Fatalf("must NOT flag manual review when a deterministic verifier confirmed it, got: %s", res.Output)
+	}
+}
+
+// TestReportVuln_AuthzMatrixIDORExploitProven is the integration guarantee for
+// BOLA/IDOR: an authz_matrix HIGH-confidence cross-identity confirmation in the
+// ledger makes the reported IDOR finding exploit-proven (Verified=true,
+// TagExploitProven) even when the independent LLM re-verifier is inconclusive
+// (routine — it has no second session to replay) — so a deterministically
+// confirmed BOLA is no longer buried under needs-manual-verification.
+func TestReportVuln_AuthzMatrixIDORExploitProven(t *testing.T) {
+	ctx := "authz-ledger-idor"
+	CleanupContext(ctx)
+	defer CleanupContext(ctx)
+
+	sc := scanctx.New(ctx, "https://example.com")
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(ctx)
+
+	h := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title:     "role B can access /api/orders/1001",
+		VulnClass: "idor",
+		Endpoint:  "/api/orders/1001",
+		Role:      "role-b",
+		Origin:    "authz_matrix",
+		Status:    scanctx.HypothesisTesting,
+	})
+	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
+		Kind:    "exploit",
+		Summary: "role A → status 200, 88 bytes; role B (second account) got status 200 / 88 bytes for the same request — SAME successful response as the authorized identity — likely broken access control",
+		AgentID: "authz_matrix",
+	})
+
+	// The independent verifier can't reproduce it (no second session on re-test).
+	SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+		return VerificationVerdict{Inconclusive: true, Reason: "no second session to replay"}
+	})
+
+	args := map[string]string{
+		"title":               "IDOR / BOLA on /api/orders/{id}",
+		"severity":            "high",
+		"description":         "Any authenticated user can read any order by id; a second account retrieved another user's order.",
+		"exploitation_proof":  "Replayed the order request as a second account (role B) and received another user's order data including card_last4 — identical to the owner's response.",
+		"verification_method": "data_extracted",
+		"impact":              "Horizontal access to any user's order and PII.",
+		"target":              "https://example.com",
+		"endpoint":            "https://example.com/api/orders/1001",
+		"method":              "GET",
+		"cwe_id":              "CWE-639",
+		"cvss":                "6.5",
+		"cvss_vector":         "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+	}
+	res, err := reportVulnWithContextID(ctx, args)
+	if err != nil {
+		t.Fatalf("report error: %v", err)
+	}
+	vulns := GetVulnerabilitiesForContext(ctx)
+	if len(vulns) != 1 {
+		t.Fatalf("expected 1 vuln persisted, got %d (%s)", len(vulns), res.Output)
+	}
+	if !vulns[0].Verified {
+		t.Fatalf("expected Verified=true from the authz_matrix ledger proof; tags=%v output=%s", vulns[0].Tags, res.Output)
+	}
+	if !containsTag(vulns[0].Tags, TagExploitProven) {
+		t.Fatalf("expected TagExploitProven from the authz_matrix confirmation, got tags=%v", vulns[0].Tags)
+	}
+	if strings.Contains(res.Output, "RECORDED as UNVERIFIED") {
+		t.Fatalf("must NOT flag manual review when authz_matrix confirmed it, got: %s", res.Output)
 	}
 }
