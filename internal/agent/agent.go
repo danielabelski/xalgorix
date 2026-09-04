@@ -414,6 +414,15 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// scope config, session auth, the scan target, and the ledger.
 	a.registerVerifySSTITool(reg)
 
+	// Register the deterministic XML External Entity confirmer (verify_xxe): the
+	// XXE sibling of verify_sqli/verify_ssti. Given a seeded hypothesis or a url,
+	// it POSTs a benign baseline XML plus a DOCTYPE/external-entity payload that
+	// reads a local file, and confirms injection when the file's contents appear
+	// in the probe response but not the baseline — recording exploit-proven
+	// evidence in the ledger. Agent-bound: needs the scope config, session auth,
+	// the scan target, and the ledger.
+	a.registerVerifyXXETool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests
