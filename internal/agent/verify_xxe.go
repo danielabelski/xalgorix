@@ -114,6 +114,11 @@ func (a *Agent) verifyXXETool(args map[string]string) (tools.Result, error) {
 
 	headers := a.probeAuthHeaders()
 	authed := len(headers) > 0
+	if headers == nil {
+		// probeAuthHeaders returns nil when the scan has no session; we still
+		// need a map to set the XML Content-Type without panicking.
+		headers = map[string]string{}
+	}
 	headers["Content-Type"] = contentType
 
 	// Benign baseline: a well-formed XML document with NO DOCTYPE / entity.
