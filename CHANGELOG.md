@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.56](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.56) — Verifier-confirmed findings report as exploit-proven, not "needs manual verification" (2026-09-04)
+
+### Fixed
+- **A finding a deterministic verifier already confirmed is now reported as exploit-proven instead of being flagged for manual review.** Each confirmer (`verify_sqli` / `verify_ssti` / `verify_xxe` / `verify_csrf` / `verify_xss`) records exploit-proven evidence in the scan ledger on a positive baseline-vs-probe differential, but only XSS had a bridge folding that proof into the report; every other class fell back to the independent LLM re-verifier, and whenever that was inconclusive (routine for CSRF and SSTI, which need cross-site/state or template context it lacks) the genuinely confirmed finding was stamped `Verified: false` / `needs-manual-verification` — undercutting the very confirmer that proved it. The report flow now recognizes a verify_*-recorded confirmation for the finding's class (matched by the verifier hypothesis origin, or by a `CONFIRMED` exploit-evidence summary so it survives ledger dedup merging the confirmation onto a prior probe hypothesis), folds it into the exploitation proof, and marks the finding exploit-proven. A positive **disproof** from the independent verifier still drops the finding, so this only rescues the inconclusive/absent-verifier case and cannot resurrect a false positive. This makes the whole confirmer family produce independently-evidenced, trustworthy findings end to end — the state a black-box user sees on the dashboard.
+
 ## [v4.6.55](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.55) — Stop polling dead OOB callbacks; pivot to in-band (2026-09-04)
 
 ### Changed

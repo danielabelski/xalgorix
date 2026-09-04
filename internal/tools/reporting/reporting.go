@@ -379,6 +379,28 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 		}
 	}
 
+	// ── Bridge: fold a deterministic verify_* confirmation from the ledger ──
+	// The verify_sqli / verify_ssti / verify_xxe / verify_csrf / verify_xss tools
+	// record exploit-proven evidence on a baseline-vs-probe differential (only on
+	// a positive confirmation). When such a confirmation exists for this
+	// finding's class, fold it into the proof and treat the finding as
+	// exploit-proven below. Without this, a deterministically confirmed bug is
+	// wrongly flagged "needs manual verification" whenever the slower LLM
+	// re-verifier cannot independently reproduce it (routinely the case for CSRF
+	// and SSTI) — undercutting the very confirmers that produced the proof. A
+	// positive DISPROOF from the independent verifier still drops the finding
+	// earlier, so this only rescues the inconclusive/absent-verifier case.
+	verifierProven := false
+	if cls := reportVulnClass(title, args["description"], args["cwe_id"]); cls != "" {
+		if vp := ledgerVerifierProof(contextID, cls); vp != "" {
+			verifierProven = true
+			if !strings.Contains(strings.ToLower(proof), strings.ToLower(vp)) {
+				proof = strings.TrimSpace(proof + "\n" + vp)
+				args["exploitation_proof"] = proof
+			}
+		}
+	}
+
 	if proof == "" {
 		for _, cand := range []string{args["description"], args["technical_analysis"], args["poc_description"]} {
 			if c := strings.TrimSpace(cand); len(c) >= 20 && HasConcreteImpact(c) {
@@ -620,8 +642,10 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// Does the agent's OWN proof contain a concrete, unambiguous exploitation
 	// outcome (command output like `uid=0(root)`, extracted DB rows, an OOB
 	// callback hit)? This is the STRICT bar (HasConcreteImpact), not the looser
-	// hasStrongEvidence — a stray Set-Cookie can't qualify.
-	exploitProven := HasConcreteImpact(proof)
+	// hasStrongEvidence — a stray Set-Cookie can't qualify. A deterministic
+	// verify_* confirmation recorded in the ledger (verifierProven) is equally
+	// concrete, independent proof, so it also qualifies.
+	exploitProven := HasConcreteImpact(proof) || verifierProven
 
 	// Verification tag: every finding carries exactly one, so the UI/report can
 	// show its confidence at a glance.
@@ -1070,6 +1094,72 @@ func ledgerBrowserXSSProof(contextID string) string {
 		for _, ev := range h.Evidence {
 			if strings.EqualFold(ev.Kind, "exploit") &&
 				strings.Contains(strings.ToLower(ev.Summary), "browser-confirmed xss") {
+				return ev.Summary
+			}
+		}
+	}
+	return ""
+}
+
+// reportVulnClass maps a finding (title/description/CWE) to the canonical
+// vuln-class string that the deterministic verifiers record on their ledger
+// hypotheses, or "" when the finding is not one of those classes. Used to fold
+// a verify_*-confirmed proof into the finding so it is judged on that
+// independent evidence.
+func reportVulnClass(title, description, cwe string) string {
+	lower := strings.ToLower(title + " " + description)
+	c := strings.ToLower(cwe)
+	switch {
+	case strings.Contains(lower, "csrf") || strings.Contains(lower, "cross-site request forgery") ||
+		strings.Contains(lower, "cross site request forgery") || strings.Contains(c, "352"):
+		return "csrf"
+	case strings.Contains(lower, "sql injection") || strings.Contains(lower, "sqli") || strings.Contains(c, "89"):
+		return "sqli"
+	case strings.Contains(lower, "template injection") || strings.Contains(lower, "ssti") || strings.Contains(c, "1336"):
+		return "ssti"
+	case strings.Contains(lower, "xxe") || strings.Contains(lower, "xml external entity") || strings.Contains(c, "611"):
+		return "xxe"
+	case strings.Contains(lower, "xss") || strings.Contains(lower, "cross-site script") ||
+		strings.Contains(lower, "cross site script") || strings.Contains(c, "79"):
+		return "xss"
+	}
+	return ""
+}
+
+// ledgerVerifierProof returns the confirmation summary recorded by a
+// deterministic verify_* tool for a finding of the given class in this scan's
+// ledger, or "". The verifiers (verify_sqli / verify_ssti / verify_xxe /
+// verify_csrf / verify_xss) record an "exploit" evidence ONLY when they
+// positively confirm a vuln via a baseline-vs-probe differential (they return
+// early on a non-confirmation, before writing any evidence), so the presence of
+// such evidence is authoritative, independent proof of exploitation. This
+// generalizes ledgerBrowserXSSProof (which stays for the XSS-specific proof
+// fold) to every verifier class, so a deterministically confirmed finding is
+// judged exploit-proven instead of being buried under "manual verification
+// needed" just because the LLM re-verifier could not reproduce it.
+func ledgerVerifierProof(contextID, class string) string {
+	if class == "" {
+		return ""
+	}
+	sc := scanctx.Get(contextID)
+	if sc == nil || sc.Ledger == nil {
+		return ""
+	}
+	for _, h := range sc.Ledger.All() {
+		if !strings.EqualFold(h.VulnClass, class) {
+			continue
+		}
+		// A verify_* tool authored this hypothesis, OR (robust to ledger dedup
+		// merging a verifier confirmation onto a pre-existing probe hypothesis,
+		// which can retain the probe's origin) an exploit evidence carries a
+		// verifier confirmation. Every verifier writes "CONFIRMED"/"confirmed"
+		// into its exploit-evidence summary only on a positive differential.
+		verifierOrigin := strings.HasPrefix(strings.ToLower(h.Origin), "verify_")
+		for _, ev := range h.Evidence {
+			if !strings.EqualFold(ev.Kind, "exploit") || strings.TrimSpace(ev.Summary) == "" {
+				continue
+			}
+			if verifierOrigin || strings.Contains(strings.ToLower(ev.Summary), "confirmed") {
 				return ev.Summary
 			}
 		}
