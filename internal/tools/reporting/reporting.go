@@ -1122,6 +1122,13 @@ func reportVulnClass(title, description, cwe string) string {
 	case strings.Contains(lower, "xss") || strings.Contains(lower, "cross-site script") ||
 		strings.Contains(lower, "cross site script") || strings.Contains(c, "79"):
 		return "xss"
+	case strings.Contains(lower, "idor") || strings.Contains(lower, "insecure direct object") ||
+		strings.Contains(lower, "bola") || strings.Contains(lower, "broken object level") ||
+		strings.Contains(lower, "bfla") || strings.Contains(lower, "broken function level") ||
+		strings.Contains(lower, "broken access control") ||
+		strings.Contains(c, "639") || strings.Contains(c, "862") || strings.Contains(c, "863") ||
+		strings.Contains(c, "566") || strings.Contains(c, "285") || strings.Contains(c, "284"):
+		return "idor"
 	}
 	return ""
 }
@@ -1155,11 +1162,22 @@ func ledgerVerifierProof(contextID, class string) string {
 		// verifier confirmation. Every verifier writes "CONFIRMED"/"confirmed"
 		// into its exploit-evidence summary only on a positive differential.
 		verifierOrigin := strings.HasPrefix(strings.ToLower(h.Origin), "verify_")
+		authzOrigin := strings.EqualFold(h.Origin, "authz_matrix")
 		for _, ev := range h.Evidence {
 			if !strings.EqualFold(ev.Kind, "exploit") || strings.TrimSpace(ev.Summary) == "" {
 				continue
 			}
-			if verifierOrigin || strings.Contains(strings.ToLower(ev.Summary), "confirmed") {
+			s := strings.ToLower(ev.Summary)
+			switch {
+			case verifierOrigin, strings.Contains(s, "confirmed"):
+				return ev.Summary
+			case authzOrigin && strings.Contains(s, "broken access control"):
+				// authz_matrix's HIGH-confidence signal only: a lower identity got
+				// the SAME successful response as the authorized baseline (its
+				// exploit summary says "broken access control"). Its weaker
+				// heuristic ("accessible while the baseline was not successful —
+				// verify") is deliberately NOT treated as proof, because that can
+				// simply be the other identity's own object.
 				return ev.Summary
 			}
 		}

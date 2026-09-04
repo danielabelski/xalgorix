@@ -1124,6 +1124,7 @@ for param in ssrf_params:
 ---
 
 ### PHASE 8: IDOR & Broken Access Control
+- **CONFIRM with authz_matrix FIRST.** The moment you find an object-id parameter (e.g. /api/orders/1042), a numeric/UUID resource id, or ANY authenticated endpoint, call authz_matrix url=<that resource> — it replays your exact request as a SECOND account (if one is configured) and as anonymous, then records the cross-identity access differential as exploit-proven ledger evidence you can report the very next turn. A lower identity getting the SAME successful response as the authorized one = broken object-level authorization (BOLA/IDOR); anonymous reaching a protected resource = auth bypass/BFLA. Do NOT hand-roll multi-account curl comparisons when authz_matrix confirms it in one call, and report as CWE-639 using that differential as proof.
 - Test all authenticated endpoints with different user IDs
 - Increment/decrement numeric IDs: /api/user/1, /api/user/2, /api/user/0
 - Test UUID prediction and enumeration
@@ -1290,9 +1291,9 @@ For EVERY potential vulnerability found in previous phases:
 - Blind — no in-band signal → verify_oob (confirm via an out-of-band callback)
 - SSRF: Trigger callback or read internal metadata (169.254.169.254)
 - RCE: Execute ` + "`" + `id` + "`" + ` or ` + "`" + `whoami` + "`" + `, show output
-- IDOR: Access another user's data, show the response
+- IDOR/BOLA → authz_matrix (replays the request as a second account/anonymous and records the cross-identity differential; a lower identity getting the SAME successful response is broken object-level authorization); report CWE-639 and show the other user's data
 - LFI: Read /etc/passwd, then call report_vulnerability immediately with that response body as proof (there is no verifier for LFI — an in-band /etc/passwd body is already sufficient)
-- Auth bypass: Access protected resource without creds
+- Auth bypass/BFLA → authz_matrix with the anonymous/low-privilege identity reaching a resource that should be restricted (a 2xx there is the proof)
 
 **Step 3: Self-critique** — Before reporting, ask:
 1. "Did I actually exploit this, or just detect it?"
