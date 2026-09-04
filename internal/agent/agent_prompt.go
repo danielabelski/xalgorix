@@ -1046,8 +1046,8 @@ for payload, sqli_type in sqli_payloads:
         print(f"Error: {e}")
 ` + "`" + `
 
-#### Step 6C: Automated Scanner (ONLY after manual confirmation)
-**Use sqlmap/dalfox ONLY on parameters that showed vulnerability indicators in Steps 6A/6B.**
+#### Step 6C: Confirm with a one-call verifier FIRST — scanners are only a fallback
+**The moment a parameter shows a class signal in Steps 6A/6B, call the matching deterministic verifier before reaching for a scanner:** verify_sqli (a provoked SQL error), verify_ssti (a {{a*b}} that returns its product), verify_xss (a nonce that actually executes — pass data=<urlencoded body> for a POST parameter), verify_xxe (an XML endpoint that expands a SYSTEM file:// entity), verify_csrf (a state change accepted from a forged cross-site origin with no token). Each is a single call, records exploit-proven ledger evidence, and lets you report the very next turn. **Use sqlmap/dalfox ONLY as the fallback when a verifier cannot confirm, and ONLY on parameters that showed indicators in Steps 6A/6B** — never blindly across all URLs.
 
 ` + "`" + `bash` + "`" + `
 # SQLi — ONLY on URLs where manual testing showed SQL errors or time delays
@@ -1283,13 +1283,15 @@ For EVERY potential vulnerability found in previous phases:
 - Open redirect without chaining = INFO
 - Version disclosure without CVE exploit = INFO
 
-**Step 2: Exploit it safely** — Produce concrete proof:
-- SQLi: Extract actual data (sqlmap --dump) or confirm with time-based (SLEEP)
-- XSS: curl the URL with payload, grep for reflected payload in response
+**Step 2: Exploit it safely** — Produce concrete proof. When the class has a one-call deterministic verifier, run it FIRST: it sends its own baseline+probe, renders a verdict, and records exploit-proven ledger evidence you can report the next turn — sqlmap/manual PoC is only the fallback when the verifier cannot confirm.
+- SQLi → verify_sqli (records the provoked DBMS error as proof); fallback: sqlmap --dump or time-based SLEEP
+- Reflected/DOM XSS → verify_xss (a nonce that actually executes in the browser; for a POST parameter pass data=<urlencoded body>); fallback: curl + grep the reflection
+- SSTI → verify_ssti ({{a*b}} evaluates to its product) · XXE → verify_xxe (a SYSTEM file:// entity returns the file) · CSRF → verify_csrf (a state change accepted from a forged cross-site origin with no token)
+- Blind — no in-band signal → verify_oob (confirm via an out-of-band callback)
 - SSRF: Trigger callback or read internal metadata (169.254.169.254)
 - RCE: Execute ` + "`" + `id` + "`" + ` or ` + "`" + `whoami` + "`" + `, show output
 - IDOR: Access another user's data, show the response
-- LFI: Read /etc/passwd, show contents
+- LFI: Read /etc/passwd, then call report_vulnerability immediately with that response body as proof (there is no verifier for LFI — an in-band /etc/passwd body is already sufficient)
 - Auth bypass: Access protected resource without creds
 
 **Step 3: Self-critique** — Before reporting, ask:
