@@ -1,5 +1,10 @@
 # Changelog
 
+## [v4.6.51](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.51) — Stop wasting scan turns on malformed update_plan calls (2026-09-03)
+
+### Fixed
+- **`update_plan` no longer rejects calls that omit `task_id` or `status`** — a shape models emit often, where each rejection previously burned a whole scan iteration on a "missing required parameter" error (a single benchmark run wasted ~13 turns this way, budget that then never reached detection and reporting). Plan status is advisory bookkeeping that never gates a finding, so the tool now infers safely: an omitted `status` defaults to `active`, and an omitted `task_id` applies to the single currently-active task (or the next pending task when marking one active), asking for an explicit id only when genuinely ambiguous. The status vocabulary is also more forgiving (`in_progress`, `done`, `n/a`, …). This returns wasted turns to actual detection on every scan — including black-box, where the agent's turn budget is the main constraint.
+
 ## [v4.6.50](https://github.com/xalgorix/xalgorix/releases/tag/v4.6.50) — verify_xxe: a deterministic XML External Entity confirmer (2026-09-03)
 
 ### Added

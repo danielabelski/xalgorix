@@ -65,8 +65,8 @@ func (a *Agent) registerPlanTools(reg *tools.Registry) {
 			"evidence, so you only need this for tasks it can't infer (e.g. ruling a class " +
 			"not-applicable).",
 		Parameters: []tools.Parameter{
-			{Name: "task_id", Description: "The task id from build_plan", Required: true},
-			{Name: "status", Description: "One of: active, completed, skipped", Required: true},
+			{Name: "task_id", Description: "The task id from build_plan. If omitted, the single currently-active task is updated (or, when marking one active, the next pending task).", Required: false},
+			{Name: "status", Description: "One of: active, completed, skipped (default: active).", Required: false},
 			{Name: "notes", Description: "Optional rationale / finding reference", Required: false},
 		},
 		Execute: a.updatePlanTool,
@@ -144,12 +144,28 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 	id := strings.TrimSpace(args["task_id"])
 	status := strings.ToLower(strings.TrimSpace(args["status"]))
 	notes := strings.TrimSpace(args["notes"])
-	if id == "" {
-		return tools.Result{Error: "task_id is required"}, nil
-	}
+
 	plan := a.state.Plan
 	if plan == nil || plan.IsEmpty() {
 		return tools.Result{Error: "no plan exists yet — call build_plan first"}, nil
+	}
+
+	// Tolerate the two malformed shapes models emit most — each otherwise burns a
+	// whole iteration on a "missing required parameter" rejection, and plan status
+	// is advisory bookkeeping that never gates a finding, so inferring is safe:
+	//   - status omitted  → "active" (the common intent: the task is being started).
+	//   - task_id omitted → the single currently-active task when unambiguous (the
+	//                       agent is almost always updating what it is on), else the
+	//                       next pending task when marking one active.
+	if status == "" {
+		status = "active"
+	}
+	if id == "" {
+		if inferred := inferPlanTaskID(plan, status); inferred != "" {
+			id = inferred
+		} else {
+			return tools.Result{Error: fmt.Sprintf("task_id is required — current task ids: %s", planIDList(plan))}, nil
+		}
 	}
 	t := plan.Get(id)
 	if t == nil {
@@ -157,11 +173,11 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 	}
 	var st TaskStatus
 	switch status {
-	case "active":
+	case "active", "in_progress", "in-progress", "inprogress", "started", "start", "working", "doing":
 		st = TaskActive
-	case "completed", "complete", "done":
+	case "completed", "complete", "done", "finished", "covered":
 		st = TaskCompleted
-	case "skipped", "skip", "n/a", "na", "not-applicable":
+	case "skipped", "skip", "n/a", "na", "not-applicable", "not_applicable", "notapplicable":
 		st = TaskSkipped
 	default:
 		return tools.Result{Error: "status must be one of: active, completed, skipped (got " + args["status"] + ")"}, nil
@@ -176,6 +192,35 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 	}
 	pending, active, completed, skipped := plan.Counts()
 	return tools.Result{Output: fmt.Sprintf("Task %q → %s. Plan: %d pending, %d active, %d completed, %d skipped (%d%% complete).", id, st, pending, active, completed, skipped, plan.ProgressPct())}, nil
+}
+
+// inferPlanTaskID picks the task an update_plan call with no task_id most likely
+// means: the single task currently active (the agent is updating what it is
+// working on) or — when marking something active with none active yet — the next
+// pending task. Returns "" when the choice is ambiguous, so the caller can ask
+// for an explicit id.
+func inferPlanTaskID(plan *Plan, status string) string {
+	if plan == nil {
+		return ""
+	}
+	var active []*Task
+	for _, t := range plan.Tasks {
+		if t.Status == TaskActive {
+			active = append(active, t)
+		}
+	}
+	if len(active) == 1 {
+		return active[0].ID
+	}
+	if len(active) == 0 {
+		switch status {
+		case "active", "in_progress", "in-progress", "inprogress", "started", "start", "working", "doing":
+			if next := plan.NextTasks(1); len(next) == 1 {
+				return next[0].ID
+			}
+		}
+	}
+	return ""
 }
 
 // clampPhase forces a phase into the 1-22 methodology range.
