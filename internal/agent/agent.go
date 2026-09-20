@@ -303,6 +303,10 @@ func delegatedAgentOptions(ctx context.Context, graph *agentsgraph.Graph, budget
 // letting the per-scan resolver injection skip building a separate
 // constructor.
 func NewAgent(cfg *config.Config, name string, events chan Event, localGuard scopeguard.Config, scOrOpts ...any) *Agent {
+	if cfg == nil {
+		cfg = config.Get()
+	}
+
 	// Fix Python httpx interfering with ProjectDiscovery httpx
 	fixHttpxConflict()
 
@@ -382,7 +386,7 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 		scanContext:  cfg.ScanContext,
 		children:     make(map[*Agent]struct{}),
 	}
-	if cfg != nil && cfg.IterationDelaySec > 0 {
+	if cfg.IterationDelaySec > 0 {
 		a.iterationDelayMs.Store(int64(cfg.IterationDelaySec * 1000))
 	}
 

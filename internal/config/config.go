@@ -98,7 +98,7 @@ type Config struct {
 	legacyCWD      string // Captured os.Getwd() at config load time. Used only by the migration warning.
 	DisableBrowser bool   // XALGORIX_DISABLE_BROWSER
 	MaxIterations  int    // XALGORIX_MAX_ITERATIONS — 0 = unlimited
-	MinIterations  int     // XALGORIX_MIN_ITERATIONS — minimum testing floor (default 50)
+	MinIterations  int    // XALGORIX_MIN_ITERATIONS — minimum testing floor (default 50)
 	// IterationDelaySec optionally pauses (in seconds) between agent reasoning
 	// iterations to pace LLM request velocity and conserve provider rolling-window
 	// quotas. 0 = disabled (default). XALGORIX_ITERATION_DELAY.
