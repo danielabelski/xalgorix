@@ -143,6 +143,7 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_MAX_WILDCARD_SUBDOMAINS", Label: "Wildcard subdomain cap", Category: "Runtime", Description: "Optional maximum full LLM sessions expanded from one wildcard target. Default -1 means unlimited; set a positive value only for an explicit emergency resource cap.", DefaultValue: "-1", InputType: "number"},
 		{Key: "XALGORIX_MAX_FINISH_REJECTIONS", Label: "Max finish rejections", Category: "Runtime", Description: "Number of times the agent's finish call will be rejected by the gatekeeper before allowing a deadlock bypass, enforcing deeper testing coverage.", DefaultValue: "15", InputType: "number"},
 		{Key: "XALGORIX_MAX_CONCURRENT_AGENTS", Label: "Max concurrent subagents", Category: "Runtime", Description: "Maximum delegated specialist subagents executing simultaneously per scan. Set to 1 to run specialists serially one at a time. Default 3.", DefaultValue: "3", InputType: "number", RequiresRestart: true},
+		{Key: "XALGORIX_ITERATION_DELAY", Label: "Iteration delay (seconds)", Category: "Runtime", Description: "Pause in seconds between agent reasoning iterations. Paces LLM request velocity to stay within rolling-window provider rate limits. 0 disables delay (default). Takes effect immediately.", DefaultValue: "0", InputType: "number"},
 		{Key: "XALGORIX_MAX_TOOL_CALLS", Label: "Max tool calls (budget)", Category: "Runtime", Description: "Per-scan tool-call cap; the scan stops cleanly when reached (findings preserved). 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_DURATION", Label: "Max duration seconds (budget)", Category: "Runtime", Description: "Per-scan wall-clock cap in seconds; the scan stops cleanly when reached. 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_TOKENS", Label: "Max LLM tokens (budget)", Category: "Runtime", Description: "Per-scan total-token cap; the scan stops cleanly when reached. 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
@@ -774,6 +775,16 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.MaxIterations = parseIntSetting(value, 0)
 		case "XALGORIX_MIN_ITERATIONS":
 			s.cfg.MinIterations = parseIntSetting(value, 50)
+		case "XALGORIX_ITERATION_DELAY":
+			delay := parseFloatSetting(value, 0)
+			s.cfg.IterationDelaySec = delay
+			s.mu.Lock()
+			for _, agnt := range s.currentAgents {
+				if agnt != nil {
+					agnt.SetIterationDelay(delay)
+				}
+			}
+			s.mu.Unlock()
 		case "XALGORIX_MAX_WILDCARD_SUBDOMAINS":
 			s.cfg.MaxWildcardSubdomains = parseIntSetting(value, -1)
 		case "XALGORIX_NO_TOOL_ABORT_AT":
@@ -906,6 +917,8 @@ func (s *Server) envSettingValue(key string) string {
 		return strconv.Itoa(s.cfg.MaxIterations)
 	case "XALGORIX_MIN_ITERATIONS":
 		return strconv.Itoa(s.cfg.MinIterations)
+	case "XALGORIX_ITERATION_DELAY":
+		return strconv.FormatFloat(s.cfg.IterationDelaySec, 'g', -1, 64)
 	case "XALGORIX_MAX_WILDCARD_SUBDOMAINS":
 		return strconv.Itoa(s.cfg.MaxWildcardSubdomains)
 	case "XALGORIX_NO_TOOL_ABORT_AT":
@@ -1105,6 +1118,14 @@ func normalizeEnvSettingValue(def envSettingDefinition, value string) (string, e
 		return strconv.Itoa(clampInt(parseIntSetting(value, 15), 1, 100)), nil
 	case "XALGORIX_MAX_CONCURRENT_AGENTS":
 		return strconv.Itoa(clampInt(parseIntSetting(value, 3), 1, 10)), nil
+	case "XALGORIX_ITERATION_DELAY":
+		d := parseFloatSetting(value, 0)
+		if d < 0 {
+			d = 0
+		} else if d > 300 {
+			d = 300
+		}
+		return strconv.FormatFloat(d, 'g', -1, 64), nil
 	}
 	return value, nil
 }

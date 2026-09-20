@@ -136,6 +136,9 @@ type Agent struct {
 	events                     chan Event
 	maxIter                    int
 	stopped                    atomic.Bool
+	iterationDelayMs           atomic.Int64
+	childrenMu                 sync.Mutex
+	children                   map[*Agent]struct{}
 	ctx                        context.Context
 	cancel                     context.CancelFunc
 	lastActivity               time.Time
@@ -377,6 +380,10 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 		targetAuthB:  cfg.TargetAuthSecondary,
 		sourceRepo:   cfg.SourceRepo,
 		scanContext:  cfg.ScanContext,
+		children:     make(map[*Agent]struct{}),
+	}
+	if cfg != nil && cfg.IterationDelaySec > 0 {
+		a.iterationDelayMs.Store(int64(cfg.IterationDelaySec * 1000))
 	}
 
 	// Apply per-call AgentOption values (e.g. WithLLMClient). Options
@@ -497,6 +504,8 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 				subArgs = append(subArgs, WithLLMClient(a.client.Clone()))
 			}
 			subAgent := NewAgent(cfg, subName, subEvents, a.localGuard, subArgs...)
+			a.registerChildAgent(subAgent)
+			defer a.unregisterChildAgent(subAgent)
 			subAgent.SetPhaseRestrictions(a.allowedPhases)
 			subAgent.SetActivityPolicy(a.reconMode, a.scanIntensity, a.activityHosts)
 			subAgent.SetTargetAuth(a.targetAuth)
@@ -1679,7 +1688,18 @@ func (a *Agent) Run(targets []string, instruction string) {
 		if a.shouldPruneBeforeLLM() {
 			a.pruneMessages()
 		}
-		// ZERO DELAY — immediately proceed to next iteration
+		// Optional iteration delay to pace LLM request velocity and conserve provider rolling-window quotas.
+		if delay := a.getIterationDelay(); delay > 0 && !a.stopped.Load() && (a.maxIter == 0 || iter+1 < a.maxIter) {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-a.ctx.Done():
+				timer.Stop()
+			}
+			if a.stopped.Load() || (a.ctx != nil && a.ctx.Err() != nil) {
+				break
+			}
+		}
 	}
 
 	// The loop exited. Report the ACTUAL termination reason instead of always
@@ -1920,6 +1940,61 @@ func (a *Agent) SetInitialIteration(iter int) {
 // SetResumeBriefing sets a briefing summarizing prior state when resuming a scan. Call before Run().
 func (a *Agent) SetResumeBriefing(s string) {
 	a.resumeBriefing = strings.TrimSpace(s)
+}
+
+func (a *Agent) getIterationDelay() time.Duration {
+	if a == nil {
+		return 0
+	}
+	if ms := a.iterationDelayMs.Load(); ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	if a.cfg != nil && a.cfg.IterationDelaySec > 0 {
+		return time.Duration(a.cfg.IterationDelaySec * float64(time.Second))
+	}
+	return 0
+}
+
+// SetIterationDelay dynamically updates the iteration delay in seconds.
+// It updates the agent's internal delay, its configuration, and recursively propagates
+// to any active child/subagent runners.
+func (a *Agent) SetIterationDelay(delaySec float64) {
+	if a == nil {
+		return
+	}
+	if delaySec < 0 {
+		delaySec = 0
+	}
+	a.iterationDelayMs.Store(int64(delaySec * 1000))
+	if a.cfg != nil {
+		a.cfg.IterationDelaySec = delaySec
+	}
+	a.childrenMu.Lock()
+	for child := range a.children {
+		child.SetIterationDelay(delaySec)
+	}
+	a.childrenMu.Unlock()
+}
+
+func (a *Agent) registerChildAgent(child *Agent) {
+	if a == nil || child == nil {
+		return
+	}
+	a.childrenMu.Lock()
+	if a.children == nil {
+		a.children = make(map[*Agent]struct{})
+	}
+	a.children[child] = struct{}{}
+	a.childrenMu.Unlock()
+}
+
+func (a *Agent) unregisterChildAgent(child *Agent) {
+	if a == nil || child == nil {
+		return
+	}
+	a.childrenMu.Lock()
+	delete(a.children, child)
+	a.childrenMu.Unlock()
 }
 
 // prepareScanEnvironment wires per-scan authenticated-session credentials and

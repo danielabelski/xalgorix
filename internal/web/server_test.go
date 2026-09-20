@@ -2261,7 +2261,7 @@ func TestEnvironmentSettings_RejectsUnknownAndUpdatesRuntime(t *testing.T) {
 	}
 
 	rr = httptest.NewRecorder()
-	body := strings.NewReader(`{"values":{"XALGORIX_RATE_LIMIT_REQUESTS":"2000","XALGORIX_RATE_LIMIT_WINDOW":"1","XALGORIX_DISCORD_WEBHOOK":"https://discord.example/webhook","XALGORIX_BIND":"0.0.0.0","XALGORIX_LLM_MAX_INFLIGHT":"4","XALGORIX_MAX_CONCURRENT_AGENTS":"1"}}`)
+	body := strings.NewReader(`{"values":{"XALGORIX_RATE_LIMIT_REQUESTS":"2000","XALGORIX_RATE_LIMIT_WINDOW":"1","XALGORIX_DISCORD_WEBHOOK":"https://discord.example/webhook","XALGORIX_BIND":"0.0.0.0","XALGORIX_LLM_MAX_INFLIGHT":"4","XALGORIX_MAX_CONCURRENT_AGENTS":"1","XALGORIX_ITERATION_DELAY":"3.5"}}`)
 	s.handleEnvironmentSettings(rr, httptest.NewRequest(http.MethodPost, "/api/settings/environment", body))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("environment POST code = %d body=%s", rr.Code, rr.Body.String())
@@ -2274,6 +2274,9 @@ func TestEnvironmentSettings_RejectsUnknownAndUpdatesRuntime(t *testing.T) {
 	}
 	if s.cfg.BindAddr != "0.0.0.0" {
 		t.Fatalf("bind address not applied: %q", s.cfg.BindAddr)
+	}
+	if s.cfg.IterationDelaySec != 3.5 {
+		t.Fatalf("iteration delay not applied: %v", s.cfg.IterationDelaySec)
 	}
 	var resp environmentSettingsResponse
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
@@ -2294,6 +2297,7 @@ func TestEnvironmentSettings_RejectsUnknownAndUpdatesRuntime(t *testing.T) {
 		"XALGORIX_BIND=0.0.0.0",
 		"XALGORIX_LLM_MAX_INFLIGHT=4",
 		"XALGORIX_MAX_CONCURRENT_AGENTS=1",
+		"XALGORIX_ITERATION_DELAY=3.5",
 	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env file missing %q:\n%s", want, env)
@@ -3426,5 +3430,54 @@ func TestBeginWildcardSubScanSerializesWithStop(t *testing.T) {
 	}
 	if child := inst.SubScans[1]; child.ID != "" || child.StartedAt != "" {
 		t.Fatalf("stopped child gained dispatch evidence: %#v", child)
+	}
+}
+
+func TestEnvironmentSettings_IterationDelayClampingAndRunningAgentUpdate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := newTestServer(t, &config.Config{IterationDelaySec: 0})
+
+	sctx := scanctx.New("test-delay-update", t.TempDir())
+	scanctx.Activate(sctx)
+	defer sctx.Close()
+
+	agnt := agent.NewAgent(s.cfg, "running-agent", make(chan agent.Event, 10), scopeguard.Config{}, sctx)
+	s.currentAgents["scan-1"] = agnt
+
+	// Clamped at 300
+	rr := httptest.NewRecorder()
+	body := strings.NewReader(`{"values":{"XALGORIX_ITERATION_DELAY":"450"}}`)
+	s.handleEnvironmentSettings(rr, httptest.NewRequest(http.MethodPost, "/api/settings/environment", body))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("environment POST code = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if s.cfg.IterationDelaySec != 300 {
+		t.Fatalf("expected iteration delay clamped to 300, got %v", s.cfg.IterationDelaySec)
+	}
+	if delay := s.envSettingValue("XALGORIX_ITERATION_DELAY"); delay != "300" {
+		t.Fatalf("expected envSettingValue '300', got %q", delay)
+	}
+
+	// Dynamic update: verify running agent received new delay
+	rr = httptest.NewRecorder()
+	body = strings.NewReader(`{"values":{"XALGORIX_ITERATION_DELAY":"5.5"}}`)
+	s.handleEnvironmentSettings(rr, httptest.NewRequest(http.MethodPost, "/api/settings/environment", body))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("environment POST code = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if s.cfg.IterationDelaySec != 5.5 {
+		t.Fatalf("expected iteration delay 5.5, got %v", s.cfg.IterationDelaySec)
+	}
+
+	// Clamped at 0 for negative
+	rr = httptest.NewRecorder()
+	body = strings.NewReader(`{"values":{"XALGORIX_ITERATION_DELAY":"-10"}}`)
+	s.handleEnvironmentSettings(rr, httptest.NewRequest(http.MethodPost, "/api/settings/environment", body))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("environment POST code = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if s.cfg.IterationDelaySec != 0 {
+		t.Fatalf("expected iteration delay clamped to 0, got %v", s.cfg.IterationDelaySec)
 	}
 }
