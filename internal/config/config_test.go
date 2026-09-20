@@ -132,6 +132,7 @@ func TestLoad_ReadsDashboardProviderProxyAndAgentMailSettings(t *testing.T) {
 		"XALGORIX_WORKSPACE=/tmp/xalgorix-workspace",
 		"XALGORIX_DISABLE_BROWSER=true",
 		"XALGORIX_MAX_ITERATIONS=12",
+		"XALGORIX_ITERATION_DELAY=4.5",
 		"XALGORIX_RATE_LIMIT_REQUESTS=7",
 		"XALGORIX_RATE_LIMIT_WINDOW=11",
 		"XALGORIX_RATE_RPS=2.5",
@@ -164,7 +165,7 @@ func TestLoad_ReadsDashboardProviderProxyAndAgentMailSettings(t *testing.T) {
 	if cfg.ReasoningEffort != "medium" || !cfg.OllamaCompatible || cfg.LLMMaxRetries != 2 || cfg.MemCompTimeout != 45 {
 		t.Fatalf("retry/memory settings not loaded: %#v", cfg)
 	}
-	if cfg.Workspace != "/tmp/xalgorix-workspace" || !cfg.DisableBrowser || cfg.MaxIterations != 12 {
+	if cfg.Workspace != "/tmp/xalgorix-workspace" || !cfg.DisableBrowser || cfg.MaxIterations != 12 || cfg.IterationDelaySec != 4.5 {
 		t.Fatalf("runtime settings not loaded: %#v", cfg)
 	}
 	if cfg.RateLimitRequests != 7 || cfg.RateLimitWindow != 11 {

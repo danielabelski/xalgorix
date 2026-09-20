@@ -99,6 +99,10 @@ type Config struct {
 	DisableBrowser bool   // XALGORIX_DISABLE_BROWSER
 	MaxIterations  int    // XALGORIX_MAX_ITERATIONS — 0 = unlimited
 	MinIterations  int    // XALGORIX_MIN_ITERATIONS — minimum testing floor (default 50)
+	// IterationDelaySec optionally pauses (in seconds) between agent reasoning
+	// iterations to pace LLM request velocity and conserve provider rolling-window
+	// quotas. 0 = disabled (default). XALGORIX_ITERATION_DELAY.
+	IterationDelaySec float64
 	// MaxWildcardSubdomains optionally caps the number of full agent sessions
 	// spawned by one wildcard target. XALGORIX_MAX_WILDCARD_SUBDOMAINS,
 	// default -1 (unlimited). Set a positive value only as an explicit
@@ -381,6 +385,7 @@ func load() *Config {
 		DisableBrowser:        envOrBool("XALGORIX_DISABLE_BROWSER", false),
 		MaxIterations:         envOrInt("XALGORIX_MAX_ITERATIONS", 0),
 		MinIterations:         envOrInt("XALGORIX_MIN_ITERATIONS", 50),
+		IterationDelaySec:     envOrFloat("XALGORIX_ITERATION_DELAY", 0),
 		MaxWildcardSubdomains: envOrInt("XALGORIX_MAX_WILDCARD_SUBDOMAINS", -1),
 		NoToolAbortAt:         envOrInt("XALGORIX_NO_TOOL_ABORT_AT", 30),
 		MaxFinishRejections:   envOrInt("XALGORIX_MAX_FINISH_REJECTIONS", 15),
