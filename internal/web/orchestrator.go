@@ -129,6 +129,9 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		ScanContext:         req.ScanContext,
 		SubScans:            make([]SubScanSummary, 0),
 		snapshotFinalizing:  true,
+		Iterations:          req.ResumeIterations,
+		TotalTokens:         req.ResumeTotalTokens,
+		ToolCalls:           req.ResumeToolCalls,
 	}
 	s.seedResumeInstanceFromRecord(instance, req)
 	// Disk discovery is intentionally outside the global instance-map lock.
@@ -182,6 +185,28 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 			log.Printf("[scan] refusing live instance id collision for %q", instanceID)
 			return
 		}
+		existing.mu.RLock()
+		if existing.Iterations > instance.Iterations {
+			instance.Iterations = existing.Iterations
+		}
+		if existing.TotalTokens > instance.TotalTokens {
+			instance.TotalTokens = existing.TotalTokens
+		}
+		if existing.ToolCalls > instance.ToolCalls {
+			instance.ToolCalls = existing.ToolCalls
+		}
+		if len(existing.Vulns) > len(instance.Vulns) {
+			instance.Vulns = append([]VulnSummary(nil), existing.Vulns...)
+			instance.VulnCount = len(instance.Vulns)
+		}
+		if len(existing.SubScans) > len(instance.SubScans) {
+			instance.SubScans = cloneSubScanSummaries(existing.SubScans)
+			instance.SubScanTotal = existing.SubScanTotal
+			instance.SubScanCompleted = existing.SubScanCompleted
+			instance.SubScanRunning = existing.SubScanRunning
+			instance.SubScanRemaining = existing.SubScanRemaining
+		}
+		existing.mu.RUnlock()
 	}
 	if !req.IsResume && legacyClaimed {
 		s.instancesMu.Unlock()
@@ -1149,6 +1174,22 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			parentRecord.SubScanRunning = running
 			parentRecord.SubScanRemaining = len(subdomains) - completed - running
 			parentRecord.Status = "running"
+			s.instancesMu.RLock()
+			inst := s.instances[req.InstanceID]
+			s.instancesMu.RUnlock()
+			if inst != nil {
+				inst.mu.RLock()
+				if inst.TotalTokens > parentRecord.TotalTokens {
+					parentRecord.TotalTokens = inst.TotalTokens
+				}
+				if inst.Iterations > parentRecord.Iterations {
+					parentRecord.Iterations = inst.Iterations
+				}
+				if inst.ToolCalls > parentRecord.ToolCalls {
+					parentRecord.ToolCalls = inst.ToolCalls
+				}
+				inst.mu.RUnlock()
+			}
 			s.saveScanRecordTo(parentRecord, scanDir)
 			s.mirrorWildcardProgress(req.InstanceID, parentRecord)
 		}
@@ -1365,6 +1406,22 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		}
 		parentRecord.FinishedAt = time.Now().Format(time.RFC3339)
 		normalizeTerminalWildcardProgress(parentRecord)
+		s.instancesMu.RLock()
+		inst := s.instances[req.InstanceID]
+		s.instancesMu.RUnlock()
+		if inst != nil {
+			inst.mu.RLock()
+			if inst.TotalTokens > parentRecord.TotalTokens {
+				parentRecord.TotalTokens = inst.TotalTokens
+			}
+			if inst.Iterations > parentRecord.Iterations {
+				parentRecord.Iterations = inst.Iterations
+			}
+			if inst.ToolCalls > parentRecord.ToolCalls {
+				parentRecord.ToolCalls = inst.ToolCalls
+			}
+			inst.mu.RUnlock()
+		}
 		s.saveScanRecordTo(parentRecord, scanDir)
 		s.mirrorWildcardProgress(req.InstanceID, parentRecord)
 	}
