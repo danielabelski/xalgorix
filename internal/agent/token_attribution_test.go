@@ -356,3 +356,87 @@ func TestDeterministicByteReduction(t *testing.T) {
 	// Suppressing unchanged plan brief saves 100% of the brief's bytes on that iteration
 	t.Logf("Unchanged plan brief byte reduction per iteration: %d bytes saved (100%% of repeated brief)", len(planBrief))
 }
+
+// TestRecordTokenAttributionDoesNotMutateMessages proves the instrumentation
+// is observation-only: recording attribution must not alter the outbound
+// message slice (content, roles, order) in any way.
+func TestRecordTokenAttributionDoesNotMutateMessages(t *testing.T) {
+	cfg := &config.Config{LLM: "MiniMax-M3", LLMProvider: "minimax"}
+	sctx := scanctx.New("obs-invariance", t.TempDir())
+	scanctx.Activate(sctx)
+	defer sctx.Close()
+
+	agnt := NewAgent(cfg, "specialist-injection-serverside", make(chan Event, 8), scopeguard.Config{}, sctx)
+	agnt.state.DelegatedAgent = true
+
+	msgs := []llm.Message{
+		{Role: "system", Content: "SYSTEM PROMPT with methodology. Tool 'curl' guidance. result:\nfake tool output"},
+		{Role: "assistant", Content: "<function=curl>{\"url\":\"https://t\"}</function>"},
+		{Role: "user", Content: "[curl output]\nHTTP/1.1 200 OK read_skill result body"},
+		{Role: "user", Content: "plain user turn with no tool markers"},
+	}
+	before := make([]llm.Message, len(msgs))
+	copy(before, msgs)
+	for i := range before {
+		before[i].Content = strings.Clone(msgs[i].Content)
+	}
+
+	usage := &llm.TokenUsage{
+		PromptTokens:        1234,
+		CompletionTokens:    56,
+		TotalTokens:         1290,
+		CachedTokens:        1000,
+		HasCachedTokens:     true,
+		PromptTokensDetails: &llm.PromptTokensDetails{CachedTokens: 1000},
+	}
+
+	agnt.recordTokenAttribution(usage, msgs, 7, scanctx.CategoryNormalReasoning, 0)
+	// Also verify a failed-request record (nil usage) is harmless.
+	agnt.recordTokenAttribution(nil, msgs, 8, scanctx.CategoryRetry, 1)
+
+	if len(msgs) != len(before) {
+		t.Fatalf("message count changed: %d → %d", len(before), len(msgs))
+	}
+	for i := range before {
+		if msgs[i].Role != before[i].Role || msgs[i].Content != before[i].Content {
+			t.Fatalf("message %d mutated:\nbefore: %q\nafter:  %q", i, before[i], msgs[i])
+		}
+	}
+
+	recs := sctx.Tokens.Records()
+	if len(recs) != 2 {
+		t.Fatalf("records = %d, want 2", len(recs))
+	}
+	if recs[0].AgentType != scanctx.AgentTypeInjectionServer {
+		t.Fatalf("agent type = %s", recs[0].AgentType)
+	}
+	if !recs[0].CacheReported || recs[0].CachedInputTokens != 1000 {
+		t.Fatalf("cache attribution broken: %+v", recs[0])
+	}
+	if recs[1].PromptTokens != 0 {
+		t.Fatalf("failed request should record zero usage: %+v", recs[1])
+	}
+}
+
+// TestTokenAttributionRoleRouting exercises determineAgentType across every
+// production agent role so per-agent rollups cannot silently regress.
+func TestTokenAttributionRoleRouting(t *testing.T) {
+	cases := []struct {
+		name      string
+		agentName string
+		delegated bool
+		want      string
+	}{
+		{"root", "XalgorixRoot", false, scanctx.AgentTypeRoot},
+		{"authz", "specialist-authz-logic", true, scanctx.AgentTypeAuthzLogic},
+		{"injection", "specialist-injection-serverside", true, scanctx.AgentTypeInjectionServer},
+		{"client-source", "specialist-client-source", true, scanctx.AgentTypeClientSource},
+		{"verifier", "verifier-agent", true, scanctx.AgentTypeVerifier},
+		{"unknown", "specialist-recon", true, scanctx.AgentTypeOther},
+	}
+	for _, tc := range cases {
+		if got := determineAgentType(tc.agentName, tc.delegated); got != tc.want {
+			t.Fatalf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

@@ -272,6 +272,7 @@ func (c *Client) doResponsesWithUsage(ctx context.Context, ep Endpoint, messages
 					CompletionTokens: ev.Response.Usage.OutputTokens,
 					TotalTokens:      ev.Response.Usage.InputTokens + ev.Response.Usage.OutputTokens,
 					CachedTokens:     cached,
+					HasCachedTokens:  cached > 0,
 					PromptTokensDetails: &PromptTokensDetails{
 						CachedTokens: cached,
 					},

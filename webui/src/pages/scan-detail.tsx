@@ -34,6 +34,7 @@ import { Markdown } from "@/components/markdown";
 import { VerificationBadge } from "@/components/verification-badge";
 import { PhaseProgress, PHASES } from "@/components/phase-progress";
 import { CopyButton } from "@/components/copy-button";
+import { TokenUsageTab } from "@/components/token-usage";
 import { ErrorState, EmptyState } from "@/components/states";
 import {
   useScan,
@@ -78,6 +79,7 @@ import {
   ArrowRight,
   Loader2,
   Send,
+  Activity,
 } from "lucide-react";
 import { LiveFeed, type FeedFilter } from "@/components/live-feed";
 import { Pagination, DEFAULT_PAGE_SIZE } from "@/components/Pagination";
@@ -417,6 +419,10 @@ export default function ScanDetailPage() {
             <Terminal className="mr-1.5 h-3.5 w-3.5" />
             {t("scanDetail.tab.events")}
           </TabsTrigger>
+          <TabsTrigger value="tokens">
+            <Activity className="mr-1.5 h-3.5 w-3.5" />
+            {t("scanDetail.tab.tokens")}
+          </TabsTrigger>
           {!!scan.sub_scan_total && (
             <TabsTrigger value="subdomains">
               <ListChecks className="mr-1.5 h-3.5 w-3.5" />
@@ -444,6 +450,9 @@ export default function ScanDetailPage() {
             loadingOlder={loadingOlder}
             onLoadEarlier={loadEarlierEvents}
           />
+        </TabsContent>
+        <TabsContent value="tokens">
+          <TokenUsageTab scanId={scan.id} running={status === "running" || status === "paused"} />
         </TabsContent>
         {!!scan.sub_scan_total && (
           <TabsContent value="subdomains">

@@ -2331,8 +2331,8 @@ func (a *Agent) recordTokenAttribution(usage *llm.TokenUsage, msgs []llm.Message
 		RetryAttempt:            retryAttempt,
 		RequestCategory:         category,
 		CompactionCount:         a.compactionCount,
-		ScanCumulativePrompt:    pTokens,
-		ScanCumulativeOutput:    outTokens,
+		AgentCumulativePrompt:   pTokens,
+		AgentCumulativeOutput:   outTokens,
 		Timestamp:               time.Now(),
 	}
 	if usage != nil {
@@ -2340,6 +2340,7 @@ func (a *Agent) recordTokenAttribution(usage *llm.TokenUsage, msgs []llm.Message
 		rec.CompletionTokens = usage.CompletionTokens
 		rec.TotalTokens = usage.TotalTokens
 		rec.CachedInputTokens = usage.GetCachedTokens()
+		rec.CacheReported = usage.HasCachedTokens
 		rec.UncachedInputTokens = usage.PromptTokens - rec.CachedInputTokens
 		if rec.UncachedInputTokens < 0 {
 			rec.UncachedInputTokens = 0

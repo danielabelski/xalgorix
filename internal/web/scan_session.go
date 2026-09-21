@@ -196,6 +196,9 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	// 0. Create and activate a per-session ScanContext for isolation.
 	//    This must happen BEFORE any tool state is touched.
 	sctx := scanctx.New(sess.id, sess.scanDir)
+	// Resume continuity: reload compact per-request token records persisted
+	// before a restart so attribution aggregates continue across restarts.
+	sctx.Tokens.LoadPersisted()
 	scanctx.Activate(sctx)
 	sess.sctx = sctx
 	log.Printf("[scanctx] Activated context %s for target %s (dir=%s)", sctx.ID, sess.target, sess.scanDir)
@@ -454,6 +457,7 @@ func (s *Server) executeScanSession(sess *scanSession) {
 				}
 			}
 			s.saveScanRecordTo(sess.record, sess.scanDir)
+			s.finalizeTokenUsage(sess)
 			return
 		}
 		// (a) findings exist or testing was performed → fall through to a normal "finished" completion.
@@ -463,8 +467,18 @@ func (s *Server) executeScanSession(sess *scanSession) {
 
 	// 9. Finalize record
 	if !s.finalizeScanSessionRecord(sess) {
+		// Interrupted (user stop / instance halt / server shutdown): the record
+		// is already persisted with its terminal status by
+		// finalizeScanSessionRecord. Token diagnostics still finalize so the
+		// summary reflects the aborted run too.
+		s.finalizeTokenUsage(sess)
 		return
 	}
+
+	// Token diagnostics: persist the aggregate summary and log the
+	// [token-analysis] completion line (observability only; no sensitive
+	// content).
+	s.finalizeTokenUsage(sess)
 
 	// 10. Generate report if requested (always generate, even for clean scans)
 	if sess.genReport {
