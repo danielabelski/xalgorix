@@ -136,6 +136,10 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_CONTEXT_COMPACT_RATIO", Label: "Context compaction ratio", Category: "LLM", Description: "Fraction of the context window at which to auto-compact (0.5–0.9). Default 0.75 = compact at ~75% full. Compacting earlier discards useful working context and hurts output quality; going higher risks hitting the provider's hard limit first.", DefaultValue: "0.75", InputType: "number"},
 		{Key: "XALGORIX_CONTEXT_COMPACT_TOKENS", Label: "Context compaction budget (tokens, override)", Category: "LLM", Description: "Optional ABSOLUTE override for the compaction trigger. Leave at -1 (auto) to derive the trigger from the context window × ratio above. Set a positive token count to force a fixed budget instead. 0 disables auto-compaction. Default -1 (auto).", DefaultValue: "-1", InputType: "number"},
 		{Key: "XALGORIX_MEMORY_COMPRESSOR_TIMEOUT", Label: "Memory compressor timeout", Category: "LLM", Description: "Timeout in seconds for context compression.", DefaultValue: "30", InputType: "number"},
+		{Key: "XALGORIX_BOUNDED_CONTEXT", Label: "Bounded working context (token saver)", Category: "LLM", Description: "Archive the complete raw output of every tool result to disk and replace tool-result messages older than the active window below with compact retrieval stubs. The model fetches the byte-identical original via read_tool_output when needed — no information is lost, aged raw output just stops being resent on every iteration. Measured fleet impact: 40-60% input-token reduction. Applies to NEW scans.", DefaultValue: "false", InputType: "boolean"},
+		{Key: "XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW", Label: "Bounded context: active window", Category: "LLM", Description: "How many recent tool-result messages stay verbatim in the conversation before older ones become retrieval stubs (used by bounded working context above).", DefaultValue: "8", InputType: "number"},
+		{Key: "XALGORIX_TOOL_ARCHIVE_MIN_BYTES", Label: "Bounded context: archive threshold (bytes)", Category: "LLM", Description: "Minimum raw-output size before a tool result is archived/stubbed. Smaller results stay in-context verbatim.", DefaultValue: "1500", InputType: "number"},
+		{Key: "XALGORIX_ROLE_SCOPED_TOOLS", Label: "Role-scoped specialist tools (token saver)", Category: "LLM", Description: "Withhold documentation of role-foreign tools (e.g. browser tools from the authz specialist) from delegated specialists' prompts. Hidden tools remain callable and are listed in a compact index, so the reachable tool set is unchanged. Applies to NEW scans.", DefaultValue: "false", InputType: "boolean"},
 		{Key: "XALGORIX_LLM_MAX_INFLIGHT", Label: "LLM max in-flight concurrency", Category: "LLM", Description: "Maximum concurrent requests sent to the LLM provider across all scans and subagents. Clamps token velocity to prevent exhausting provider rolling-window rate limits or quotas. Default is 4 × MaxInstances. Takes effect after restart.", Placeholder: "4", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_ITERATIONS", Label: "Max iterations", Category: "Runtime", Description: "Maximum agent iterations per scan. 0 means unlimited.", DefaultValue: "0", InputType: "number"},
 		{Key: "XALGORIX_MIN_ITERATIONS", Label: "Min iterations (testing floor)", Category: "Runtime", Description: "Minimum testing floor in iterations before the gatekeeper permits finish. Ensures deep probing (OAST, ReDoS, fuzzing) before concluding.", DefaultValue: "50", InputType: "number"},
@@ -769,6 +773,14 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.LLMContextWindow = parseIntSetting(value, 128000)
 		case "XALGORIX_CONTEXT_COMPACT_RATIO":
 			s.cfg.ContextCompactRatio = parseFloatSetting(value, 0.75)
+		case "XALGORIX_BOUNDED_CONTEXT":
+			s.cfg.BoundedContext = parseBoolSetting(value, false)
+		case "XALGORIX_TOOL_ARCHIVE_MIN_BYTES":
+			s.cfg.ToolArchiveMinBytes = parseIntSetting(value, 1500)
+		case "XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW":
+			s.cfg.ToolArchiveActiveWindow = parseIntSetting(value, 8)
+		case "XALGORIX_ROLE_SCOPED_TOOLS":
+			s.cfg.RoleScopedTools = parseBoolSetting(value, false)
 		case "XALGORIX_MEMORY_COMPRESSOR_TIMEOUT":
 			s.cfg.MemCompTimeout = parseIntSetting(value, 30)
 		case "XALGORIX_MAX_ITERATIONS":
@@ -911,6 +923,14 @@ func (s *Server) envSettingValue(key string) string {
 		return strconv.Itoa(s.cfg.LLMContextWindow)
 	case "XALGORIX_CONTEXT_COMPACT_RATIO":
 		return strconv.FormatFloat(s.cfg.ContextCompactRatio, 'g', -1, 64)
+	case "XALGORIX_BOUNDED_CONTEXT":
+		return strconv.FormatBool(s.cfg.BoundedContext)
+	case "XALGORIX_TOOL_ARCHIVE_MIN_BYTES":
+		return strconv.Itoa(s.cfg.ToolArchiveMinBytes)
+	case "XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW":
+		return strconv.Itoa(s.cfg.ToolArchiveActiveWindow)
+	case "XALGORIX_ROLE_SCOPED_TOOLS":
+		return strconv.FormatBool(s.cfg.RoleScopedTools)
 	case "XALGORIX_MEMORY_COMPRESSOR_TIMEOUT":
 		return strconv.Itoa(s.cfg.MemCompTimeout)
 	case "XALGORIX_MAX_ITERATIONS":
