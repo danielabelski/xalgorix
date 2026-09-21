@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A deleted instance (removed from the map mid-run) must be treated as
@@ -288,5 +290,152 @@ func TestHandleScanAckIsPendingNotStarted(t *testing.T) {
 	}
 	if resp["instance_id"] == "" {
 		t.Error("ack must include an instance_id")
+	}
+}
+
+// Regression: a single-target scan interrupted by server shutdown (SIGTERM / restart)
+// must NOT be finalized as "finished" or have its queue state advanced to completed.
+// It must be recorded as "stopped" with its stop reason preserved, retain its queue
+// state at CurrentIdx=0, and be normalized to "pending"/"server_restart_resuming"
+// on next boot so it auto-resumes seamlessly.
+func TestSingleTargetScanInterruptedOnShutdown_PreservesQueueStateAndResumesOnRestart(t *testing.T) {
+	s := newTestServer(t, nil)
+	bestEffortDataDir(t, s)
+
+	instID := "test-single-restart-1"
+	target := "https://web3academy.pro"
+	scanDir := s.makeScanDir(target)
+
+	req := ScanRequest{
+		InstanceID: instID,
+		Targets:    []string{target},
+		ScanMode:   "quick",
+		Name:       "Test single restart",
+	}
+	// Initial queue state at idx=0
+	s.saveQueueState(0, req, queueProgress{
+		ActiveTarget:  target,
+		ActiveScanDir: scanDir,
+		ActiveScanID:  filepath.Base(scanDir),
+	})
+
+	inst := &ScanInstance{
+		ID:        instID,
+		Name:      req.Name,
+		Targets:   target,
+		Status:    "running",
+		StartedAt: time.Now().Format(time.RFC3339),
+		scanDir:   scanDir,
+	}
+	s.instancesMu.Lock()
+	s.instances[instID] = inst
+	s.instancesMu.Unlock()
+
+	// Initial scan record on disk
+	initialRec := &ScanRecord{
+		ID:         filepath.Base(scanDir),
+		InstanceID: instID,
+		Target:     target,
+		Status:     "running",
+		StartedAt:  inst.StartedAt,
+	}
+	s.saveScanRecordTo(initialRec, scanDir)
+
+	// Simulate server shutdown: signal handler stops instance and sets stopReq
+	s.stopReq.Store(true)
+	inst.mu.Lock()
+	inst.Status = "stopped"
+	inst.StopReason = "signal_terminated"
+	inst.FinishedAt = time.Now().Format(time.RFC3339)
+	inst.mu.Unlock()
+
+	// Verify shouldAdvanceQueueAfterTarget returns false
+	if shouldAdvanceQueueAfterTarget(s.stopReq.Load(), inst.Status) {
+		t.Error("shouldAdvanceQueueAfterTarget must return false when stopReq is true")
+	}
+
+	// Verify shouldPreserveQueueStateOnExit returns true
+	if !shouldPreserveQueueStateOnExit(inst.Status, inst.StopReason, false) {
+		t.Errorf("shouldPreserveQueueStateOnExit(%q, %q) must be true", inst.Status, inst.StopReason)
+	}
+
+	// Simulate executeScanSession finishing while interrupted
+	sess := &scanSession{
+		scanDir:    scanDir,
+		instanceID: instID,
+		record:     initialRec,
+	}
+
+	if s.finalizeScanSessionRecord(sess) {
+		t.Error("finalizeScanSessionRecord must return false when instance is interrupted or shutting down")
+	}
+
+	// Verify scan.json on disk is NOT finished
+	savedRec, ok := loadScanRecordFromDir(scanDir)
+	if !ok {
+		t.Fatalf("failed to load scan record from %s", scanDir)
+	}
+	if savedRec.Status == "finished" {
+		t.Errorf("saved scan status = %q, want \"stopped\"", savedRec.Status)
+	}
+	if savedRec.StopReason != "signal_terminated" {
+		t.Errorf("saved stop reason = %q, want \"signal_terminated\"", savedRec.StopReason)
+	}
+
+	// Queue state must still be valid and not advanced
+	entries := s.validQueueStateEntries(false)
+	var foundEntry *queueStateEntry
+	for i := range entries {
+		if entries[i].state != nil && entries[i].state.InstanceID == instID {
+			foundEntry = &entries[i]
+			break
+		}
+	}
+	if foundEntry == nil || foundEntry.state == nil {
+		t.Fatalf("queue state for %s was lost", instID)
+		return
+	}
+	if foundEntry.state.CurrentIdx != 0 {
+		t.Errorf("queue state CurrentIdx = %d, want 0", foundEntry.state.CurrentIdx)
+	}
+
+	// Now simulate server restart: wipe memory instances, reset stopReq, call rebuildInstancesFromDisk
+	s.stopReq.Store(false)
+	s.instancesMu.Lock()
+	delete(s.instances, instID)
+	s.instancesMu.Unlock()
+
+	s.rebuildInstancesFromDisk()
+
+	s.instancesMu.RLock()
+	rebuiltInst := s.instances[instID]
+	s.instancesMu.RUnlock()
+	if rebuiltInst == nil {
+		t.Fatalf("rebuildInstancesFromDisk did not register instance %s", instID)
+		return
+	}
+	rebuiltInst.mu.RLock()
+	rebuiltStatus := rebuiltInst.Status
+	rebuiltReason := rebuiltInst.StopReason
+	rebuiltInst.mu.RUnlock()
+
+	if rebuiltStatus != "pending" {
+		t.Errorf("rebuilt instance status = %q, want \"pending\"", rebuiltStatus)
+	}
+	if rebuiltReason != "server_restart_resuming" {
+		t.Errorf("rebuilt instance stop reason = %q, want \"server_restart_resuming\"", rebuiltReason)
+	}
+
+	// Auto-resume entries must include this instance
+	autoResumes := autoResumeQueueEntries(s.validQueueStateEntries(true))
+	foundAuto := false
+	for _, ar := range autoResumes {
+		if ar.state != nil && ar.state.InstanceID == instID {
+			foundAuto = true
+			break
+		}
+	}
+	if !foundAuto {
+		t.Errorf("instance %s was not found in autoResumeQueueEntries", instID)
 	}
 }
