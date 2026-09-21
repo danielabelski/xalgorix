@@ -196,6 +196,9 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	// 0. Create and activate a per-session ScanContext for isolation.
 	//    This must happen BEFORE any tool state is touched.
 	sctx := scanctx.New(sess.id, sess.scanDir)
+	// Resume continuity: reload compact per-request token records persisted
+	// before a restart so attribution aggregates continue across restarts.
+	sctx.Tokens.LoadPersisted()
 	scanctx.Activate(sctx)
 	sess.sctx = sctx
 	log.Printf("[scanctx] Activated context %s for target %s (dir=%s)", sctx.ID, sess.target, sess.scanDir)
@@ -454,6 +457,7 @@ func (s *Server) executeScanSession(sess *scanSession) {
 				}
 			}
 			s.saveScanRecordTo(sess.record, sess.scanDir)
+			s.finalizeTokenUsage(sess)
 			return
 		}
 		// (a) findings exist or testing was performed → fall through to a normal "finished" completion.
@@ -464,6 +468,11 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	// 9. Finalize record
 	sess.record.Status = "finished"
 	sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+
+	// Token diagnostics: persist the aggregate summary and log the
+	// [token-analysis] completion line (observability only; no sensitive
+	// content). Runs for clean finishes AND aborted/failed sessions below.
+	s.finalizeTokenUsage(sess)
 
 	// NOTE: merges are deferred to sess.cleanup() (Wave C 4.2) under
 	// safe.Recover boundaries to guarantee panic-safe persistence. Both

@@ -91,6 +91,17 @@ export function useScansPage(params: ListParams) {
   });
 }
 
+export function useTokenUsage(id?: string, running?: boolean) {
+  return useQuery({
+    queryKey: id ? ["scan", id, "token-usage"] : ["scan", "none", "token-usage"],
+    queryFn: () => api.scanTokenUsage(id!),
+    enabled: !!id,
+    // Keep the prompt-tokens chart live while the scan is running.
+    refetchInterval: running ? 5000 : false,
+    retry: false,
+  });
+}
+
 export function useScan(id?: string) {
   return useQuery({
     queryKey: id ? qk.scan(id) : ["scan", "none"],

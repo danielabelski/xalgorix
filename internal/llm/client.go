@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,6 +85,10 @@ type TokenUsage struct {
 	PromptTokensDetails  *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
 	CachedTokens         int                  `json:"cached_tokens,omitempty"`
 	CacheReadInputTokens int                  `json:"cache_read_input_tokens,omitempty"`
+	// HasCachedTokens is true when the provider actually reported a
+	// cached-token field in this response, so zero is never fabricated into
+	// "not reported" (or the reverse).
+	HasCachedTokens bool `json:"has_cached_tokens,omitempty"`
 }
 
 // GetCachedTokens returns the cached prompt token count from any provider-reported field.
@@ -101,6 +106,17 @@ func (u *TokenUsage) GetCachedTokens() int {
 		return u.CachedTokens
 	}
 	return 0
+}
+
+// hasAnyCachedField reports whether any provider cached-token field was present.
+func (u *TokenUsage) hasAnyCachedField() bool {
+	if u == nil {
+		return false
+	}
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		return true
+	}
+	return u.CacheReadInputTokens > 0 || u.CachedTokens > 0
 }
 
 // GetTokens returns cumulative token usage.
@@ -126,6 +142,7 @@ func (c *Client) GetTokenUsage() TokenUsage {
 		CompletionTokens: c.totalOut,
 		TotalTokens:      c.totalIn + c.totalOut,
 		CachedTokens:     c.totalCached,
+		HasCachedTokens:  c.totalCached > 0,
 		PromptTokensDetails: &PromptTokensDetails{
 			CachedTokens: c.totalCached,
 		},
@@ -780,6 +797,62 @@ func (c *Client) ChatWithUsage(messages []Message) (string, *TokenUsage, error) 
 	return c.chatWithRetry(messages)
 }
 
+// minimaxUsageShapeOnce guarantees the redacted usage-structure diagnostic is
+// logged at most once per process per source (streaming/non-streaming).
+var minimaxUsageShapeOnce = map[string]*sync.Once{}
+var minimaxUsageShapeMu sync.Mutex
+
+// logMiniMaxUsageShape logs ONLY the field NAMES (structure) of a provider
+// usage object for MiniMax, once per process per source. Values, prompts,
+// credentials, and target data are never logged. This verifies which exact
+// cached-token field MiniMax actually returns without inventing estimates.
+func (c *Client) logMiniMaxUsageShape(rawUsage json.RawMessage, source string) {
+	if c == nil || len(rawUsage) == 0 {
+		return
+	}
+	if !c.isMiniMaxProvider() {
+		return
+	}
+	minimaxUsageShapeMu.Lock()
+	once, ok := minimaxUsageShapeOnce[source]
+	if !ok {
+		once = &sync.Once{}
+		minimaxUsageShapeOnce[source] = once
+	}
+	minimaxUsageShapeMu.Unlock()
+	once.Do(func() {
+		var top map[string]json.RawMessage
+		if json.Unmarshal(rawUsage, &top) != nil {
+			log.Printf("[llm] MiniMax usage structure (%s): unparseable (keys withheld)", source)
+			return
+		}
+		keys := make([]string, 0, len(top))
+		nested := []string{}
+		for k, v := range top {
+			keys = append(keys, k)
+			var inner map[string]json.RawMessage
+			if json.Unmarshal(v, &inner) != nil {
+				continue
+			}
+			for ik := range inner {
+				nested = append(nested, k+"."+ik)
+			}
+		}
+		sort.Strings(keys)
+		sort.Strings(nested)
+		log.Printf("[llm] MiniMax usage structure (%s): fields=%v nested=%v", source, keys, nested)
+	})
+}
+
+// isMiniMaxProvider reports whether the configured model targets MiniMax.
+func (c *Client) isMiniMaxProvider() bool {
+	if c == nil || c.cfg == nil {
+		return false
+	}
+	model := strings.ToLower(c.cfg.LLM + " " + c.apiModel + " " + c.provider)
+	return strings.Contains(model, "minimax")
+}
+
 // SetTemperature overrides the LLM temperature for subsequent calls.
 // Pass nil to revert to the config default.
 // This is goroutine-safe and takes effect on the next Chat/ChatStream call.
@@ -1328,6 +1401,13 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 					continue
 				}
 				if sseResp.Usage != nil {
+					sseResp.Usage.HasCachedTokens = sseResp.Usage.hasAnyCachedField()
+					var env struct {
+						Usage json.RawMessage `json:"usage"`
+					}
+					if json.Unmarshal([]byte(data), &env) == nil {
+						c.logMiniMaxUsageShape(env.Usage, "streaming")
+					}
 					cached := sseResp.Usage.GetCachedTokens()
 					c.mu.Lock()
 					c.totalIn += sseResp.Usage.PromptTokens
@@ -1514,6 +1594,7 @@ func (c *Client) doChatWithUsage(messages []Message) (out string, usage *TokenUs
 				CompletionTokens: gemResp.UsageMetadata.CandidatesTokenCount,
 				TotalTokens:      gemResp.UsageMetadata.TotalTokenCount,
 				CachedTokens:     cached,
+				HasCachedTokens:  cached > 0,
 				PromptTokensDetails: &PromptTokensDetails{
 					CachedTokens: cached,
 				},
@@ -1540,6 +1621,7 @@ func (c *Client) doChatWithUsage(messages []Message) (out string, usage *TokenUs
 			TotalTokens:          anMsg.Usage.InputTokens + anMsg.Usage.OutputTokens,
 			CachedTokens:         cached,
 			CacheReadInputTokens: cached,
+			HasCachedTokens:      cached > 0,
 			PromptTokensDetails: &PromptTokensDetails{
 				CachedTokens: cached,
 			},
@@ -1563,6 +1645,15 @@ func (c *Client) doChatWithUsage(messages []Message) (out string, usage *TokenUs
 	}
 	usage = chatResp.Usage
 	if usage != nil {
+		usage.HasCachedTokens = usage.hasAnyCachedField()
+		// Redacted structure diagnostic: which usage fields did MiniMax
+		// actually return? Names only, once per process.
+		var envelope struct {
+			Usage json.RawMessage `json:"usage"`
+		}
+		if json.Unmarshal(respBody, &envelope) == nil {
+			c.logMiniMaxUsageShape(envelope.Usage, "non-streaming")
+		}
 		cached := usage.GetCachedTokens()
 		c.mu.Lock()
 		c.totalIn += usage.PromptTokens

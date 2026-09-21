@@ -107,6 +107,12 @@ type ScanContext struct {
 // New creates a fresh ScanContext for an isolated scan session.
 func New(id, scanDir string) *ScanContext {
 	ctx, cancel := context.WithCancel(context.Background())
+	tokens := NewTokenTracker()
+	if scanDir != "" {
+		// Compact per-request token records + aggregate summary persist under
+		// the scan directory so diagnostics survive completion and restarts.
+		tokens.SetPersistDir(scanDir)
+	}
 	return &ScanContext{
 		ID:       id,
 		ScanDir:  scanDir,
@@ -116,7 +122,7 @@ func New(id, scanDir string) *ScanContext {
 		Browser:  NewBrowserState(),
 		Ledger:   NewLedgerStore(),
 		Coverage: NewCoverageStore(),
-		Tokens:   NewTokenTracker(),
+		Tokens:   tokens,
 		Ctx:      ctx,
 		Cancel:   cancel,
 	}

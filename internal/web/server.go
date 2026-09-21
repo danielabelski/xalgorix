@@ -1073,6 +1073,12 @@ func (s *Server) Start() error {
 			s.handleDeleteVuln(w, r)
 			return
 		}
+		// GET /api/scans/{id}/token-usage — token-attribution diagnostics
+		// (observability only). Checked before the generic detail handler.
+		if strings.HasSuffix(r.URL.Path, "/token-usage") && r.Method == http.MethodGet {
+			s.handleScanTokenUsage(w, r)
+			return
+		}
 		// GET /api/scans/{id}/events?offset=&limit= — lazy-page the event log
 		// that the detail response only tails. Must be checked before the
 		// generic detail handler.
@@ -2929,6 +2935,14 @@ func (sess *scanSession) cleanup() {
 		func() {
 			defer logRecover("cleanup.scanctx.close")
 			scanctx.Deactivate(sess.sctx.ID)
+			// Flush the token summary + release the records file before the
+			// wider context teardown.
+			if sess.sctx.Tokens != nil {
+				func() {
+					defer logRecover("cleanup.scanctx.tokens")
+					sess.sctx.Tokens.Close()
+				}()
+			}
 			sess.sctx.Close()
 		}()
 	}

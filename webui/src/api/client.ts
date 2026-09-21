@@ -23,6 +23,7 @@ import type {
   WSEvent,
 } from "@/types/api";
 import type { FlatFinding } from "@/lib/findings";
+import type { TokenUsageResponse } from "@/types/token-usage";
 
 /**
  * Status of a single provider's API key as reported by
@@ -233,6 +234,9 @@ export const api = {
     http<ScanEventsPage>(
       `/api/scans/${id}/events?offset=${offset}&limit=${limit}`,
     ),
+  // Token-attribution diagnostics for a scan (observability only).
+  scanTokenUsage: (id: string) =>
+    http<TokenUsageResponse>(`/api/scans/${id}/token-usage`),
   // Flattened + deduped findings across all scans, computed server-side in a
   // single walk. Replaces the previous per-scan getScan() fan-out.
   listFindings: () => http<FlatFinding[] | null>("/api/findings"),
