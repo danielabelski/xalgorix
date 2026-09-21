@@ -492,6 +492,11 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// config, session auth, the scan target, and the ledger.
 	a.registerVerifyCSRFTool(reg)
 
+	// Bounded working context retrieval tool: returns the byte-identical
+	// archived original of any stubbed tool result (flag-gated stubs, but the
+	// tool is always registered so archived outputs are reachable).
+	a.registerToolArchiveTool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests
@@ -1131,6 +1136,13 @@ func (a *Agent) Run(targets []string, instruction string) {
 		// the loop and the context-overflow recovery branch below, so
 		// the serialized buffer is bounded before every outbound call,
 		// not only after a 413 from the provider.
+		// Bounded working context (information-complete): replace tool-result
+		// messages older than the active window with retrieval stubs BEFORE
+		// the snapshot is taken, so aged raw output is not resent on every
+		// iteration. Every stubbed byte stays retrievable via read_tool_output.
+		if a.boundedContextEnabled() {
+			a.ageOutToolOutputs()
+		}
 		if a.shouldPruneBeforeLLM() {
 			a.pruneMessages()
 		}
@@ -1686,6 +1698,17 @@ func (a *Agent) Run(targets []string, instruction string) {
 			}
 
 			resultMsg := formatToolResult(tc.Name, result)
+			if a.boundedContextEnabled() && result.Error == "" {
+				// Information-complete archiving: persist the COMPLETE raw
+				// output (pre-truncation) so aged stubs can point at a
+				// byte-identical retrievable original.
+				minBytes := a.toolArchiveMinBytes()
+				if len(result.Output) >= minBytes {
+					if id := a.scanCtx.ToolOutputs.Archive(tc.Name, result.Output, minBytes); id != "" {
+						resultMsg = strings.TrimRight(resultMsg, "\n") + "\n" + archiveToolResultMarker(id)
+					}
+				}
+			}
 			a.msgMu.Lock()
 			a.messages = append(a.messages, llm.Message{Role: "user", Content: resultMsg})
 			a.msgMu.Unlock()

@@ -93,6 +93,10 @@ type ScanContext struct {
 
 	// Tokens tracks per-request token attribution and post-scan efficiency metrics.
 	Tokens *TokenTracker
+	// ToolOutputs archives the complete raw output of every tool result so
+	// aged tool-result messages can be replaced by retrieval stubs without
+	// losing any information (bounded working context backing store).
+	ToolOutputs *ToolArchive
 
 	// ctx/cancel for the scan's lifecycle
 	Ctx    context.Context
@@ -114,17 +118,18 @@ func New(id, scanDir string) *ScanContext {
 		tokens.SetPersistDir(scanDir)
 	}
 	return &ScanContext{
-		ID:       id,
-		ScanDir:  scanDir,
-		Vulns:    NewVulnStore(),
-		Notes:    NewNoteStore(),
-		Terminal: NewTerminalState(),
-		Browser:  NewBrowserState(),
-		Ledger:   NewLedgerStore(),
-		Coverage: NewCoverageStore(),
-		Tokens:   tokens,
-		Ctx:      ctx,
-		Cancel:   cancel,
+		ID:          id,
+		ScanDir:     scanDir,
+		Vulns:       NewVulnStore(),
+		Notes:       NewNoteStore(),
+		Terminal:    NewTerminalState(),
+		Browser:     NewBrowserState(),
+		Ledger:      NewLedgerStore(),
+		Coverage:    NewCoverageStore(),
+		Tokens:      tokens,
+		ToolOutputs: NewToolArchive(scanDir),
+		Ctx:         ctx,
+		Cancel:      cancel,
 	}
 }
 

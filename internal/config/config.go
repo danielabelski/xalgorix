@@ -73,6 +73,27 @@ type Config struct {
 	// XALGORIX_ROLE_SCOPED_TOOLS, default false (off).
 	RoleScopedTools bool
 
+	// BoundedContext enables information-complete bounded working context:
+	// the complete raw output of every tool result is archived under
+	// <ScanDir>/tool-outputs, and tool-result messages older than the active
+	// window are replaced by compact retrieval stubs (read_tool_output
+	// retrieves the byte-identical original). The recent window stays
+	// verbatim, so every byte the model could previously see remains
+	// reachable — it is fetched on demand instead of being resent on every
+	// iteration. XALGORIX_BOUNDED_CONTEXT, default false (off).
+	BoundedContext bool
+
+	// ToolArchiveMinBytes is the minimum raw-output size a tool result must
+	// have before it is archived/stubbed. Smaller results stay in-context
+	// verbatim (they are cheap to carry and often high-signal).
+	// XALGORIX_TOOL_ARCHIVE_MIN_BYTES, default 1500.
+	ToolArchiveMinBytes int
+
+	// ToolArchiveActiveWindow is how many recent tool-result messages stay
+	// verbatim in the conversation before older ones are stubbed.
+	// XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW, default 8.
+	ToolArchiveActiveWindow int
+
 	// ContextCompactTokens is an OPTIONAL absolute override for the compaction
 	// trigger. When > 0, the agent auto-compacts older turns into a structured
 	// digest (+ saved notes) once the running message history is estimated to
@@ -363,22 +384,26 @@ func load() *Config {
 
 	cfg := &Config{
 		// LLM
-		LLM:                  envOr("XALGORIX_LLM", ""),
-		LLMProvider:          envOr("XALGORIX_LLM_PROVIDER", ""),
-		APIBase:              envOr("XALGORIX_API_BASE", ""),
-		APIKey:               envOr("XALGORIX_API_KEY", ""),
-		LLMProfile:           envOr("XALGORIX_LLM_PROFILE", ""),
-		ReasoningEffort:      envOr("XALGORIX_REASONING_EFFORT", "high"),
-		Language:             NormalizeLanguage(envOr("XALGORIX_LANGUAGE", DefaultLanguage)),
-		OllamaCompatible:     envOrBool("XALGORIX_OLLAMA_COMPATIBLE", false),
-		Temperature:          envOrFloatPtr("XALGORIX_TEMPERATURE", 0.2),
-		LLMMaxRetries:        envOrInt("XALGORIX_LLM_MAX_RETRIES", 5),
-		MaxRateLimitWaitSec:  envOrInt("XALGORIX_MAX_RATE_LIMIT_WAIT", 30*60),
-		MaxOutputTokens:      envOrInt("XALGORIX_MAX_OUTPUT_TOKENS", 8192),
-		ContextCompactTokens: envOrInt("XALGORIX_CONTEXT_COMPACT_TOKENS", -1),
-		LLMContextWindow:     envOrInt("XALGORIX_LLM_CONTEXT_WINDOW", 128000),
-		ContextCompactRatio:  envOrFloat("XALGORIX_CONTEXT_COMPACT_RATIO", 0.75),
-		MemCompTimeout:       envOrInt("XALGORIX_MEMORY_COMPRESSOR_TIMEOUT", 30),
+		LLM:                     envOr("XALGORIX_LLM", ""),
+		LLMProvider:             envOr("XALGORIX_LLM_PROVIDER", ""),
+		APIBase:                 envOr("XALGORIX_API_BASE", ""),
+		APIKey:                  envOr("XALGORIX_API_KEY", ""),
+		LLMProfile:              envOr("XALGORIX_LLM_PROFILE", ""),
+		ReasoningEffort:         envOr("XALGORIX_REASONING_EFFORT", "high"),
+		Language:                NormalizeLanguage(envOr("XALGORIX_LANGUAGE", DefaultLanguage)),
+		OllamaCompatible:        envOrBool("XALGORIX_OLLAMA_COMPATIBLE", false),
+		Temperature:             envOrFloatPtr("XALGORIX_TEMPERATURE", 0.2),
+		LLMMaxRetries:           envOrInt("XALGORIX_LLM_MAX_RETRIES", 5),
+		MaxRateLimitWaitSec:     envOrInt("XALGORIX_MAX_RATE_LIMIT_WAIT", 30*60),
+		MaxOutputTokens:         envOrInt("XALGORIX_MAX_OUTPUT_TOKENS", 8192),
+		ContextCompactTokens:    envOrInt("XALGORIX_CONTEXT_COMPACT_TOKENS", -1),
+		RoleScopedTools:         envOrBool("XALGORIX_ROLE_SCOPED_TOOLS", false),
+		BoundedContext:          envOrBool("XALGORIX_BOUNDED_CONTEXT", false),
+		ToolArchiveMinBytes:     envOrInt("XALGORIX_TOOL_ARCHIVE_MIN_BYTES", 1500),
+		ToolArchiveActiveWindow: envOrInt("XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW", 8),
+		LLMContextWindow:        envOrInt("XALGORIX_LLM_CONTEXT_WINDOW", 128000),
+		ContextCompactRatio:     envOrFloat("XALGORIX_CONTEXT_COMPACT_RATIO", 0.75),
+		MemCompTimeout:          envOrInt("XALGORIX_MEMORY_COMPRESSOR_TIMEOUT", 30),
 
 		// Gemini content-filter posture (native Gemini API path only). Default
 		// BLOCK_NONE so authorized security-testing output is not refused;
