@@ -64,6 +64,15 @@ type Config struct {
 	// the destructive-command guard, logging, or audit trails.
 	GeminiSafetyThreshold string
 
+	// RoleScopedTools withholds tool DOCUMENTATION from delegated specialists'
+	// system prompts for tools outside their assigned lane (multi-agent
+	// coordinator tools, and clearly role-foreign tool families). Hidden
+	// tools remain registered and callable, and a one-line index in the
+	// schema keeps the model aware they exist — the reachable tool set is
+	// unchanged, only prompt bytes are saved on every specialist request.
+	// XALGORIX_ROLE_SCOPED_TOOLS, default false (off).
+	RoleScopedTools bool
+
 	// BoundedContext enables information-complete bounded working context:
 	// the complete raw output of every tool result is archived under
 	// <ScanDir>/tool-outputs, and tool-result messages older than the active
@@ -388,6 +397,7 @@ func load() *Config {
 		MaxRateLimitWaitSec:     envOrInt("XALGORIX_MAX_RATE_LIMIT_WAIT", 30*60),
 		MaxOutputTokens:         envOrInt("XALGORIX_MAX_OUTPUT_TOKENS", 8192),
 		ContextCompactTokens:    envOrInt("XALGORIX_CONTEXT_COMPACT_TOKENS", -1),
+		RoleScopedTools:         envOrBool("XALGORIX_ROLE_SCOPED_TOOLS", false),
 		BoundedContext:          envOrBool("XALGORIX_BOUNDED_CONTEXT", false),
 		ToolArchiveMinBytes:     envOrInt("XALGORIX_TOOL_ARCHIVE_MIN_BYTES", 1500),
 		ToolArchiveActiveWindow: envOrInt("XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW", 8),

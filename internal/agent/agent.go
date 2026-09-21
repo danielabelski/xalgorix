@@ -529,6 +529,10 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 			if a.discoveryMode {
 				subAgent.SetDiscoveryMode(true)
 			}
+			// Role-scoped tool documentation (flag-gated): withhold
+			// role-foreign tool docs from this specialist's prompt. Tools stay
+			// registered/callable and remain listed in a compact index line.
+			subAgent.applyRoleToolScope()
 
 			var results strings.Builder
 			var delegatedErr error
