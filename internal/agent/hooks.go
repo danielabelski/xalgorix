@@ -1694,6 +1694,13 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 	if state.FinishAttempts > maxRejections {
 		return HookResult{}
 	}
+
+	// Target host unreachable/banned: allow finish so the agent does not loop
+	// endlessly trying to hit an unresponsive or dead server.
+	if state.ConsecutiveTargetErrors >= 3 {
+		return HookResult{}
+	}
+
 	// A verifier may have completed the final endpoint/class pair in the same
 	// iteration as finish. Reconcile here as well as at iteration start so the
 	// gate evaluates current evidence rather than a one-turn-old plan snapshot.
