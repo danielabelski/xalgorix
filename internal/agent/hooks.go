@@ -203,15 +203,17 @@ type ScanState struct {
 	DiscoveredEndpoints []string
 
 	// New enrichment hooks
-	WAFDetected          bool
-	RedirectDetected     bool
-	DetectedTechs        map[string]bool // e.g. "php", "nodejs", "java"
-	SkillSuggestionFired bool            // prevents hookAutoSkillSuggester from firing more than once
-	DelegationAttempted  bool            // coordinator called spawn_agent/create_agent
-	DelegationNudgeFired bool            // multi-agent role decomposition nudge sent once
-	DelegationNudgeAt    int             // iteration of the initial decomposition nudge
-	DelegationReminders  int             // bounded reminders after ignored/malformed spawn calls
-	LedgerSeeded         bool            // hypothesis ledger seeded from the plan once
+	WAFDetected                 bool
+	RedirectDetected            bool
+	DetectedTechs               map[string]bool // e.g. "php", "nodejs", "java"
+	SkillSuggestionFired        bool            // prevents hookAutoSkillSuggester from firing more than once
+	DelegationAttempted         bool            // coordinator called spawn_agent/create_agent
+	DelegationNudgeFired        bool            // multi-agent role decomposition nudge sent once
+	DelegationNudgeAt           int             // iteration of the initial decomposition nudge
+	DelegationReminders         int             // bounded reminders after ignored/malformed spawn calls
+	LedgerSeeded                bool            // hypothesis ledger seeded from the plan once
+	LastPlanBrief               string          // last plan brief injected into context; avoids duplicate injection when unchanged
+	BrowserPreferenceNudgeCount int             // tracks whether browser preference warning was emitted for consecutive calls
 }
 
 // NewScanState creates a zero-value ScanState with initialized maps.
@@ -419,6 +421,14 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	// Registered AFTER the planner so state.Plan exists when we seed the ledger.
 	reg.Register(OnIterationStart, hookLedgerSeed)
 	reg.Register(OnHealthyResponse, hookResetOnSuccess)
+	reg.Register(OnContextPrune, hookResetOnPrune)
+}
+
+func hookResetOnPrune(state *ScanState, args map[string]string) HookResult {
+	if state != nil {
+		state.LastPlanBrief = ""
+	}
+	return HookResult{}
 }
 
 const maxReportRepairAttempts = 3
@@ -1099,10 +1109,12 @@ func hookCurlPreference(state *ScanState, args map[string]string) HookResult {
 			state.BrowserAuthContext = true
 		}
 
-		// If no auth context and not the first navigation, nudge
+		// If no auth context and not the first navigation, nudge once
 		if !state.BrowserAuthContext && state.ConsecutiveBrowser > 2 {
-			return HookResult{
-				Nudge: `⚠️ TOOL PREFERENCE: You're using browser_action for testing that curl can handle faster.
+			if state.BrowserPreferenceNudgeCount == 0 {
+				state.BrowserPreferenceNudgeCount++
+				return HookResult{
+					Nudge: `⚠️ TOOL PREFERENCE: You're using browser_action for testing that curl can handle faster.
 Use browser ONLY for:
 - Login/authentication flows (forms, OAuth, SSO)
 - JavaScript-rendered content that curl can't see
@@ -1110,8 +1122,12 @@ Use browser ONLY for:
 
 For ALL other HTTP requests, use: curl -sk <URL> | head -200
 Switch to curl now — it's faster and gives you full response bodies.`,
+				}
 			}
+			return HookResult{}
 		}
+	} else {
+		state.BrowserPreferenceNudgeCount = 0
 	}
 
 	// Track send_request usage
@@ -1134,8 +1150,8 @@ Reserve send_request ONLY for authenticated requests that need Caido proxy loggi
 			}
 		}
 
-		// 3+ uses without auth context: stronger warning
-		if !hasAuthHeaders && state.SendRequestCalls >= 3 {
+		// 3 uses without auth context: stronger warning once
+		if !hasAuthHeaders && state.SendRequestCalls == 3 {
 			return HookResult{
 				Nudge: fmt.Sprintf(`⛔ STOP using send_request (%d calls) — you are missing data due to 10KB truncation.
 Switch to curl immediately:
@@ -2463,6 +2479,10 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 		gaps := CoverageGaps(state, state.DiscoveredEndpoints)
 		brief := FormatPlan(state.Plan, gaps)
 		if brief != "" {
+			if brief == state.LastPlanBrief {
+				return HookResult{}
+			}
+			state.LastPlanBrief = brief
 			return HookResult{Nudge: brief}
 		}
 	}

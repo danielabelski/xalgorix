@@ -115,6 +115,7 @@ type Registry struct {
 	tools          map[string]*Tool
 	circuitBreaker *CircuitBreaker
 	scanContextID  string // ID of the ScanContext this registry belongs to
+	contentChecker func(snippet string) bool
 }
 
 // NewRegistry creates a new tool registry.
@@ -123,6 +124,26 @@ func NewRegistry() *Registry {
 		tools:          make(map[string]*Tool),
 		circuitBreaker: NewCircuitBreaker(5, 60), // 5 failures, 60s recovery
 	}
+}
+
+// SetContentChecker associates a function that checks whether a content snippet
+// is present in the active conversation context.
+func (r *Registry) SetContentChecker(fn func(snippet string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.contentChecker = fn
+}
+
+// HasActiveContent reports whether the given content snippet is present in the
+// active conversation context. If no checker is registered, it returns false.
+func (r *Registry) HasActiveContent(snippet string) bool {
+	r.mu.RLock()
+	fn := r.contentChecker
+	r.mu.RUnlock()
+	if fn == nil {
+		return false
+	}
+	return fn(snippet)
 }
 
 // SetScanContextID associates this registry with a ScanContext.

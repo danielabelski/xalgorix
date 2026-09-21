@@ -189,6 +189,7 @@ type Agent struct {
 	benchmarkIsolated  bool
 	scanBudget         *scanBudget
 	lastBudgetTokens   int
+	compactionCount    int
 	rateLimitBackoffFn func(int) time.Duration
 }
 
@@ -399,6 +400,9 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	}
 	if a.scanBudget == nil {
 		a.scanBudget = newScanBudget()
+	}
+	if a.registry != nil {
+		a.registry.SetContentChecker(a.hasActiveContent)
 	}
 
 	// Register the structural planner tools (build_plan / update_plan). These
@@ -1148,7 +1152,19 @@ func (a *Agent) Run(targets []string, instruction string) {
 		}
 		a.client.SetTemperature(&scannerTemp)
 
-		response, err := a.client.Chat(msgsSnapshot)
+		category := scanctx.CategoryNormalReasoning
+		if a.state != nil {
+			if a.state.PendingFailedReportCalls > 0 || a.state.MalformedToolOutputCount > 0 {
+				category = scanctx.CategoryMalformedToolRecovery
+			} else if a.state.NoToolCount > 0 {
+				category = scanctx.CategoryNoToolRecovery
+			} else if a.state.FinishAttempts > 0 && iterResult.Nudge != "" {
+				category = scanctx.CategoryFinishRejectionRecovery
+			}
+		}
+
+		response, usage, err := a.client.ChatWithUsage(msgsSnapshot)
+		a.recordTokenAttribution(usage, msgsSnapshot, iter, category, 0)
 		// Update activity after LLM response
 		a.touchActivity()
 
@@ -2230,4 +2246,104 @@ func fixHttpxConflict() {
 			}
 		}
 	})
+}
+
+func determineAgentType(agentName string, isDelegated bool) string {
+	if !isDelegated {
+		return scanctx.AgentTypeRoot
+	}
+	lower := strings.ToLower(agentName)
+	switch {
+	case strings.Contains(lower, "authz") || strings.Contains(lower, "logic"):
+		return scanctx.AgentTypeAuthzLogic
+	case strings.Contains(lower, "inject") || strings.Contains(lower, "server"):
+		return scanctx.AgentTypeInjectionServer
+	case strings.Contains(lower, "client") || strings.Contains(lower, "source") || strings.Contains(lower, "xss"):
+		return scanctx.AgentTypeClientSource
+	case strings.Contains(lower, "verifier") || strings.Contains(lower, "verify"):
+		return scanctx.AgentTypeVerifier
+	default:
+		return scanctx.AgentTypeOther
+	}
+}
+
+func calculateMessageMetrics(msgs []llm.Message) (totalBytes, sysBytes, userBytes, asstBytes, toolCount, toolBytes, skillCount, skillBytes int) {
+	for _, m := range msgs {
+		b := len(m.Content)
+		totalBytes += b
+		switch m.Role {
+		case "system":
+			sysBytes += b
+		case "assistant":
+			asstBytes += b
+		case "user":
+			userBytes += b
+			isTool := strings.Contains(m.Content, "<function_results>") || strings.Contains(m.Content, "Tool '") || strings.Contains(m.Content, "result:\n")
+			if isTool {
+				toolCount++
+				toolBytes += b
+				if strings.Contains(m.Content, "read_skill") || strings.Contains(m.Content, "list_skills") || strings.Contains(m.Content, "Skill already loaded") {
+					skillCount++
+					skillBytes += b
+				}
+			}
+		}
+	}
+	return
+}
+
+func (a *Agent) recordTokenAttribution(usage *llm.TokenUsage, msgs []llm.Message, iter int, category string, retryAttempt int) {
+	if a == nil || a.scanCtx == nil || a.scanCtx.Tokens == nil {
+		return
+	}
+	totBytes, sysBytes, usrBytes, asstBytes, tCount, tBytes, sCount, sBytes := calculateMessageMetrics(msgs)
+	pTokens, outTokens, _ := a.client.GetTokens()
+
+	model := ""
+	provider := ""
+	if a.cfg != nil {
+		model = a.cfg.LLM
+		provider = a.cfg.LLMProvider
+	}
+
+	rec := scanctx.TokenAttribution{
+		ScanID:                  a.scanCtx.ID,
+		AgentID:                 a.ID,
+		AgentType:               determineAgentType(a.Name, a.state != nil && a.state.DelegatedAgent),
+		Iteration:               iter,
+		Model:                   model,
+		Provider:                provider,
+		PromptTokens:            0,
+		CompletionTokens:        0,
+		TotalTokens:             0,
+		CachedInputTokens:       0,
+		UncachedInputTokens:     0,
+		MessageCount:            len(msgs),
+		SerializedMessageBytes:  totBytes,
+		SystemMessageBytes:      sysBytes,
+		UserMessageBytes:        usrBytes,
+		AssistantMessageBytes:   asstBytes,
+		ToolResultCount:         tCount,
+		ToolResultBytes:         tBytes,
+		SkillResultCount:        sCount,
+		SkillResultBytes:        sBytes,
+		ConversationBufferBytes: totBytes,
+		RetryAttempt:            retryAttempt,
+		RequestCategory:         category,
+		CompactionCount:         a.compactionCount,
+		ScanCumulativePrompt:    pTokens,
+		ScanCumulativeOutput:    outTokens,
+		Timestamp:               time.Now(),
+	}
+	if usage != nil {
+		rec.PromptTokens = usage.PromptTokens
+		rec.CompletionTokens = usage.CompletionTokens
+		rec.TotalTokens = usage.TotalTokens
+		rec.CachedInputTokens = usage.GetCachedTokens()
+		rec.UncachedInputTokens = usage.PromptTokens - rec.CachedInputTokens
+		if rec.UncachedInputTokens < 0 {
+			rec.UncachedInputTokens = 0
+		}
+	}
+	a.scanCtx.Tokens.Record(rec)
 }

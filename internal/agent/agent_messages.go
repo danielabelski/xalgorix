@@ -295,6 +295,13 @@ func (a *Agent) pruneMessages() {
 		pruned = append(pruned, msg)
 	}
 	a.messages = pruned
+	a.compactionCount++
+	if a.state != nil {
+		a.state.LastPlanBrief = ""
+	}
+	if a.hooks != nil {
+		a.hooks.Fire(OnContextPrune, a.state, nil)
+	}
 
 	log.Printf("[agent] Pruned message history: kept %d messages (was %d), compacted %d messages into digest, notes injected: %v",
 		len(a.messages), originalLen, cutoff-1, notesContext != "")
@@ -356,6 +363,14 @@ func (a *Agent) forcePruneMessages() {
 	}
 
 	a.messages = pruned
+	a.compactionCount++
+	if a.state != nil {
+		a.state.LastPlanBrief = ""
+	}
+	if a.hooks != nil {
+		a.hooks.Fire(OnContextPrune, a.state, nil)
+	}
+
 	log.Printf("[agent] Force-pruned message history: kept %d messages (was %d), compacted %d messages into digest, notes injected: %v",
 		len(a.messages), originalLen, cutoff-1, notesContext != "")
 }
@@ -478,4 +493,21 @@ func compactMessages(msgs []llm.Message) string {
 	}
 
 	return sb.String()
+}
+
+// hasActiveContent reports whether snippet (or its truncated version as produced by
+// capToolOutputForLLM) is still present in the agent's active LLM message history.
+func (a *Agent) hasActiveContent(snippet string) bool {
+	if a == nil || snippet == "" {
+		return false
+	}
+	a.msgMu.Lock()
+	defer a.msgMu.Unlock()
+	capped := capToolOutputForLLM(snippet)
+	for _, m := range a.messages {
+		if strings.Contains(m.Content, capped) || strings.Contains(m.Content, snippet) {
+			return true
+		}
+	}
+	return false
 }

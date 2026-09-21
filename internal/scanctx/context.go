@@ -91,6 +91,9 @@ type ScanContext struct {
 	// coordinator reconcile work executed by parallel delegated specialists.
 	Coverage *CoverageStore
 
+	// Tokens tracks per-request token attribution and post-scan efficiency metrics.
+	Tokens *TokenTracker
+
 	// ctx/cancel for the scan's lifecycle
 	Ctx    context.Context
 	Cancel context.CancelFunc
@@ -113,6 +116,7 @@ func New(id, scanDir string) *ScanContext {
 		Browser:  NewBrowserState(),
 		Ledger:   NewLedgerStore(),
 		Coverage: NewCoverageStore(),
+		Tokens:   NewTokenTracker(),
 		Ctx:      ctx,
 		Cancel:   cancel,
 	}
