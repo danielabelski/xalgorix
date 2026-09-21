@@ -153,6 +153,7 @@ func TestPendingScanQueueState_RoundTripsForResume(t *testing.T) {
 	}
 	if found == nil {
 		t.Fatalf("pending queue state not resumable via auto-resume path (entries=%d)", len(entries))
+		return
 	}
 	if found.CurrentIdx != 0 {
 		t.Errorf("pending scan CurrentIdx = %d, want 0 (never started)", found.CurrentIdx)

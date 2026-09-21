@@ -20,6 +20,7 @@ func TestAutoPlanDependencyGraph(t *testing.T) {
 	recon := p.Get("recon")
 	if recon == nil {
 		t.Fatal("missing recon task")
+		return
 	}
 	if recon.Phase != 1 {
 		t.Errorf("recon phase = %d, want 1", recon.Phase)
@@ -41,6 +42,7 @@ func TestAutoPlanDependencyGraph(t *testing.T) {
 	idor := p.Get("idor")
 	if idor == nil {
 		t.Fatal("missing idor task")
+		return
 	}
 	if !dependsOn(idor, "auth-session") || !dependsOn(idor, "recon") {
 		t.Errorf("idor deps = %v, want recon+auth-session", idor.DependsOn)
@@ -50,6 +52,7 @@ func TestAutoPlanDependencyGraph(t *testing.T) {
 	verify := p.Get("verify")
 	if verify == nil {
 		t.Fatal("missing verify task")
+		return
 	}
 	if len(verify.DependsOn) == 0 {
 		t.Error("verify should depend on the test tasks")
@@ -57,6 +60,7 @@ func TestAutoPlanDependencyGraph(t *testing.T) {
 	report := p.Get("report")
 	if report == nil {
 		t.Fatal("missing report task")
+		return
 	}
 	if !dependsOn(report, "verify") {
 		t.Error("report should depend on verify")
@@ -66,6 +70,7 @@ func TestAutoPlanDependencyGraph(t *testing.T) {
 	sqli := p.Get("test-sqli")
 	if sqli == nil {
 		t.Fatal("missing test-sqli task")
+		return
 	}
 	if !strings.Contains(sqli.Notes, "/api/users") {
 		t.Errorf("test-sqli notes should list discovered endpoints, got %q", sqli.Notes)

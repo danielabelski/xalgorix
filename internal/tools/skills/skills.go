@@ -2,6 +2,7 @@
 package skills
 
 import (
+	"crypto/sha256"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -15,6 +16,30 @@ import (
 //go:embed data/*/*/*
 var embeddedSkills embed.FS
 
+type loadedSkillRecord struct {
+	canonicalName string
+	contentHash   string // SHA-256 hex
+	fullContent   string
+}
+
+type loadedListRecord struct {
+	contentHash string // SHA-256 hex
+	fullContent string
+}
+
+type agentSkillState struct {
+	mu           sync.Mutex
+	loadedSkills map[string]loadedSkillRecord // key: canonicalName
+	loadedLists  map[string]loadedListRecord  // key: filterCat
+}
+
+func newAgentSkillState() *agentSkillState {
+	return &agentSkillState{
+		loadedSkills: make(map[string]loadedSkillRecord),
+		loadedLists:  make(map[string]loadedListRecord),
+	}
+}
+
 // Register adds skill tools to the registry.
 func Register(r *tools.Registry, _ string) {
 	subFS, err := fs.Sub(embeddedSkills, "data")
@@ -22,6 +47,7 @@ func Register(r *tools.Registry, _ string) {
 		// Should not happen unless embed is empty
 		subFS = embeddedSkills
 	}
+	state := newAgentSkillState()
 	r.Register(&tools.Tool{
 		Name:        "read_skill",
 		Description: "Load a structured cybersecurity skill to get deep testing/defense methodology, tooling commands, and verification steps. Use this BEFORE attempting work in a specific domain (e.g., read_skill name=analyzing-active-directory-acl-abuse). The skill catalog is sourced from the agentskills.io standard and covers offensive testing, threat hunting, DFIR, cloud, mobile, OT/ICS, AI security, and more. Don't know the exact name? Use search_skills query='<concept>' to find the right skill, or list_skills to browse categories.",
@@ -29,7 +55,7 @@ func Register(r *tools.Registry, _ string) {
 			{Name: "name", Description: "Kebab-case skill name without extension (e.g., performing-memory-forensics-with-volatility3, analyzing-active-directory-acl-abuse). Use list_skills to discover names.", Required: true},
 			{Name: "category", Description: "Optional category to disambiguate (e.g., web-application-security, threat-hunting, reconnaissance). If omitted, all categories are searched.", Required: false},
 		},
-		Execute: makeReadSkill(subFS),
+		Execute: makeReadSkillWithState(subFS, r, state),
 	})
 
 	r.Register(&tools.Tool{
@@ -38,7 +64,7 @@ func Register(r *tools.Registry, _ string) {
 		Parameters: []tools.Parameter{
 			{Name: "category", Description: "Optional category filter (e.g., web-application-security, malware-analysis, reconnaissance). Omit to list all.", Required: false},
 		},
-		Execute: makeListSkills(subFS),
+		Execute: makeListSkillsWithState(subFS, r, state),
 	})
 
 	r.Register(&tools.Tool{
@@ -1370,6 +1396,10 @@ func resolveAlias(name string) string {
 }
 
 func makeReadSkill(fsys fs.FS) func(args map[string]string) (tools.Result, error) {
+	return makeReadSkillWithState(fsys, nil, nil)
+}
+
+func makeReadSkillWithState(fsys fs.FS, r *tools.Registry, state *agentSkillState) func(args map[string]string) (tools.Result, error) {
 	return func(args map[string]string) (tools.Result, error) {
 		name := strings.TrimSpace(args["name"])
 		category := strings.TrimSpace(args["category"])
@@ -1391,28 +1421,74 @@ func makeReadSkill(fsys fs.FS) func(args map[string]string) (tools.Result, error
 			return tools.Result{Error: "skill name is empty after sanitization"}, nil
 		}
 
-		// Resolve common shorthand aliases (e.g. "xss" → full skill name).
+		// Resolve canonical skill identity via alias map.
+		canonicalName := resolveAlias(name)
+
+		var (
+			rawContent    string
+			foundCategory string
+			found         bool
+		)
+
 		// Lookup is literal-first, alias-fallback: if a real skill matches the
 		// name as given we use it; only when no literal match exists do we
 		// resolve an alias and retry. This keeps short aliases (lfi, sqli,
 		// graphql, rce, …) working without shadowing any skill whose directory
 		// name happens to equal an alias key.
 		if out, where, ok := lookupSkill(fsys, category, name); ok {
-			return tools.Result{Output: noteIfCrossCategory(category, where, out)}, nil
-		}
-		if alias := resolveAlias(name); alias != name {
+			rawContent = out
+			foundCategory = where
+			found = true
+			if alias := resolveAlias(name); alias != name {
+				canonicalName = alias
+			} else {
+				canonicalName = name
+			}
+		} else if alias := resolveAlias(name); alias != name {
 			if out, where, ok := lookupSkill(fsys, category, alias); ok {
-				return tools.Result{Output: noteIfCrossCategory(category, where, out)}, nil
+				rawContent = out
+				foundCategory = where
+				found = true
+				canonicalName = alias
 			}
 		}
 
-		// Best-effort hint when the user has a near-match name.
-		hint := fuzzyHint(fsys, name)
-		errMsg := fmt.Sprintf("skill not found: %s — use list_skills to see available skills", name)
-		if hint != "" {
-			errMsg += "\nDid you mean: " + hint
+		if !found {
+			// Best-effort hint when the user has a near-match name.
+			hint := fuzzyHint(fsys, name)
+			errMsg := fmt.Sprintf("skill not found: %s — use list_skills to see available skills", name)
+			if hint != "" {
+				errMsg += "\nDid you mean: " + hint
+			}
+			return tools.Result{Error: errMsg}, nil
 		}
-		return tools.Result{Error: errMsg}, nil
+
+		fullOutput := noteIfCrossCategory(category, foundCategory, rawContent)
+
+		// If state or registry is nil, return full content (graceful fallback).
+		if state == nil || r == nil {
+			return tools.Result{Output: fullOutput}, nil
+		}
+
+		contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(fullOutput)))
+
+		state.mu.Lock()
+		existing, exists := state.loadedSkills[canonicalName]
+		if exists && existing.contentHash == contentHash && r.HasActiveContent(existing.fullContent) {
+			state.mu.Unlock()
+			suppressedMsg := fmt.Sprintf("Skill already loaded in the current active context: %s. The complete methodology remains available earlier in this conversation.", canonicalName)
+			return tools.Result{Output: suppressedMsg}, nil
+		}
+
+		// First load, content changed, or pruned from active context.
+		state.loadedSkills[canonicalName] = loadedSkillRecord{
+			canonicalName: canonicalName,
+			contentHash:   contentHash,
+			fullContent:   fullOutput,
+		}
+		state.mu.Unlock()
+
+		return tools.Result{Output: fullOutput}, nil
 	}
 }
 
@@ -1503,6 +1579,10 @@ func fuzzyHint(fsys fs.FS, query string) string {
 }
 
 func makeListSkills(fsys fs.FS) func(args map[string]string) (tools.Result, error) {
+	return makeListSkillsWithState(fsys, nil, nil)
+}
+
+func makeListSkillsWithState(fsys fs.FS, r *tools.Registry, state *agentSkillState) func(args map[string]string) (tools.Result, error) {
 	return func(args map[string]string) (tools.Result, error) {
 		filterCat := strings.TrimSpace(args["category"])
 		filterCat = sanitizeSlug(filterCat)
@@ -1550,6 +1630,32 @@ func makeListSkills(fsys fs.FS) func(args map[string]string) (tools.Result, erro
 		b.WriteString(fmt.Sprintf("Total: %d skills available\n", totalSkills))
 		b.WriteString("\nUsage: read_skill(name=\"skill_name\")  -- category is optional\n")
 
-		return tools.Result{Output: b.String()}, nil
+		fullOutput := b.String()
+
+		if state == nil || r == nil {
+			return tools.Result{Output: fullOutput}, nil
+		}
+
+		contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(fullOutput)))
+
+		state.mu.Lock()
+		existing, exists := state.loadedLists[filterCat]
+		if exists && existing.contentHash == contentHash && r.HasActiveContent(existing.fullContent) {
+			state.mu.Unlock()
+			catDesc := "all categories"
+			if filterCat != "" {
+				catDesc = fmt.Sprintf("category %q", filterCat)
+			}
+			suppressedMsg := fmt.Sprintf("Skills list already loaded in the current active context for %s. The complete catalog remains available earlier in this conversation.", catDesc)
+			return tools.Result{Output: suppressedMsg}, nil
+		}
+
+		state.loadedLists[filterCat] = loadedListRecord{
+			contentHash: contentHash,
+			fullContent: fullOutput,
+		}
+		state.mu.Unlock()
+
+		return tools.Result{Output: fullOutput}, nil
 	}
 }

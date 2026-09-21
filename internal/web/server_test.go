@@ -908,6 +908,7 @@ func TestQueueState_PreservesAllConfig(t *testing.T) {
 	state := s.loadQueueState()
 	if state == nil {
 		t.Fatal("queue state not loaded")
+		return
 	}
 	if state.Name != "My Pentest" {
 		t.Errorf("Name = %q, want %q", state.Name, "My Pentest")
@@ -1422,6 +1423,7 @@ func TestQueueState_OldFileWithoutNewFields(t *testing.T) {
 	state := s.loadQueueState()
 	if state == nil {
 		t.Fatal("old queue state not loaded")
+		return
 	}
 	if len(state.Targets) != 1 || state.Targets[0] != "https://old.test" {
 		t.Errorf("Targets = %v", state.Targets)

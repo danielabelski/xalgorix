@@ -428,6 +428,7 @@ func TestPKCE_HappyPath_PersistsProfile(t *testing.T) {
 	rec := f.lastTokenReq.Load()
 	if rec == nil {
 		t.Fatalf("no token request recorded")
+		return
 	}
 	if rec.GrantType != "authorization_code" {
 		t.Fatalf("grant_type = %q; want authorization_code", rec.GrantType)
@@ -599,6 +600,7 @@ func TestPKCE_PasteFallback_EquivalentResult(t *testing.T) {
 	rec := f.lastTokenReq.Load()
 	if rec == nil {
 		t.Fatalf("no token request recorded")
+		return
 	}
 	if rec.RedirectURI != pkceOOBRedirect {
 		t.Fatalf("token-endpoint redirect_uri = %q; want %q", rec.RedirectURI, pkceOOBRedirect)

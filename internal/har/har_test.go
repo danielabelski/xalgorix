@@ -30,6 +30,7 @@ func TestParseAndEndpoints(t *testing.T) {
 	}
 	if get == nil || post == nil {
 		t.Fatalf("expected GET and POST endpoints, got %+v", eps)
+		return
 	}
 	if get.URL != "https://app.example.com/api/orders" || !hasParam(get.Params, "id") {
 		t.Fatalf("GET endpoint wrong: %+v", get)

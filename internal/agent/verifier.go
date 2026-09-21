@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/llm"
+	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 	"github.com/xalgord/xalgorix/v4/internal/tools/browser"
 	"github.com/xalgord/xalgorix/v4/internal/tools/httpclient"
@@ -118,14 +119,16 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 			return reporting.VerificationVerdict{Inconclusive: true, Reason: "verification exceeded time budget"}
 		}
 
-		resp, err := a.client.Chat(msgs)
+		resp, usage, err := a.client.ChatWithUsage(msgs)
+		a.recordTokenAttribution(usage, msgs, turn, scanctx.CategoryVerifier, 0)
 		if err != nil {
 			// One retry is enough for a transient transport failure. More retries
 			// multiply provider usage while the main scan is already blocked on
 			// report_vulnerability.
 			for retry := 0; retry < 1 && err != nil; retry++ {
 				time.Sleep(500 * time.Millisecond)
-				resp, err = a.client.Chat(msgs)
+				resp, usage, err = a.client.ChatWithUsage(msgs)
+				a.recordTokenAttribution(usage, msgs, turn, scanctx.CategoryVerifier, retry+1)
 			}
 			if err != nil {
 				return reporting.VerificationVerdict{Inconclusive: true, Reason: "verifier LLM error: " + err.Error()}
@@ -175,7 +178,8 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 		// real findings), make the verifier commit to a verdict from what it has
 		// already observed. No tools — decision only.
 		msgs = append(msgs, llm.Message{Role: "user", Content: "Your re-testing budget is exhausted — do NOT run any more tools. Based ONLY on what you have already observed, call submit_verdict NOW: 'confirmed' if you reproduced real impact, 'rejected' only if you positively DISPROVED it, otherwise 'inconclusive'."})
-		if resp, err := a.client.Chat(msgs); err == nil {
+		if resp, usage, err := a.client.ChatWithUsage(msgs); err == nil {
+			a.recordTokenAttribution(usage, msgs, verifierMaxTurns, scanctx.CategoryVerifier, 0)
 			for _, tc := range llm.ParseToolCalls(stripThink(resp)) {
 				if tc.Name == "submit_verdict" {
 					_, _ = vreg.Execute(tc.Name, tc.Args)

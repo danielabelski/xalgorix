@@ -129,6 +129,7 @@ func TestDefaultFallback(t *testing.T) {
 	got := Default()
 	if got == nil {
 		t.Fatal("Default() must never return nil")
+		return
 	}
 	if got.ID != "cli-default" {
 		t.Fatalf("fallback ID = %q, want %q", got.ID, "cli-default")
