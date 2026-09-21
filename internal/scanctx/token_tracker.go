@@ -551,7 +551,9 @@ func (t *TokenTracker) diagnosticsLocked() TokenDiagnostics {
 			d.LargestConversationBytes = r.ConversationBufferBytes
 		}
 
-		// Recovery buckets.
+		// Recovery buckets. Each request is counted in exactly one bucket:
+		// its request category wins; RetryAttempt>0 only counts when the
+		// category itself is not already a recovery category.
 		switch r.RequestCategory {
 		case CategoryRetry:
 			d.Recovery.RetryRequests++
@@ -565,9 +567,14 @@ func (t *TokenTracker) diagnosticsLocked() TokenDiagnostics {
 		case CategoryFinishRejectionRecovery:
 			d.Recovery.FinishRejectionRequests++
 			d.Recovery.FinishRejectionTokens += r.TotalTokens
-		}
-		if r.RetryAttempt > 0 {
-			d.Recovery.RetryRequests++
+		case CategoryVerifier, CategoryNormalReasoning:
+			if r.RetryAttempt > 0 {
+				d.Recovery.RetryRequests++
+			}
+		default:
+			if r.RetryAttempt > 0 {
+				d.Recovery.RetryRequests++
+			}
 		}
 
 		sortedPrompts = append(sortedPrompts, r.PromptTokens)
@@ -934,6 +941,15 @@ func toPersisted(r TokenAttribution) persistedAttribution {
 }
 
 func (p persistedAttribution) toAttribution() TokenAttribution {
+	// Never fabricate: uncached is only derivable when the provider actually
+	// reported a cached-token count for this request.
+	uncached := 0
+	if p.CR {
+		uncached = p.PT - p.CD
+		if uncached < 0 {
+			uncached = 0
+		}
+	}
 	return TokenAttribution{
 		ScanID:                  p.SD,
 		Sequence:                p.Q,
@@ -947,7 +963,7 @@ func (p persistedAttribution) toAttribution() TokenAttribution {
 		TotalTokens:             p.TT,
 		CachedInputTokens:       p.CD,
 		CacheReported:           p.CR,
-		UncachedInputTokens:     p.PT - p.CD,
+		UncachedInputTokens:     uncached,
 		MessageCount:            p.N,
 		SerializedMessageBytes:  p.MB,
 		SystemMessageBytes:      p.SY,

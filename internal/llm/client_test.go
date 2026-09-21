@@ -756,6 +756,31 @@ func TestDoChat_AnthropicTokenUsageTracked(t *testing.T) {
 	}
 }
 
+func TestContentFieldUnmarshalShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want string
+	}{
+		{name: "plain string", json: `"hello"`, want: "hello"},
+		{name: "null", json: `null`, want: ""},
+		{name: "text parts array", json: `[{"type":"text","text":"Hi "},{"type":"text","text":"there"}]`, want: "Hi there"},
+		{name: "thinking and text parts", json: `[{"type":"thinking","thinking":[{"type":"text","text":"ponder"}],"closed":true},{"type":"text","text":"answer"}]`, want: "answer"},
+		{name: "thinking only", json: `[{"type":"thinking","thinking":[{"type":"text","text":"ponder"}],"closed":true}]`, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var f contentField
+			if err := json.Unmarshal([]byte(tc.json), &f); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if string(f) != tc.want {
+				t.Fatalf("content = %q, want %q", f, tc.want)
+			}
+		})
+	}
+}
+
 func TestChatWithRetry_Gemini401IsNotRateLimited(t *testing.T) {
 	c := NewClient(&config.Config{
 		LLM:           "gemini-3.1-pro",

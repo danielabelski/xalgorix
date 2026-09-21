@@ -68,11 +68,55 @@ func (s *Server) saveQueueStateDurable(idx int, req ScanRequest, progress ...que
 		state.WildcardSubdomains = append([]string(nil), req.ResumeSubdomains...)
 		state.WildcardSubIndex = req.ResumeSubIndex
 	}
+
+	// Capture live instance counters
+	if req.InstanceID != "" {
+		s.instancesMu.RLock()
+		inst := s.instances[req.InstanceID]
+		s.instancesMu.RUnlock()
+		if inst != nil {
+			inst.mu.RLock()
+			state.Iterations = inst.Iterations
+			state.TotalTokens = inst.TotalTokens
+			state.ToolCalls = inst.ToolCalls
+			inst.mu.RUnlock()
+		}
+	}
+	if state.Iterations < req.ResumeIterations {
+		state.Iterations = req.ResumeIterations
+	}
+	if state.TotalTokens < req.ResumeTotalTokens {
+		state.TotalTokens = req.ResumeTotalTokens
+	}
+	if state.ToolCalls < req.ResumeToolCalls {
+		state.ToolCalls = req.ResumeToolCalls
+	}
+
+	path := s.queueStatePathForInstance(req.InstanceID)
+	// Never downgrade monotonic counters if the on-disk queue state already has higher values
+	if existing, err := s.loadQueueStateEntry(path); err == nil && existing.state != nil {
+		if existing.state.Iterations > state.Iterations {
+			state.Iterations = existing.state.Iterations
+		}
+		if existing.state.TotalTokens > state.TotalTokens {
+			state.TotalTokens = existing.state.TotalTokens
+		}
+		if existing.state.ToolCalls > state.ToolCalls {
+			state.ToolCalls = existing.state.ToolCalls
+		}
+	}
+
+	return s.writeQueueStateAtomic(path, &state)
+}
+
+func (s *Server) writeQueueStateAtomic(path string, state *QueueState) error {
+	if state == nil {
+		return errors.New("nil queue state")
+	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal queue state: %w", err)
 	}
-	path := s.queueStatePathForInstance(req.InstanceID)
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create queue state directory: %w", err)
@@ -109,6 +153,35 @@ func (s *Server) saveQueueStateDurable(idx int, req ScanRequest, progress ...que
 		return fmt.Errorf("commit queue state rename: %w", err)
 	}
 	return nil
+}
+
+func (s *Server) updateQueueStateCounters(instanceID string, iterations, totalTokens, toolCalls int) error {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return nil
+	}
+	path := s.queueStatePathForInstance(instanceID)
+	entry, err := s.loadQueueStateEntry(path)
+	if err != nil || entry.state == nil {
+		return err
+	}
+	modified := false
+	if iterations > entry.state.Iterations {
+		entry.state.Iterations = iterations
+		modified = true
+	}
+	if totalTokens > entry.state.TotalTokens {
+		entry.state.TotalTokens = totalTokens
+		modified = true
+	}
+	if toolCalls > entry.state.ToolCalls {
+		entry.state.ToolCalls = toolCalls
+		modified = true
+	}
+	if !modified {
+		return nil
+	}
+	return s.writeQueueStateAtomic(path, entry.state)
 }
 
 func (s *Server) queueStatePath() string {
@@ -280,6 +353,9 @@ func scanRequestFromQueueState(state *QueueState, sourcePath string) ScanRequest
 		ResumeSubIndex:       state.WildcardSubIndex,
 		ResumeDiscoveryDone:  state.WildcardDiscoveryDone,
 		ResumeOriginalTarget: state.CurrentIdx,
+		ResumeIterations:     state.Iterations,
+		ResumeTotalTokens:    state.TotalTokens,
+		ResumeToolCalls:      state.ToolCalls,
 	}
 }
 
@@ -399,6 +475,9 @@ func shouldPreserveQueueStateOnExit(status, stopReason string, panicRecovered bo
 		return true
 	}
 	if status == "paused" || stopReason == "user_paused" || isProviderPauseReason(stopReason) {
+		return true
+	}
+	if status == "stopped" && (stopReason == "server_shutdown" || stopReason == "server_restart_resuming") {
 		return true
 	}
 	return strings.HasPrefix(stopReason, "signal_")

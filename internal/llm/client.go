@@ -305,10 +305,48 @@ type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+// contentField accepts the two shapes OpenAI-compatible APIs use for
+// message/delta content: a plain string (the classic form) or an array
+// of typed parts like [{"type":"text","text":"..."], which Mistral
+// returns for newer models (e.g. zai-glm-latest). Non-text parts and
+// null decode to an empty string instead of failing the whole response.
+type contentField string
+
+func (f *contentField) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*f = ""
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*f = contentField(s)
+		return nil
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(data, &parts); err != nil {
+		return err
+	}
+	var sb strings.Builder
+	for _, p := range parts {
+		if p.Type == "text" || p.Type == "" {
+			sb.WriteString(p.Text)
+		}
+	}
+	*f = contentField(sb.String())
+	return nil
+}
+
 // chatChoice represents a response choice.
 type chatChoice struct {
-	Delta   struct{ Content string } `json:"delta"`
-	Message struct{ Content string } `json:"message"`
+	Delta   struct{ Content contentField } `json:"delta"`
+	Message struct{ Content contentField } `json:"message"`
 }
 
 // chatResponse is the OpenAI-compatible response.
@@ -1418,7 +1456,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 				if len(sseResp.Choices) > 0 {
 					content := sseResp.Choices[0].Delta.Content
 					if content != "" {
-						ch <- StreamChunk{Content: content}
+						ch <- StreamChunk{Content: string(content)}
 					}
 				}
 			}
@@ -1661,5 +1699,5 @@ func (c *Client) doChatWithUsage(messages []Message) (out string, usage *TokenUs
 		c.totalCached += cached
 		c.mu.Unlock()
 	}
-	return chatResp.Choices[0].Message.Content, usage, nil
+	return string(chatResp.Choices[0].Message.Content), usage, nil
 }

@@ -886,11 +886,17 @@ func (s *Server) attachWildcardSubScansFrom(rec *ScanRecord, entries []scanEntry
 		add(child.Target, child)
 	}
 
+	childTokensSum := 0
+	childToolCallsSum := 0
+	childIterationsSum := 0
 	for _, entry := range entries {
 		child := entry.rec
 		if !isChildOfScan(rec, &child) {
 			continue
 		}
+		childTokensSum += child.TotalTokens
+		childToolCallsSum += child.ToolCalls
+		childIterationsSum += child.Iterations
 		for _, vuln := range child.Vulns {
 			// Reconstruct provenance for historical records and override stale
 			// promoted metadata with the physical child that owns the finding.
@@ -906,6 +912,15 @@ func (s *Server) attachWildcardSubScansFrom(rec *ScanRecord, entries []scanEntry
 			VulnCount:   len(child.Vulns),
 			TotalTokens: child.TotalTokens,
 		})
+	}
+	if childTokensSum > rec.TotalTokens {
+		rec.TotalTokens = childTokensSum
+	}
+	if childToolCallsSum > rec.ToolCalls {
+		rec.ToolCalls = childToolCallsSum
+	}
+	if childIterationsSum > rec.Iterations {
+		rec.Iterations = childIterationsSum
 	}
 
 	for _, evt := range rec.Events {

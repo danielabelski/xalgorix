@@ -466,21 +466,19 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	}
 
 	// 9. Finalize record
-	sess.record.Status = "finished"
-	sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+	if !s.finalizeScanSessionRecord(sess) {
+		// Interrupted (user stop / instance halt / server shutdown): the record
+		// is already persisted with its terminal status by
+		// finalizeScanSessionRecord. Token diagnostics still finalize so the
+		// summary reflects the aborted run too.
+		s.finalizeTokenUsage(sess)
+		return
+	}
 
 	// Token diagnostics: persist the aggregate summary and log the
 	// [token-analysis] completion line (observability only; no sensitive
-	// content). Runs for clean finishes AND aborted/failed sessions below.
+	// content).
 	s.finalizeTokenUsage(sess)
-
-	// NOTE: merges are deferred to sess.cleanup() (Wave C 4.2) under
-	// safe.Recover boundaries to guarantee panic-safe persistence. Both
-	// mergeReportedVulnerabilitiesIntoRecord and MergeVulnsToContext are
-	// idempotent (each entry keyed by vuln id / summary tuple), so the
-	// clean-finish path runs the merges exactly once via cleanup().
-
-	s.saveScanRecordTo(sess.record, sess.scanDir)
 
 	// 10. Generate report if requested (always generate, even for clean scans)
 	if sess.genReport {
@@ -1061,4 +1059,35 @@ func isRootAgentEvent(sess *scanSession, evt agent.Event) bool {
 		return true
 	}
 	return !strings.HasPrefix(evt.AgentID, "sub_") && !strings.HasPrefix(evt.AgentID, "sync_")
+}
+
+// finalizeScanSessionRecord saves the terminal or interrupted scan record to disk.
+// Returns true if the scan finished normally and report generation should proceed,
+// or false if the session was interrupted/stopped and must not generate a report.
+func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
+	if sess == nil || sess.record == nil {
+		return false
+	}
+	if instStatus, stopReason := s.instanceRunStatus(sess.instanceID); isInterruptedInstanceStatus(instStatus) {
+		sess.record.Status = instStatus
+		sess.record.StopReason = stopReason
+		sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+		s.saveScanRecordTo(sess.record, sess.scanDir)
+		return false
+	}
+	if s.stopReq.Load() || (sess.parentCtx != nil && sess.parentCtx.Err() != nil) {
+		sess.record.Status = "stopped"
+		sess.record.StopReason = "server_shutdown"
+		sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+		s.saveScanRecordTo(sess.record, sess.scanDir)
+		return false
+	}
+
+	sess.record.Status = "finished"
+	sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+
+	// NOTE: merges are deferred to sess.cleanup() under safe.Recover boundaries
+	// to guarantee panic-safe persistence.
+	s.saveScanRecordTo(sess.record, sess.scanDir)
+	return true
 }

@@ -1155,11 +1155,20 @@ func TestQueueStateExitAndAdvancePolicies(t *testing.T) {
 	if !shouldPreserveQueueStateOnExit("running", "", true) {
 		t.Fatal("panic recovery should preserve queue state")
 	}
+	if !shouldPreserveQueueStateOnExit("stopped", "server_shutdown", false) {
+		t.Fatal("server_shutdown scans should preserve queue state")
+	}
+	if !shouldPreserveQueueStateOnExit("stopped", "server_restart_resuming", false) {
+		t.Fatal("server_restart_resuming scans should preserve queue state")
+	}
 	if shouldPreserveQueueStateOnExit("stopped", "user_stopped", false) {
 		t.Fatal("user-stopped scans should clear queue state")
 	}
 	if shouldAdvanceQueueAfterTarget(false, "paused") {
 		t.Fatal("paused scans should not advance queue index")
+	}
+	if shouldAdvanceQueueAfterTarget(false, "stopped") {
+		t.Fatal("stopped scans should not advance queue index")
 	}
 	if shouldAdvanceQueueAfterTarget(true, "running") {
 		t.Fatal("global stop should not advance queue index")
