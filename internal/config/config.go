@@ -64,6 +64,15 @@ type Config struct {
 	// the destructive-command guard, logging, or audit trails.
 	GeminiSafetyThreshold string
 
+	// RoleScopedTools withholds tool DOCUMENTATION from delegated specialists'
+	// system prompts for tools outside their assigned lane (multi-agent
+	// coordinator tools, and clearly role-foreign tool families). Hidden
+	// tools remain registered and callable, and a one-line index in the
+	// schema keeps the model aware they exist — the reachable tool set is
+	// unchanged, only prompt bytes are saved on every specialist request.
+	// XALGORIX_ROLE_SCOPED_TOOLS, default false (off).
+	RoleScopedTools bool
+
 	// ContextCompactTokens is an OPTIONAL absolute override for the compaction
 	// trigger. When > 0, the agent auto-compacts older turns into a structured
 	// digest (+ saved notes) once the running message history is estimated to
