@@ -252,6 +252,9 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 			if panicRecovered {
 				instance.Status = "stopped"
 				instance.StopReason = "panic_recovered"
+			} else if s.stopReq.Load() {
+				instance.Status = "stopped"
+				instance.StopReason = "server_shutdown"
 			} else {
 				instance.Status = "finished"
 			}
@@ -570,10 +573,8 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		instance.mu.RLock()
 		instStatusAfterTarget := instance.Status
 		instance.mu.RUnlock()
-		// stopRequested=false: the global flag is not consulted for per-scan
-		// queue advancement (see admission-loop note). instStatusAfterTarget
-		// already reflects any per-instance stop/pause.
-		if shouldAdvanceQueueAfterTarget(false, instStatusAfterTarget) {
+		stopRequested := s.stopReq.Load() || s.instanceInterrupted(instanceID) || ctx.Err() != nil
+		if shouldAdvanceQueueAfterTarget(stopRequested, instStatusAfterTarget) {
 			s.saveQueueState(i+1, req)
 		} else {
 			interruptedQueue = true
@@ -800,7 +801,7 @@ func (s *Server) runSingleTarget(ctx context.Context, scanCfg *config.Config, re
 		llmClient:          s.scanLLMClientForRequest(req, scanCfg),
 	}
 	s.executeScanSession(sess)
-	if s.instanceInterrupted(req.InstanceID) {
+	if s.instanceInterrupted(req.InstanceID) || s.stopReq.Load() || (ctx != nil && ctx.Err() != nil) {
 		return
 	}
 
@@ -873,7 +874,7 @@ func (s *Server) runDASTTarget(ctx context.Context, scanCfg *config.Config, req 
 		llmClient:          s.scanLLMClientForRequest(req, scanCfg),
 	}
 	s.executeScanSession(sess)
-	if s.instanceInterrupted(req.InstanceID) {
+	if s.instanceInterrupted(req.InstanceID) || s.stopReq.Load() || (ctx != nil && ctx.Err() != nil) {
 		return
 	}
 
