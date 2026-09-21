@@ -1602,6 +1602,11 @@ func (a *Agent) Run(targets []string, instruction string) {
 					return
 				}
 			}
+			if a.state != nil && a.state.ConsecutiveTargetErrors >= 5 {
+				detail := fmt.Sprintf("Agent stopped before clean completion: target host unresponsive or client IP blocked across %d consecutive requests. Existing findings are preserved.", a.state.ConsecutiveTargetErrors)
+				a.emit(Event{Type: "finished", Content: detail, TotalTokens: tokenCount(), Aborted: true, AbortReason: "target_unreachable_or_banned"})
+				return
+			}
 			if stuckResult.Nudge != "" {
 				a.msgMu.Lock()
 				a.messages = append(a.messages, llm.Message{Role: "user", Content: stuckResult.Nudge})

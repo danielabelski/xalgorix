@@ -1548,3 +1548,55 @@ func TestHookSlowReconGuard(t *testing.T) {
 		t.Fatal("a non-terminal tool call must be ignored")
 	}
 }
+
+func TestHookFinishGatekeeperAllowsFinishOnTargetUnreachable(t *testing.T) {
+	state := NewScanState()
+	state.Iteration = 1
+	state.TerminalCalls = 1
+	state.ConsecutiveTargetErrors = 3
+
+	// Normally blocked because iter < 3, terminal calls < 5, and no recon
+	res := hookFinishGatekeeper(state, nil)
+	if res.Block {
+		t.Fatalf("expected finish to be allowed when ConsecutiveTargetErrors >= 3, got blocked: %s", res.BlockReason)
+	}
+}
+
+func TestTargetHealthDetectorConsecutiveErrors(t *testing.T) {
+	state := NewScanState()
+
+	// 1st and 2nd error
+	hookTargetHealthDetector(state, map[string]string{"output": "curl: (7) Failed to connect to target port 80: Connection refused"})
+	hookTargetHealthDetector(state, map[string]string{"output": "curl: (6) Could not resolve host: target.local"})
+	if state.ConsecutiveTargetErrors != 2 {
+		t.Fatalf("expected ConsecutiveTargetErrors = 2, got %d", state.ConsecutiveTargetErrors)
+	}
+
+	// 3rd error: should produce nudge
+	res3 := hookTargetHealthDetector(state, map[string]string{"output": "network is unreachable"})
+	if state.ConsecutiveTargetErrors != 3 {
+		t.Fatalf("expected ConsecutiveTargetErrors = 3, got %d", state.ConsecutiveTargetErrors)
+	}
+	if !strings.Contains(res3.Nudge, "TARGET UNREACHABLE") {
+		t.Errorf("expected target unreachable nudge, got: %s", res3.Nudge)
+	}
+
+	// Successful response resets counters
+	hookTargetHealthDetector(state, map[string]string{"output": "HTTP/1.1 200 OK\r\nContent-Type: text/html"})
+	if state.ConsecutiveTargetErrors != 0 {
+		t.Fatalf("expected ConsecutiveTargetErrors reset to 0, got %d", state.ConsecutiveTargetErrors)
+	}
+}
+
+func TestClassifyNoToolAbortTargetUnreachable(t *testing.T) {
+	state := &ScanState{
+		ConsecutiveTargetErrors: 3,
+	}
+	reason, detail := classifyNoToolAbort(state)
+	if reason != "target_unreachable_or_banned" {
+		t.Fatalf("expected reason target_unreachable_or_banned, got %s", reason)
+	}
+	if !strings.Contains(detail, "target host unresponsive or client IP blocked") {
+		t.Fatalf("expected detail to mention unresponsive target, got %s", detail)
+	}
+}
