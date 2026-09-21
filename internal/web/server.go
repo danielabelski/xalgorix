@@ -393,6 +393,9 @@ type ScanRequest struct {
 	ResumeSubIndex       int      `json:"-"`
 	ResumeDiscoveryDone  bool     `json:"-"`
 	ResumeOriginalTarget int      `json:"-"`
+	ResumeIterations     int      `json:"-"`
+	ResumeTotalTokens    int      `json:"-"`
+	ResumeToolCalls      int      `json:"-"`
 	queueOwnership       *queueOwnership
 
 	// Code-scan internals, resolved server-side from CodeScan in handleScan.
@@ -534,6 +537,9 @@ type QueueState struct {
 	WildcardDiscoveryDone bool     `json:"wildcard_discovery_done,omitempty"`
 	WildcardSubdomains    []string `json:"wildcard_subdomains,omitempty"`
 	WildcardSubIndex      int      `json:"wildcard_sub_index,omitempty"`
+	Iterations            int      `json:"iterations,omitempty"`
+	TotalTokens           int      `json:"total_tokens,omitempty"`
+	ToolCalls             int      `json:"tool_calls,omitempty"`
 }
 
 // ScanInstance represents a running or completed scan instance.
@@ -1336,6 +1342,7 @@ func (s *Server) Start() error {
 				inst.StopReason = "signal_" + sig.String()
 				inst.FinishedAt = time.Now().Format(time.RFC3339)
 				normalizeTerminalWildcardInstanceLocked(inst)
+				_ = s.updateQueueStateCounters(inst.ID, inst.Iterations, inst.TotalTokens, inst.ToolCalls)
 				if inst.agent != nil {
 					inst.agent.Stop()
 				}
