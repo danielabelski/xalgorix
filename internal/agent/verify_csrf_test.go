@@ -66,3 +66,24 @@ func TestCsrfRejectionMarker(t *testing.T) {
 		}
 	}
 }
+
+func TestHasAmbientCookie(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    bool
+	}{
+		{name: "configured session cookie", headers: map[string]string{"Cookie": "session=abc"}, want: true},
+		{name: "case insensitive header", headers: map[string]string{"cookie": "session=abc"}, want: true},
+		{name: "empty cookie", headers: map[string]string{"Cookie": "  "}, want: false},
+		{name: "authorization only", headers: map[string]string{"Authorization": "Bearer token"}, want: false},
+		{name: "anonymous", headers: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasAmbientCookie(tt.headers); got != tt.want {
+				t.Fatalf("hasAmbientCookie()=%v want %v", got, tt.want)
+			}
+		})
+	}
+}

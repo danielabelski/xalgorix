@@ -33,6 +33,7 @@ const (
 	defaultCmdTimeout = 10 * time.Minute // most commands
 	heavyCmdTimeout   = 60 * time.Minute // nmap, nuclei, ffuf, gobuster, sqlmap, masscan
 	hardMaxTimeout    = 2 * time.Hour    // absolute ceiling — nothing runs longer
+	dirbusterGrace    = 15 * time.Second // allow scanners to flush results after their own deadline
 )
 
 // ── Per-instance terminal stores ──
@@ -106,10 +107,36 @@ func isHeavyTool(command string) bool {
 
 // computeTimeout decides how long a command is allowed to run.
 func computeTimeout(command string) time.Duration {
+	// Content discovery is deliberately bounded more tightly than other heavy
+	// tools. A quiet ffuf piped to `head` can otherwise remain in its interactive
+	// console after its scan has ended and consume the entire 60-minute heavy-tool
+	// allowance. The subprocess deadline is an independent backstop around the
+	// tool's own -maxtime/--time-limit option.
+	if timeout, ok := contentDiscoveryCommandTimeout(command); ok {
+		return timeout
+	}
 	if isHeavyTool(command) {
 		return heavyCmdTimeout
 	}
 	return defaultCmdTimeout
+}
+
+func contentDiscoveryCommandTimeout(command string) (time.Duration, bool) {
+	limitSeconds := dirbusterRuntimeCapSeconds
+	if hasToolCommand(command, "ffuf") {
+		if match := flagValueRegexp("-maxtime").FindStringSubmatch(command); len(match) >= 3 {
+			if explicit, err := strconv.Atoi(match[2]); err == nil && explicit > 0 && explicit < limitSeconds {
+				limitSeconds = explicit
+			}
+		}
+		return time.Duration(limitSeconds)*time.Second + dirbusterGrace, true
+	}
+	for _, tool := range []string{"gobuster", "feroxbuster", "dirsearch", "dirb"} {
+		if hasToolCommand(command, tool) {
+			return time.Duration(limitSeconds)*time.Second + dirbusterGrace, true
+		}
+	}
+	return 0, false
 }
 
 // NormalizeCommandForRequestRatePolicy rewrites known scanner flags so terminal
@@ -152,26 +179,25 @@ func rewriteCommandForRequestRatePolicy(command string, policy scanctx.RequestRa
 // a capped buster still leaves budget for the actual exploitation step.
 const dirbusterRuntimeCapSeconds = 180
 
-// CapDirbusterRuntime injects a hard runtime cap into directory/content
-// brute-force tools when the model omits one. ffuf without -maxtime and
-// feroxbuster without --time-limit routinely run until the full per-command
-// timeout on CTF/real apps (few matches, so a piped `| head` never closes its
-// side of the pipe), which repeatedly burned whole attempts and starved the
-// real exploit (observed on the SQLi/method-tamper/traversal challenges). This
-// is an ALWAYS-ON backstop — independent of the request-rate policy — for the
-// prompt guidance the model sometimes ignores. It only ADDS a cap when none is
-// present, so an explicit smaller bound the model set is preserved.
+// CapDirbusterRuntime bounds directory/content brute-force tools and makes ffuf
+// non-interactive. A quiet ffuf piped to `head` can otherwise enter its console
+// after scanning and never close the pipe. Explicit smaller limits are
+// preserved; larger limits are reduced to the cap. computeTimeout provides an
+// independent process-tree deadline in case a tool ignores its own flag.
 func CapDirbusterRuntime(command string) string {
 	cap := strconv.Itoa(dirbusterRuntimeCapSeconds)
 	return rewriteShellSegments(command, func(segment string) string {
-		if hasToolCommand(segment, "ffuf") && !hasCommandFlag(segment, "-maxtime") {
-			segment = appendCommandArg(segment, "-maxtime "+cap)
+		if hasToolCommand(segment, "ffuf") {
+			segment = capFlagValue(segment, []string{"-maxtime"}, cap)
+			if !hasCommandFlag(segment, "-noninteractive") {
+				segment = appendCommandArg(segment, "-noninteractive")
+			}
 		}
 		if hasToolCommand(segment, "feroxbuster") && !hasCommandFlag(segment, "--time-limit") {
 			segment = appendCommandArg(segment, "--time-limit "+cap+"s")
 		}
-		if hasToolCommand(segment, "dirsearch") && !hasCommandFlag(segment, "--max-time") {
-			segment = appendCommandArg(segment, "--max-time "+cap)
+		if hasToolCommand(segment, "dirsearch") {
+			segment = capFlagValue(segment, []string{"--max-time"}, cap)
 		}
 		return segment
 	})
@@ -1355,6 +1381,12 @@ func runShellInternal(contextID string, command string) (string, int) {
 
 	// Compute timeout based on command type
 	cleanCmd, ratePolicyNotice := NormalizeCommandForRequestRatePolicy(contextID, command)
+	boundedCmd := CapDirbusterRuntime(cleanCmd)
+	dirbusterNotice := ""
+	if boundedCmd != cleanCmd {
+		dirbusterNotice = fmt.Sprintf("[DISCOVERY GUARD] Bounded content discovery to %ds and disabled ffuf interactive mode.\n", dirbusterRuntimeCapSeconds)
+		cleanCmd = boundedCmd
+	}
 	cleanCmd = InjectScanHeadersIntoCommand(cleanCmd)
 
 	cfg := config.Get()
@@ -1367,7 +1399,7 @@ func runShellInternal(contextID string, command string) (string, int) {
 		return ratePolicyNotice + fmt.Sprintf("[WORDLIST] Could not prepare a portable wordlist: %v", wordlistErr), -1
 	}
 	cleanCmd = wordlistCmd
-	commandNotice := ratePolicyNotice + wordlistNotice
+	commandNotice := ratePolicyNotice + dirbusterNotice + wordlistNotice
 	timeout := computeTimeout(cleanCmd)
 	if timeout > hardMaxTimeout {
 		timeout = hardMaxTimeout

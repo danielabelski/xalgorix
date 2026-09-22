@@ -75,7 +75,7 @@ func emptyPollGuidance(consecutiveEmpty int) string {
 func Register(r *tools.Registry) {
 	r.Register(&tools.Tool{
 		Name:        "oob_callback",
-		Description: "Out-of-band (OAST) callback oracle for investigating blind vulnerabilities (blind SSRF, blind RCE, blind XSS, XXE, blind SQLi, blind CMDi). Workflow: (1) action=generate to mint a callback; (2) plant it in the target-side payload; (3) action=poll with the token. IMPORTANT: an interaction proves only that some system contacted the callback. For SSRF, send the injection request with redirects disabled and require an origin-assessed, non-scanner HTTP interaction. DNS-only, scanner-origin, or origin-unassessed hits are leads, not SSRF proof.",
+		Description: "Out-of-band (OAST) callback oracle for investigating blind vulnerabilities (blind SSRF, blind RCE, blind XSS, XXE, blind SQLi, blind CMDi). Workflow: (1) action=generate to mint a callback; (2) plant it in the target-side payload; (3) action=poll with the token. NEVER request the callback directly from the scanner as a connectivity check; that contaminates the token and proves nothing. IMPORTANT: an interaction proves only that some system contacted the callback. For SSRF, send the injection request with redirects disabled and require an origin-assessed, non-scanner HTTP interaction. DNS-only, scanner-origin, or origin-unassessed hits are leads, not SSRF proof.",
 		Parameters: []tools.Parameter{
 			{Name: "action", Description: "'generate' to mint a new callback URL (default if omitted), or 'poll' to check for interactions on a token.", Required: false},
 			{Name: "token", Description: "For action=poll: the token returned by generate.", Required: false},

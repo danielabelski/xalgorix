@@ -393,6 +393,11 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// request itself, so no scope gate is needed.
 	a.registerOOBVerifyTool(reg)
 
+	// Register the bounded timing-differential verifier (verify_timing). It is
+	// the in-band fallback for blind server-side injection when reconnaissance
+	// yields a safe delay primitive but OAST is unavailable or ambiguous.
+	a.registerVerifyTimingTool(reg)
+
 	// Register HAR ingestion (ingest_har): turns a logged-in HAR into live
 	// authenticated scan context — registers session auth and seeds the ledger
 	// with authenticated-endpoint authorization hypotheses.
@@ -436,6 +441,7 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// recording exploit-proven evidence in the ledger. Agent-bound: needs the
 	// scope config, session auth, the scan target, and the ledger.
 	a.registerVerifySSTITool(reg)
+	a.registerVerifyPathTraversalTool(reg)
 
 	// Register the deterministic XML External Entity confirmer (verify_xxe): the
 	// XXE sibling of verify_sqli/verify_ssti. Given a seeded hypothesis or a url,
@@ -450,8 +456,9 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// url (or hypothesis) and the state-change body, it replays the request with
 	// a forged cross-site Origin/Referer and no anti-CSRF token, and confirms
 	// CSRF when the server accepts it — declining when the endpoint is protected
-	// by an Authorization header (not CSRF-able). Agent-bound: needs the scope
-	// config, session auth, the scan target, and the ledger.
+	// by an Authorization header or has no ambient cookie session (neither is
+	// proof of CSRF). Agent-bound: needs the scope config, session auth, the scan
+	// target, and the ledger.
 	a.registerVerifyCSRFTool(reg)
 
 	// Create cancellable context
@@ -568,12 +575,15 @@ func (a *Agent) delegatedWorkFinishGate(_ *ScanState, _ map[string]string) HookR
 // several explicit nudges and continue serial work until the scan deadline.
 // Engine-owned launch makes coverage parallel by construction while the graph's
 // lifetime cap and child tool registry still make additional/nested waves
-// impossible.
+// impossible. Roles with hard prerequisites are filtered deterministically:
+// authorization work is not launched without a configured or ingested
+// authenticated identity, because an anonymous-only specialist otherwise
+// degenerates into password spraying and disabled-signup probing.
 func (a *Agent) maybeAutoDelegate(targets []string) string {
 	if a == nil || a.state == nil || a.registry == nil || a.agentGraph == nil ||
 		a.delegatedAgentID != "" || a.ctfMission || a.state.DiscoveryMode ||
 		a.state.ReconOnlyMode || a.state.DelegationAttempted ||
-		!a.state.ReconDone || a.state.Iteration < 5 || a.state.Plan == nil ||
+		!a.state.ReconDone || !a.state.EndpointInventorySaved || a.state.Iteration < 5 || a.state.Plan == nil ||
 		!a.state.PlanBuilt || !a.state.LedgerSeeded || a.agentGraph.DelegationCount() > 0 {
 		return ""
 	}
@@ -585,8 +595,9 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 	if len(targets) > 0 {
 		target = strings.TrimSpace(targets[0])
 	}
-	spawned := make([]string, 0, len(defaultSpecialistProfiles))
-	for _, profile := range defaultSpecialistProfiles {
+	profiles := a.eligibleSpecialistProfiles()
+	spawned := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
 		task := fmt.Sprintf(`Own ONLY the %q lane against %s.
 Assigned vulnerability classes: %s.
 Start with read_ledger(filter=schedulable), then claim_next_hypothesis separately for every assigned class. Do not repeat root reconnaissance or work outside this lane.
@@ -619,6 +630,17 @@ Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", 
 	a.state.DelegationAttempted = true
 	a.state.DelegationNudgeFired = true
 	return fmt.Sprintf("🚀 ENGINE DELEGATION STARTED: launched %d non-overlapping specialists (%s). Continue the root's highest-value remaining work now; periodically collect each result with check_agent/wait_agent, verify candidates independently, and do not launch another wave.", len(spawned), strings.Join(spawned, ", "))
+}
+
+func (a *Agent) eligibleSpecialistProfiles() []specialistProfile {
+	profiles := make([]specialistProfile, 0, len(defaultSpecialistProfiles))
+	for _, profile := range defaultSpecialistProfiles {
+		if profile.Role == "authz-logic" && len(a.authzIdentities()) <= 1 {
+			continue
+		}
+		profiles = append(profiles, profile)
+	}
+	return profiles
 }
 
 // SetDiscoveryMode configures the agent to skip minimum iteration checks on finish.
@@ -1007,6 +1029,12 @@ func (a *Agent) Run(targets []string, instruction string) {
 	a.state.DelegatedAgent = a.delegatedAgentID != ""
 	a.state.DelegatedAgentID = a.delegatedAgentID
 	a.state.BenchmarkIsolated = a.benchmarkIsolated
+	a.state.ProfessionalAssessment = !a.ctfMission
+	a.state.AuthContextKnown = true
+	a.state.AuthContextAvailable = len(httpclient.ParseAuthHeaders(a.targetAuth)) > 0
+	if a.scanCtx != nil && len(httpclient.SessionAuthForContext(a.scanCtx.ID)) > 0 {
+		a.state.AuthContextAvailable = true
+	}
 	a.state.DiscoveryMode = a.discoveryMode
 	a.state.AllowedPhases = append([]int(nil), a.allowedPhases...)
 	a.state.ReconOnlyMode = isReconReportOnlyPhaseSelection(a.allowedPhases)
@@ -1112,6 +1140,14 @@ func (a *Agent) Run(targets []string, instruction string) {
 		response, err := a.client.Chat(msgsSnapshot)
 		// Update activity after LLM response
 		a.touchActivity()
+		// A benchmark deadline, operator stop, or parent cancellation must win
+		// over provider retry logic. Otherwise an already-canceled request can
+		// enter the 25-attempt exponential backoff and keep a stopped scan alive
+		// for many minutes after its deadline.
+		if a.stopped.Load() || (a.ctx != nil && a.ctx.Err() != nil) {
+			a.emit(Event{Type: "finished", Content: "Scan stopped", TotalTokens: tokenCount()})
+			return
+		}
 
 		if err != nil {
 			a.state.ConsecutiveErrors++
@@ -1200,7 +1236,16 @@ func (a *Agent) Run(targets []string, instruction string) {
 			if backoff > 120*time.Second {
 				backoff = 120 * time.Second
 			}
-			time.Sleep(backoff)
+			if a.ctx != nil {
+				select {
+				case <-a.ctx.Done():
+					a.emit(Event{Type: "finished", Content: "Scan stopped", TotalTokens: tokenCount()})
+					return
+				case <-time.After(backoff):
+				}
+			} else {
+				time.Sleep(backoff)
+			}
 			continue
 		}
 		// ConsecutiveErrors reset is handled by OnHealthyResponse hook below
@@ -1453,6 +1498,16 @@ func (a *Agent) Run(targets []string, instruction string) {
 				continue
 			}
 
+			if blocked, reason := a.shouldBlockForMissingAuthPrerequisites(tc.Name, tc.Args); blocked {
+				blockMsg := "⛔ AUTH PREREQUISITE GUARD BLOCKED TOOL — " + reason + noteBlockedToolCall(a.state, tc.Name, tc.Args)
+				a.emit(Event{Type: "tool_call", ToolName: tc.Name, ToolArgs: tc.Args})
+				a.emit(Event{Type: "tool_result", ToolName: tc.Name, ToolResult: tools.Result{Output: blockMsg}, TotalTokens: tokenCount()})
+				a.msgMu.Lock()
+				a.messages = append(a.messages, llm.Message{Role: "user", Content: blockMsg})
+				a.msgMu.Unlock()
+				continue
+			}
+
 			// ── In-scope guard ──
 			// Runs UNCONDITIONALLY (active and passive). Probes and
 			// finding reports for hosts not derived from the configured
@@ -1541,11 +1596,12 @@ func (a *Agent) Run(targets []string, instruction string) {
 			})
 
 			// ── Hook: OnToolResult (WAF detection, tech detection) ──
-			resultArgs := map[string]string{
-				"tool_name": tc.Name,
-				"output":    result.Output,
-				"error":     result.Error,
+			resultArgs := make(map[string]string, len(toolArgs)+2)
+			for k, v := range toolArgs {
+				resultArgs[k] = v
 			}
+			resultArgs["output"] = result.Output
+			resultArgs["error"] = result.Error
 			toolResultHook := a.hooks.Fire(OnToolResult, a.state, resultArgs)
 			if toolResultHook.EmitMessage != "" {
 				a.emit(Event{Type: "message", Content: toolResultHook.EmitMessage, TotalTokens: tokenCount()})

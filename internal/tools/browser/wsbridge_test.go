@@ -18,7 +18,13 @@ func resetBridge() {
 	if bridge != nil && bridge.running {
 		bridge.Stop()
 	}
-	bridge = nil
+	// Unit tests must not compete with a locally running Xalgorix process for
+	// the production extension port (38401). Let the OS allocate an isolated
+	// loopback port for every test bridge instead.
+	bridge = &WSBridge{
+		addr:    "127.0.0.1:0",
+		pending: make(map[string]chan json.RawMessage),
+	}
 }
 
 func TestBridge_Singleton(t *testing.T) {

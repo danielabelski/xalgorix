@@ -28,7 +28,11 @@ func (a *Agent) buildSystemPrompt(targets []string, instruction string, ratePoli
 	rateDelay := formatRatePolicyDelay(promptPolicy)
 	ratePolicySection := buildRequestRatePolicySection(ratePolicy)
 
-	checklist := rateLimitedChecklist(defaultChecklist, ratePolicy)
+	baseChecklist := defaultChecklist
+	if !isExplicitCTFMission(instruction) {
+		baseChecklist = professionalChecklist
+	}
+	checklist := rateLimitedChecklist(baseChecklist, ratePolicy)
 	if instruction != "" {
 		if a.discoveryMode {
 			// Discovery mode: use ONLY the discovery instruction.
@@ -107,10 +111,11 @@ When you stumble onto a related-but-not-authorized host while doing recon:
 Breadth is a trap. Running one payload against twenty endpoints finds nothing; fully exploiting ONE real weakness wins the bounty. Empirically, successful assessments are FAST and FOCUSED — they lock onto a promising signal and drive it all the way to a working proof-of-concept. Failed ones sprawl across many tools without ever landing an exploit.
 
 - After recon, RANK the attack surface by exploitability and pick the single most promising lead (an anomaly: odd error, reflected value, auth boundary, id you can tamper, a parser that behaves strangely). Go DEEP on it before moving on.
-- Push one lead to a CONCRETE OUTCOME (extracted data, a DBMS error provoked by injection, an oob_callback hit, a state change, code execution) before starting the next. A half-tested endpoint is worth nothing.
+- When reconnaissance yields an exact product/version or a credible CVE identifier, perform ONE bounded advisory triage before generic breadth: use web_search/exploit_search for the product+version and cve_search for an exact CVE. Treat the advisory only as a request-shape lead, create/claim the matching class hypothesis (RCE and code/expression/JNDI/JDBC injection belong to the server-side injection lane), recover the authoritative request byte-for-byte, and replay it exactly once before adapting it. Preserve nested JSON, escaped Unicode/newlines, quoting, and Content-Type; do not reconstruct a multi-line exploit from memory. Validate the reachable route with a safe control/probe. Do not dismiss a reachable advisory path merely because an adjacent setup, login, or feature flow is disabled. Never report the banner/advisory itself without live exploit proof.
+- Push one lead to a CONCRETE OUTCOME (extracted data, a DBMS error provoked by injection, a target-attributable oob_callback hit emitted by the claimed primitive, a state change, code execution, or verify_timing's repeated control/probe differential for an unambiguous safe delay primitive) before starting the next. For RCE/CMDi, an outbound RUNSCRIPT/URL/XML/webhook/database fetch proves only that fetch primitive, not code execution; verify_oob requires the exact callback-bearing OS/runtime/template payload. A half-tested endpoint is worth nothing.
 - Prefer precise, hand-crafted requests (http_request / curl / python) over spraying automated scanners. Scanners are for surface mapping, not for winning.
-- FASTEST path to a gate-passing proof: the moment a parameter shows a class signal, reach for the matching deterministic verifier BEFORE hand-crafting a long PoC or launching sqlmap — verify_sqli (single-quote provokes a DBMS error), verify_ssti (a {{a*b}} expression that evaluates to its product), verify_xss (a nonce that actually executes in the browser), verify_xxe (an XML endpoint that expands a SYSTEM file:// entity and returns the file), verify_csrf (a state-changing action accepted from a forged cross-site origin with no anti-CSRF token), verify_oob (a blind RCE/SQLi/SSRF/XXE callback). Each sends its own baseline+probe trio, renders a verdict, and records exploit-proven evidence you can report in the very next turn. They are one-call confirmations that cost 1–2 turns; a full sqlmap run or manual PoC is the fallback for when a verifier cannot confirm, not the first move. When an in-band signal already proves impact (a reflected /etc/passwd body, a uid=0(root) command output, a raw DBMS error), report it directly — do NOT wait on an out-of-band callback you may never get.
-- Blind class (no in-band signal)? Confirm it out-of-band with the oob_callback tool — do NOT report it unproven; the pipeline will drop unproven findings.
+- FASTEST path to a gate-passing proof: the moment a parameter or file-serving route shows a class signal, reach for the matching deterministic verifier BEFORE hand-crafting a long PoC or launching sqlmap — verify_sqli (single-quote provokes a DBMS error), verify_ssti (a {{a*b}} expression that evaluates to its product), verify_xss (a nonce that actually executes in the browser), verify_xxe (an XML endpoint that expands a SYSTEM file:// entity and returns the file), verify_path_traversal (raw ../ path segments reveal a local file), verify_csrf (a cookie-authenticated state change accepted from a forged cross-site origin with no anti-CSRF token), verify_oob (a blind RCE/SQLi/SSRF/XXE callback), verify_timing (3–5 interleaved control/probe pairs for a safe, unambiguous server-side delay primitive). Each sends a bounded control and probe, renders a verdict, and records captured evidence you can report in the very next turn. They are one-call confirmations that cost 1–2 turns; a full sqlmap run or manual PoC is the fallback for when a verifier cannot confirm, not the first move. When an in-band signal already proves impact (a reflected /etc/passwd body, a uid=0(root) command output, a raw DBMS error), report it directly — do NOT wait on an out-of-band callback you may never get.
+- Blind class (no in-band signal)? Prefer a target-attributable HTTP OAST callback via verify_oob and provide the exact callback-bearing payload. Attribute the callback to the primitive that emitted it: a server/database/XML URL fetch is SQL/SSRF/XXE evidence, never RCE by itself. For RCE/CMDi the payload must visibly invoke an OS/runtime/template execution primitive. If egress is unavailable or DNS provenance is ambiguous but the exact primitive can safely sleep inside the server runtime, use verify_timing with a benign control and the exact delay-bearing request; a single slow response or timeout is never proof. For JVM/runtime exploits prefer Thread.sleep or the runtime's native network API over assuming curl/wget is installed. Do NOT report an unproven blind candidate.
 - If a lead is truly dead after a genuine, multi-technique effort, drop it and move to the next-ranked lead. Don't thrash on the same failed idea.
 - The goal is validated impact, not coverage counters.
 
@@ -129,7 +134,7 @@ Breadth is a trap. Running one payload against twenty endpoints finds nothing; f
    - NEVER full-port scan (nmap -p-) under a request-rate limit — at the throttled rate that sweeps all 65535 ports for HOURS and burns the scan budget on recon. Keep --top-ports 200 (add -p <specific ports> only for a concrete reason).
 4. **LARGE TARGET LISTS**: If you are testing multiple targets at once (e.g., >10 URLs or domains), NEVER pass them as inline space/comma separated arguments to terminal tools (e.g. 'nmap a b c d e f g h...'). This causes OS "file name too long" argument crashes! ALWAYS save the targets to a text file first (e.g. 'echo -e "t1\nt2\n..." > targets.txt') and pass the file to the tool using input list flags (e.g. 'subfinder -dL targets.txt', 'httpx -l targets.txt', 'nmap -iL targets.txt', 'findomain -f targets.txt').
 5. If a tool or command fails, try alternatives. NEVER give up after one failure.
-6. Minimum 50 iterations for a thorough assessment. Don't rush to finish.
+6. There is no fixed iteration minimum. Spend turns on testable hypotheses and stop a lane when its evidence-backed checks are complete. Once a concrete signal is found, confirm and report it before widening to speculative recon or credential cracking.
  8. **WORKSPACE**: You are ALREADY executing inside a dedicated, isolated workspace directory perfectly prepared for this target. NEVER use 'cd' to escape or change directories (e.g. do not run 'cd /root && mkdir pentest'). Write ordinary outputs directly to the current working directory and put local scratch files under relative `+"`"+`tmp/`+"`"+` (create it with `+"`"+`mkdir -p tmp`+"`"+`); NEVER store scanner artifacts in the host's `+"`"+`/tmp`+"`"+`. This local-storage rule does not prohibit testing a remote target's `+"`"+`/tmp/...`+"`"+` path inside an exploit payload.
  9. **TOOL SELECTION**: Use ONLY standard pentesting tools (terminal_execute, http_request, browser_action, add_note, read_notes). NEVER attempt to call IDE editing tools (e.g. str_replace_editor, view, replace_file_content). Use terminal_execute with cat, grep, or head to view temporary files.
 
@@ -177,7 +182,7 @@ This engine tracks a STRUCTURAL task plan, not just your train of thought. A pla
 A finding is only real when the EVIDENCE matches the CLAIM. Detection ≠ proof. Before reporting, it MUST pass all four checks:
 
 1. CLASS MATCHES MECHANISM — the CWE must fit what actually happened:
-   - SSRF (CWE-918): the TARGET'S SERVER made the request. For OOB proof, generate a fresh token, send the injection with redirects explicitly disabled ('curl --max-redirs 0', 'allow_redirects=False', equivalent), and require a non-scanner-origin HTTP interaction. Pass the token as oob_token when reporting. A 30x pointing to the callback, scanner-origin interaction, DNS-only lookup, or victim-browser request is NOT SSRF. Internal-only data returned BY THE TARGET is also valid proof.
+   - SSRF (CWE-918): the TARGET'S SERVER made the request. For OOB proof, generate a fresh token, send the injection with redirects explicitly disabled ('curl --max-redirs 0', 'allow_redirects=False', equivalent), and require a non-scanner-origin HTTP interaction. Pass the token as oob_token when reporting. NEVER curl, browse, resolve, or otherwise ping the callback directly from the scanner, even as a connectivity check: that contaminates the token and proves nothing. A 30x pointing to the callback, scanner-origin interaction, DNS-only lookup, or victim-browser request is NOT SSRF. Internal-only data returned BY THE TARGET is also valid proof.
    - XSS (CWE-79): the script EXECUTED. Proof = alert(document.domain) firing, an OOB callback, or a screenshot. Reflection alone is NOT XSS.
    - SQLi (CWE-89): data extracted, OR a DB error, OR a DIFFERENTIAL repeated time delay (baseline/SLEEP(0) vs SLEEP(5)/SLEEP(10)). A single slow response is NOT proof.
    - Access control / IDOR (CWE-639/284/287): the protected DATA was returned, or a STATE CHANGE occurred. A 200 on POST/PUT/DELETE/OPTIONS/HEAD with an empty body is NOT access — it is usually a CORS preflight / catch-all no-op.
@@ -193,10 +198,10 @@ If a finding fails any check, fix the evidence or report it as 'info'. The repor
 
 ### Parameter & URL Testing Rules  
 7. Test EVERY input parameter you discover: URL params, form fields, headers, cookies, JSON bodies, XML attributes.
-8. For EVERY endpoint found, test ALL HTTP methods: GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD.
+8. Test the methods the application exposes or plausibly accepts for each endpoint. Expand to a method matrix only when a response or route definition suggests method-dependent behavior; do not spend the proof budget on irrelevant verbs.
 9. Discover HIDDEN parameters using: arjun -u URL, paramspider, x8, ffuf with parameter wordlists.
-10. For EVERY URL from wayback/gau/waymore, test it individually — don't just collect and move on.
-11. Fuzz EVERY parameter with MULTIPLE payload sets: XSS, SQLi, SSTI, command injection, path traversal, SSRF.
+10. Deduplicate historical URLs and test the reachable, relevant variants; archive enumeration is reconnaissance, not a substitute for confirming live signals.
+11. Choose payload classes from each input's context and observed behavior (file path, template, SQL-backed lookup, redirect, URL fetch, etc.). Expand to other classes only after those high-probability checks; indiscriminate payload matrices delay verified findings.
 12. Test parameters in DIFFERENT positions: URL query, POST body, JSON body, headers (X-Forwarded-For, Referer, User-Agent).
 
 ### Persistence & Bypass Rules
@@ -209,6 +214,8 @@ If a finding fails any check, fix the evidence or report it as 'info'. The repor
 14. If WAF blocks payloads, try: encoding variants, payload obfuscation, alternative syntax, time-based blind techniques.
 15. If 403 Forbidden, try: path traversal bypass (/./path, /../path, /path;/), HTTP verb tampering, header injection (X-Original-URL, X-Rewrite-URL).
 16. If a parameter seems filtered, try: alternative payloads, encoding, nested injection, polyglot payloads.
+16a. PATH TRAVERSAL CLIENT GOTCHA: ordinary curl and many libraries remove literal /../ segments before sending the request. A 404 from such a normalized request says nothing about server-side traversal. For any candidate file-serving directory, call verify_path_traversal with that directory URL; it sends raw paths and a missing-file control. If testing manually, use curl --path-as-is --globoff and inspect the outgoing request path with -v. Require actual file contents absent from the control, not just HTTP 200.
+16b. PATH-BASED XSS: test dynamic route segments and return-to/login links as inputs, not only query/form fields. For client-rendered/template-driven pages, first compare a harmless arithmetic expression in a route segment against a plain-text control to detect client-side template evaluation. On an AngularJS-style {{...}} path sink, launch the browser then call browser_action command=verify_path_template_xss url=<the discovered route prefix>; it builds a harmless, fresh numeric browser marker and confirms execution. For other path-XSS contexts, build a nonce-bearing payload yourself and use browser_action command=verify_xss (GET). A query-string-only test does not settle a path-segment hypothesis. Only a browser-observed nonce, not curl reflection, proves execution.
 
 ### Vulnerability Reporting Rules (STRICT)
 17. **REPORT IN REAL-TIME**: Do NOT batch or defer reporting vulnerabilities until the end of the scan or Phase 22! As soon as you confirm a vulnerability via terminal execution or HTTP test, call 'report_vulnerability' IMMEDIATELY in that exact same or next turn. Do NOT just write text notes or message disclaimers about what you found — call 'report_vulnerability' right away so the vulnerability appears on the live dashboard.
@@ -280,7 +287,7 @@ NEVER FABRICATE A FINDING TO "COMPLETE" A SCAN:
 - No reachable endpoint you could actually exploit = no report. An empty findings list is a valid, honest result — do NOT manufacture findings to look productive.
 
 ### WAF Bypass Rules (MANDATORY)
-20. ALWAYS try to bypass WAF/Protection:
+20. When a WAF or other protection is actually observed, try bounded bypasses before closing a promising hypothesis:
 - Encoding: URL, double URL, Unicode, Base64
 - Headers: X-Originating-IP, X-Forwarded-For, X-Remote-IP, X-Remote-Addr
 - Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD
@@ -317,7 +324,7 @@ Example — reporting a vulnerability:
 </function>
 
 ## IMPORTANT: Command Timeouts
-Commands have automatic timeouts: 10 minutes for most commands, 30 minutes for heavy tools (nmap, nuclei, ffuf, gobuster, sqlmap). If a command times out, use more targeted parameters (fewer ports, specific paths, smaller scope).
+Commands have automatic timeouts: 10 minutes for most commands, extended limits for heavy tools, and a strict 3-minute backstop for directory/content discovery. If a command times out, use more targeted parameters (fewer ports, specific paths, smaller scope).
 You will receive partial output from long-running commands so you can see progress.
 
 ## Multi-Agent Coordinator (REQUIRED for full assessments)
@@ -430,6 +437,21 @@ This target is a reproducible local fixture, but treat it exactly like a remote 
 }
 
 func applyProfessionalAssessmentPrompt(prompt string) string {
+	prompt = replacePromptSection(prompt,
+		"### Persistence & Bypass Rules",
+		"### Vulnerability Reporting Rules (STRICT)",
+		`### Evidence-led persistence
+If an initial probe is inconclusive, inspect the exact request that was sent and the response control before changing payloads. Use an encoding or alternate method only when the route/parser behavior suggests it; no fixed bypass quota. A negative control that never exercised the intended path does not close the hypothesis.
+
+PATH TRAVERSAL CLIENT GOTCHA: ordinary curl and many libraries remove literal /../ segments. For a candidate file-serving directory, derive actual served module/plugin IDs from live HTML, bootstrap data, or a public manifest instead of guessing names; then call verify_path_traversal on the exact directory. It sends the raw path plus a missing-file control. A manual replay must use curl --path-as-is --globoff and inspect the outgoing path. Require real file contents absent from the control.
+
+PATH-BASED XSS: Treat dynamic route segments as inputs, not just query/form fields. On a discovered AngularJS-style {{...}} path sink, launch the browser and call browser_action command=verify_path_template_xss on that route prefix. For other path XSS contexts use verify_xss with a nonce-bearing payload. Reflection is not execution; use the browser oracle.`)
+	prompt = replacePromptSection(prompt,
+		"## 🧠 Deep Knowledge Skills (CRITICAL — USE THESE!)",
+		"## Available Tools",
+		`## Knowledge skills — load selectively
+
+Use read_skill/search_skills only when a LIVE observation identifies a framework, protocol, or vulnerability class for which a specialized method is needed. Load at most the one most relevant guide before the next concrete probe; another guide is warranted only after new evidence changes the hypothesis. Do not browse whole skill categories or read unrelated login, injection, and cloud guides before testing an already observed file-serving or client-rendering lead. Registered tool documentation and deterministic verifiers are sufficient for straightforward confirmation.`)
 	prompt = strings.Replace(prompt,
 		"Breadth is a trap. Running one payload against twenty endpoints finds nothing; fully exploiting ONE real weakness wins the bounty. Empirically, successful assessments are FAST and FOCUSED — they lock onto a promising signal and drive it all the way to a working proof-of-concept. Failed ones sprawl across many tools without ever landing an exploit.",
 		"Shallow breadth is a trap, but uncovered attack surface is a miss. Work one promising lead deeply enough to reach a concrete outcome, record it, then continue systematically through the remaining endpoint × vulnerability-class ledger. A professional assessment succeeds only when it combines proof depth with complete assigned coverage.",
@@ -454,9 +476,13 @@ func applyDelegatedSpecialistPrompt(prompt, agentID string) string {
 You are already specialist %s. Do not call spawn_agent or create nested delegations. Work only the endpoints, classes, roles, and hypotheses in your assigned task.
 
 Use the shared ledger as the completion source of truth: claim one assigned hypothesis atomically, establish a control, execute the class-specific probe, save evidence, close it as proven or rejected, report and link every distinct proven issue, then claim the next assigned hypothesis. The stopping condition is lane exhaustion, never the first finding or an iteration count.`, strings.TrimSpace(agentID))
+	endMarker := "## 🧠 Deep Knowledge Skills (CRITICAL — USE THESE!)"
+	if strings.Contains(prompt, "## Knowledge skills — load selectively") {
+		endMarker = "## Knowledge skills — load selectively"
+	}
 	return replacePromptSection(prompt,
 		"## Multi-Agent Coordinator (REQUIRED for full assessments)",
-		"## 🧠 Deep Knowledge Skills (CRITICAL — USE THESE!)",
+		endMarker,
 		replacement)
 }
 
@@ -515,6 +541,7 @@ func buildDelegatedTaskInstruction(task, agentID string, ctfMission bool) string
 	contract := fmt.Sprintf(`MANDATORY DELEGATED-LANE CONTRACT (owner %s):
 - This is a bounded specialist assignment. Do not spawn or delegate additional agents.
 - Do not stop after the first finding. Repeatedly claim_next_hypothesis for every vulnerability class assigned in the task until that assigned lane has no queued hypothesis left.
+- If the operator supplied no account/session, do not guess or spray passwords, create accounts, or crack leaked hashes. Set role-dependent work aside as blocked by missing prerequisites. Public JavaScript and source maps are route/sink discovery material, not a vulnerability unless they expose an actual secret value.
 - Close every hypothesis you claim: save control and exploit evidence, report every distinct proven vulnerability, link its finding_ref, then continue to the next claim. A finding is a result, never a lane-completion signal.
 - Before finish, read_ledger again and confirm no hypothesis owned by %s remains testing or proven without a linked finding. Finish only after the full assigned lane is exhausted.`, owner, owner)
 	if task == "" {
@@ -522,6 +549,25 @@ func buildDelegatedTaskInstruction(task, agentID string, ctfMission bool) string
 	}
 	return task + "\n\n" + contract
 }
+
+// The professional checklist is intentionally compact. The original 22-phase
+// defaultChecklist below includes CTF flag-hunting recipes, exhaustive
+// wordlist/method matrices, and long payload dumps; sending those to a
+// real-world scan repeatedly diverted it from already observed, provable bugs.
+// Explicit CTF missions still retain that specialized playbook.
+const professionalChecklist = `
+### Professional assessment workflow (real applications, not CTFs)
+
+1. Confirm the target is reachable and map the ACTUAL live surface: version and framework hints, login/anonymous state, forms, APIs, JavaScript-discovered routes, and file-serving directories. On a client-rendered application, call discover_client_routes on its live root or login page before broad wordlists or source-map hunting; save the returned dynamic routes in the endpoint inventory. Treat public JavaScript and source maps as route/sink discovery material, not a vulnerability by themselves without a leaked secret. Extract installed plugin/module IDs from live bootstrap data before probing plugin asset paths. Save a concise endpoint inventory and ledger hypotheses. If source is explicitly attached, work correlated source-to-route hypotheses first; otherwise stay black-box. Once crawling and client-route extraction provide a mature concrete inventory, use only a short gap-driven content-discovery pass; do not launch a generic broad wordlist merely to satisfy a checklist. Run ffuf with -noninteractive and a hard -maxtime, never pipe it to head, and inspect its saved JSON after it exits. Keep scratch output under tmp/ (for example tmp/main_page.html); create it with mkdir -p tmp.
+
+2. Rank live hypotheses by observed signal and test one at a time to a clear outcome. Establish a benign baseline, then use the smallest safe class-specific probe. An exact product/version or credible CVE is a high-confidence attack-selection lead: perform one bounded web_search/exploit_search plus cve_search lookup, recover the authoritative request byte-for-byte, and replay it exactly before adapting it. Preserve nested JSON, escaped Unicode/newlines, quoting, and Content-Type; do not reconstruct a multi-line exploit ad hoc. Route RCE and code/expression/JNDI/JDBC injection aliases to the server-side injection lane. The advisory is never proof; require live command/output, target-attributable OAST emitted by the claimed primitive, state change, or verify_timing's repeated differential for an exact safe delay primitive. For RCE/CMDi, a RUNSCRIPT/URL/XML/webhook/database fetch proves only that fetch primitive; it is not code execution. A single delayed response remains a hunch. For blind JVM/runtime exploits, prefer a server-native harmless primitive such as Thread.sleep over assuming curl/wget exists. When the operator supplied no account or session, keep authentication work anonymous and evidence-led: check the concrete login/reset/signup controls once, but do not guess or spray default passwords, create accounts, or crack leaked hashes. Mark role-dependent authorization lanes skipped/blocked for missing prerequisites with update_plan instead of inventing credentials. Do not move to broad wordlists, unrelated APIs, or archival URLs while a high-confidence file-read, injection, authorization, or client execution lead remains unconfirmed. After proving one root cause, demonstrate its strongest safe impact once, report it, and move to another endpoint/class instead of repeatedly expanding the same exploit.
+
+3. Use deterministic confirmation promptly: verify_path_traversal on a candidate file-serving directory (raw ../ plus missing-file control); the first-class discover_client_routes automatically checks a bounded set of its highest-priority public dynamic prefixes when AngularJS signals are present, so report immediately when it returns AUTOMATED PATH-XSS CONFIRMED and use browser_action command=verify_path_template_xss manually only for additional candidates; browser_action command=verify_xss for other reflected/DOM XSS; verify_sqli, verify_ssti, verify_xxe, verify_csrf, authz_matrix, verify_oob, and verify_timing where their inputs and prerequisites exist. Browser execution, actual file contents, a database error, a role differential with protected data, a class-correct target-attributable callback, or a repeated verifier-owned timing differential are proof; a version banner, reflection alone, a fetch-only callback relabeled as RCE, one slow response, or an HTTP 200 is not.
+
+4. Report EVERY distinct confirmed vulnerability immediately, with the exact successful endpoint, method, class/CWE, captured request/response, verification_method, and a CVSS vector supported by observed impact. If an independent verifier cannot reproduce a raw path or stateful flow, check request normalization and replay the same control/probe; do not replace proof with an advisory citation.
+
+5. Resume the uncovered ledger after each report. Delegate one bounded non-overlapping specialist wave when warranted, collect every child, and complete the live endpoint × plausible vulnerability-class lanes. Use rate-limited discovery only to fill concrete gaps. No fixed iteration count; finish when evidence-backed work is exhausted, not after the first bug or a fixed number of tool calls. If nothing is proven, report no actionable finding rather than inventing one.
+`
 
 const defaultChecklist = `
 ## CRITICAL INSTRUCTIONS - READ CAREFULLY
@@ -884,7 +930,7 @@ for pre in admin assets static images img files uploads media public downloads; 
 WL=$(for f in /usr/share/dirb/wordlists/common.txt /usr/share/wordlists/dirb/common.txt /usr/share/seclists/Discovery/Web-Content/common.txt /usr/share/SecLists/Discovery/Web-Content/common.txt /usr/local/share/seclists/Discovery/Web-Content/common.txt /usr/local/share/SecLists/Discovery/Web-Content/common.txt /opt/seclists/Discovery/Web-Content/common.txt /opt/SecLists/Discovery/Web-Content/common.txt /usr/share/wordlists/dirb/big.txt; do [ -f "$f" ] && { echo "$f"; break; }; done)
 [ -z "$WL" ] && { mkdir -p tmp; printf '%s\n' admin administrator login logout register private secret hidden config backup old test dev api uploads files download flag user account profile dashboard panel phpmyadmin server-status .git .env robots.txt private.php admin.php index.php config.php > tmp/wl.txt; WL=tmp/wl.txt; }
 # CRITICAL: hard-cap the run with -maxtime so a buster can NEVER eat your whole time budget, and keep extensions MINIMAL and matched to the app (e.g. -e .php for a PHP site — check the pages you already saw). Do NOT pipe ffuf into head: that does not stop ffuf when hits are few (it then scans the entire list and blocks you for many minutes).
-ffuf -u https://TARGET/FUZZ -w "$WL" -mc 200,201,204,301,302,307,401,403 -e .php -maxtime 120 -rate RATE_LIMIT -t RATE_LIMIT -o ./ffuf.json -of json
+ffuf -u https://TARGET/FUZZ -w "$WL" -mc 200,201,204,301,302,307,401,403 -e .php -maxtime 120 -noninteractive -rate RATE_LIMIT -t RATE_LIMIT -o tmp/ffuf.json -of json
 # Fallbacks if ffuf is missing (never depend on gobuster), also time-capped:
 feroxbuster -u https://TARGET -w "$WL" -x php --time-limit 120s 2>/dev/null || timeout 130 dirsearch -u https://TARGET -w "$WL" 2>/dev/null || true
 # SHELL HYGIENE — these mistakes waste an ENTIRE attempt, avoid them: (1) NEVER run find / — the filesystem includes very slow mounts; scope to the app/web root and time-cap it, e.g. timeout 20 find /var/www /home /tmp /opt -name 'flag*' 2>/dev/null. (2) CREATE FILES WITH printf, NEVER heredocs (cat << EOF ...): multi-line commands may be flattened to one line, so the closing EOF is never seen and cat hangs reading stdin until the command times out. (3) Wrap every external scanner (ffuf/sqlmap/nmap/nikto) in a time cap so it cannot consume your whole budget.
@@ -1226,7 +1272,7 @@ Detecting the class is NOT the win — you must retrieve the flag. Flags live in
 - Do NOT stop at a proof-of-concept (49, uid=0, a reflected value) and do NOT drift to unrelated recon — immediately reuse the SAME primitive to read the flag file, then report the exact flag string.
 
 #### Step 6C: Confirm with a one-call verifier FIRST — scanners are only a fallback
-**The moment a parameter shows a class signal in Steps 6A/6B, call the matching deterministic verifier before reaching for a scanner:** verify_sqli (a provoked SQL error), verify_ssti (a {{a*b}} that returns its product), verify_xss (a nonce that actually executes — pass data=<urlencoded body> for a POST parameter), verify_xxe (an XML endpoint that expands a SYSTEM file:// entity), verify_csrf (a state change accepted from a forged cross-site origin with no token). Each is a single call, records exploit-proven ledger evidence, and lets you report the very next turn. **Use sqlmap/dalfox ONLY as the fallback when a verifier cannot confirm, and ONLY on parameters that showed indicators in Steps 6A/6B** — never blindly across all URLs.
+**The moment a parameter or file-serving route shows a class signal in Steps 6A/6B, call the matching deterministic verifier before reaching for a scanner:** verify_sqli (a provoked SQL error), verify_ssti (a {{a*b}} that returns its product), verify_xss (a nonce that actually executes — pass data=<urlencoded body> for a POST parameter), verify_xxe (an XML endpoint that expands a SYSTEM file:// entity), verify_path_traversal (raw ../ on a candidate directory, compared with a missing-file control), verify_csrf (a cookie-authenticated state change accepted from a forged cross-site origin with no token), verify_timing (a repeated benign-vs-delay differential for a safe server-side primitive). Each is a single call, records captured ledger evidence, and lets you report the very next turn. **Use sqlmap/dalfox ONLY as the fallback when a verifier cannot confirm, and ONLY on parameters that showed indicators in Steps 6A/6B** — never blindly across all URLs.
 
 ` + "`" + `bash` + "`" + `
 # SQLi — ONLY on URLs where manual testing showed SQL errors or time delays
@@ -1472,12 +1518,12 @@ For EVERY potential vulnerability found in previous phases:
 **Step 2: Exploit it safely** — Produce concrete proof. When the class has a one-call deterministic verifier, run it FIRST: it sends its own baseline+probe, renders a verdict, and records exploit-proven ledger evidence you can report the next turn — sqlmap/manual PoC is only the fallback when the verifier cannot confirm.
 - SQLi → verify_sqli (records the provoked DBMS error as proof); fallback: sqlmap --dump or time-based SLEEP
 - Reflected/DOM XSS → verify_xss (a nonce that actually executes in the browser; for a POST parameter pass data=<urlencoded body>); fallback: curl + grep the reflection
-- SSTI → verify_ssti ({{a*b}} evaluates to its product) · XXE → verify_xxe (a SYSTEM file:// entity returns the file) · CSRF → verify_csrf (a state change accepted from a forged cross-site origin with no token)
-- Blind — no in-band signal → verify_oob (confirm via an out-of-band callback)
+- SSTI → verify_ssti ({{a*b}} evaluates to its product) · XXE → verify_xxe (a SYSTEM file:// entity returns the file) · CSRF → verify_csrf (a cookie-authenticated state change accepted from a forged cross-site origin with no token; anonymous acceptance alone is not CSRF proof)
+- Blind — no in-band signal → verify_oob for a target-attributable callback; when egress is unavailable but a safe server-native delay primitive exists, use verify_timing with the exact benign/probe bodies (never infer from one slow response)
 - SSRF: Trigger callback or read internal metadata (169.254.169.254)
 - RCE: Execute ` + "`" + `id` + "`" + ` or ` + "`" + `whoami` + "`" + `, show output
 - IDOR/BOLA → authz_matrix (replays the request as a second account/anonymous and records the cross-identity differential; a lower identity getting the SAME successful response is broken object-level authorization); report CWE-639 and show the other user's data
-- LFI: Read /etc/passwd, then call report_vulnerability immediately with that response body as proof (there is no verifier for LFI — an in-band /etc/passwd body is already sufficient)
+- LFI / path-segment traversal: call verify_path_traversal on the candidate directory first; it preserves raw ../ and compares a missing-file baseline with the returned /etc/passwd content. For a manual request use curl --path-as-is --globoff. Report only the real file-response bytes, never the payload or status alone.
 - Auth bypass/BFLA → authz_matrix with the anonymous/low-privilege identity reaching a resource that should be restricted (a 2xx there is the proof)
 
 **Step 3: Self-critique** — Before reporting, ask:
@@ -1781,7 +1827,7 @@ When you report_vulnerability, set the PoC to the concrete source-level data-flo
 You have the source AND you must stand the app up locally, then attack the RUNNING instance for exploit-verified findings. Methodology:
 1. INSPECT: read README, Dockerfile/compose, package manifest, and start scripts to learn how to build and run this app.
 2. BUILD & RUN: use terminal_execute to install dependencies and start the app. BIND IT TO %s (this exact loopback host:port is the only one you are permitted to reach). Prefer Docker/compose when present; otherwise the native run command. Run it in the background and confirm it's listening (curl -sI http://%s).
-3. WHITEBOX-GUIDED DAST — WORK THE SEEDED LEDGER FIRST: the start-of-scan source sweep already seeded the hypothesis ledger with the sinks and the routes that reach them (a route whose handler holds a sink is seeded class-typed). claim_next_hypothesis to take the top correlated source→route lead, probe_hypothesis it against http://%s to confirm it is live, then CONFIRM the class deterministically — verify_sqli (error-based SQLi), verify_ssti (server-side template injection), verify_xss (browser-executed XSS), verify_oob (blind RCE/SQLi/SSRF/XXE) — each records exploit-proven evidence. Use code_search + manual exploitation only for what is not already seeded; prove impact (extracted data, oob_callback hit, state change, command output).
+3. WHITEBOX-GUIDED DAST — WORK THE SEEDED LEDGER FIRST: the start-of-scan source sweep already seeded the hypothesis ledger with the sinks and the routes that reach them (a route whose handler holds a sink is seeded class-typed). claim_next_hypothesis to take the top correlated source→route lead, probe_hypothesis it against http://%s to confirm it is live, then CONFIRM the class deterministically — verify_sqli (error-based SQLi), verify_ssti (server-side template injection), verify_xss (browser-executed XSS), verify_oob (blind RCE/SQLi/SSRF/XXE), verify_timing (repeated safe delay differential) — each records exploit-proven evidence. Use code_search + manual exploitation only for what is not already seeded; prove impact (extracted data, target-attributable oob_callback hit, repeated verifier-owned timing differential, state change, command output).
 4. If the app cannot be built/run after reasonable effort, fall back to SOURCE REVIEW: report source-verified findings from the data-flow trace and say runtime provisioning failed.
 Report findings with a working PoC against the running instance (the verifier will re-test). Source proves the bug EXISTS; the live PoC proves it's EXPLOITABLE — get both when the app runs.
 `, root, hostport, hostport, hostport)
@@ -1794,7 +1840,7 @@ This is your biggest advantage: you can SEE the vulnerable code, not just guess 
 WORK THE SEEDED LEDGER FIRST. At scan start the source was swept and the hypothesis ledger was AUTO-SEEDED with the dangerous sinks and the HTTP routes that reach them; a route whose handler contains a sink is seeded CLASS-TYPED (rce/sqli/ssrf/…) at high confidence. These correlated source→route hypotheses are your highest-value leads — pursue them BEFORE any black-box crawling:
 1. CLAIM: claim_next_hypothesis (optionally vuln_class=…) takes the top correlated lead and marks it yours; read_ledger lists them all. If the ledger looks empty, run scan_source_sinks then scan_source_routes to (re)seed it from the code.
 2. PROBE: probe_hypothesis the lead to confirm the route is live and reachable on the target (it reuses the scan session, so authenticated routes are probed authenticated).
-3. CONFIRM DETERMINISTICALLY — do not hand-craft payloads when a confirmer exists: verify_sqli proves error-based SQL injection (it sends a benign/single-quote/balanced trio and reads the DBMS error), verify_ssti proves server-side template injection (a {{a*b}} / ${a*b} expression evaluating to its product), verify_xss proves browser-EXECUTED XSS, verify_oob proves blind RCE/SQLi/SSRF/XXE via an out-of-band callback. Each records exploit-proven evidence for you.
+3. CONFIRM DETERMINISTICALLY — do not hand-craft repeated tests when a confirmer exists: verify_sqli proves error-based SQL injection (it sends a benign/single-quote/balanced trio and reads the DBMS error), verify_ssti proves server-side template injection (a {{a*b}} / ${a*b} expression evaluating to its product), verify_xss proves browser-EXECUTED XSS, verify_oob proves blind RCE/SQLi/SSRF/XXE via a target-attributable out-of-band callback, and verify_timing proves a blind safe-delay primitive with interleaved controls. Each records exploit-proven evidence for you.
 4. REPORT with that proof (the verifier re-tests). Source proves the bug EXISTS; the live PoC proves it is EXPLOITABLE — get both.
 Only once the seeded correlated leads are worked should you widen to broad black-box crawling and manual code_search. Prioritize RCE / command & template injection / insecure deserialization / SQLi / SSRF / auth bypass — the classes source access finds that black-box misses.
 Report findings ONLY with a working live-target PoC (the verifier will re-test).

@@ -4,12 +4,63 @@ import (
 	"fmt"
 	"html"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
+
+// verifyPathTemplateXSS is a bounded, non-destructive AngularJS-style route
+// check. It takes a candidate dynamic route, constructs a fresh browser-only
+// numeric marker in one path segment, and delegates the execution oracle to
+// verifyXSS. It never searches for product-specific routes or CVE payloads.
+func verifyPathTemplateXSS(ctxID, routeURL string) (tools.Result, error) {
+	// Keep the marker below JavaScript's integer precision limit. A raw
+	// nanosecond timestamp can be rounded in the browser and never match the
+	// decimal nonce the verifier expects.
+	nonce := strconv.FormatInt(time.Now().UnixNano()%900000000+100000000, 10)
+	payloadURL, err := pathTemplateXSSURL(routeURL, nonce)
+	if err != nil {
+		return tools.Result{Error: err.Error()}, nil
+	}
+	result, err := verifyXSS(ctxID, payloadURL, nonce, "path", "", "GET")
+	if err != nil || result.Error != "" {
+		return result, err
+	}
+	if confirmed, _ := result.Metadata["xss_confirmed"].(bool); confirmed {
+		result.Output += " Report this route as CWE-79 with verification_method=manual_verified, the full payload URL as endpoint, and this browser-observed marker as exploitation_proof."
+	}
+	return result, nil
+}
+
+func pathTemplateXSSURL(routeURL, nonce string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(routeURL))
+	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Fragment != "" {
+		return "", fmt.Errorf("verify_path_template_xss requires an absolute HTTP(S) candidate route URL without a fragment")
+	}
+	if u.Path == "" || u.Path == "/" {
+		return "", fmt.Errorf("verify_path_template_xss requires a discovered dynamic route path, not the site root")
+	}
+	if _, err := strconv.ParseInt(nonce, 10, 64); err != nil || nonce == "" {
+		return "", fmt.Errorf("verify_path_template_xss requires a numeric marker")
+	}
+	query := u.RawQuery
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.RawPath = ""
+	if !strings.HasSuffix(u.Path, "/") {
+		u.Path += "/"
+	}
+	// Keep the route's delimiters literal. Encode only the quote in the
+	// AngularJS expression, as proven by the local vulnerable/fixed oracle.
+	payloadURL := u.String() + "{{constructor.constructor(%27window.__xss=" + nonce + "%27)()}}"
+	if query != "" {
+		payloadURL += "?" + query
+	}
+	return payloadURL, nil
+}
 
 // verifyXSS confirms that an XSS payload actually EXECUTES in the browser
 // (rather than merely being reflected). The caller injects a payload that
@@ -116,9 +167,9 @@ func verifyXSS(ctxID, rawURL, nonce, parameter, data, method string) (tools.Resu
 func finalizeXSSVerdict(ctxID, rawURL, nonce, parameter string, signals []ExecSignal) tools.Result {
 	matched, ok := matchExecNonce(signals, nonce)
 	if !ok {
-		msg := fmt.Sprintf("XSS NOT confirmed: no JavaScript dialog carrying the nonce %q fired.", nonce)
+		msg := fmt.Sprintf("XSS NOT confirmed: no JavaScript execution signal carrying the nonce %q was observed.", nonce)
 		if len(signals) > 0 {
-			msg += fmt.Sprintf(" %d unrelated dialog(s) did fire — check that your payload raises a dialog containing exactly this nonce.", len(signals))
+			msg += fmt.Sprintf(" %d unrelated signal(s) were observed — check that your payload emits exactly this nonce.", len(signals))
 		} else {
 			msg += " The payload may be reflected but not executing (encoded/sanitized/CSP-blocked). Try an execution oracle carrying the nonce: a dialog (\"'><script>alert('" + nonce + "')</script>\"), a console call (console.log('" + nonce + "')), or a DOM marker (document.title='" + nonce + "')."
 		}
@@ -129,7 +180,7 @@ func finalizeXSSVerdict(ctxID, rawURL, nonce, parameter string, signals []ExecSi
 	if u, err := url.Parse(rawURL); err == nil && u.Path != "" {
 		endpoint = u.EscapedPath()
 	}
-	confirm := fmt.Sprintf("Browser-confirmed XSS: a %s dialog carrying the nonce %q fired while loading %s.", matched.Kind, nonce, rawURL)
+	confirm := fmt.Sprintf("Browser-confirmed XSS: a %s execution signal carrying the nonce %q was observed while loading %s.", matched.Kind, nonce, rawURL)
 
 	if l := ledgerForCtx(ctxID); l != nil {
 		h := l.Upsert(scanctx.Hypothesis{
@@ -150,6 +201,11 @@ func finalizeXSSVerdict(ctxID, rawURL, nonce, parameter string, signals []ExecSi
 			Confidence: 0.9,
 			AgentID:    "browser",
 		})
+		// A fresh nonce observed executing in a real browser is deterministic
+		// exploitation proof, not merely a candidate that still needs testing.
+		// Mark it proven so the ledger finish gate cannot allow the scan to end
+		// before the finding is reported and linked.
+		l.SetStatus(h.ID, scanctx.HypothesisProven, "fresh browser nonce executed")
 	}
 
 	return tools.Result{

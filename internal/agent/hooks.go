@@ -70,6 +70,9 @@ type ScanState struct {
 	DelegatedAgent               bool
 	DelegatedAgentID             string
 	BenchmarkIsolated            bool
+	ProfessionalAssessment       bool // non-CTF scan: structural plan, not a fixed iteration quota, governs completion
+	AuthContextKnown             bool // engine evaluated operator/ingested auth before planning
+	AuthContextAvailable         bool // at least one legitimate account/session is available
 	AllowedPhases                []int
 	PassiveReconGuardActive      bool
 	PassiveReconPassiveLookups   int
@@ -90,6 +93,7 @@ type ScanState struct {
 	// every remaining planner gap for that class.
 	EndpointClassCoverage  map[string]map[string]bool
 	EndpointInventorySaved bool // add_note called (recon checklist step 5)
+	ClientRoutesDiscovered bool // bounded same-origin client route discovery completed successfully
 
 	// Granular vuln class coverage — tracks which attack types have been attempted.
 	// Used to nudge the agent to test missing classes before finishing.
@@ -197,28 +201,34 @@ type ScanState struct {
 	DiscoveredEndpoints []string
 
 	// New enrichment hooks
-	WAFDetected          bool
-	RedirectDetected     bool
-	DetectedTechs        map[string]bool // e.g. "php", "nodejs", "java"
-	SkillSuggestionFired bool            // prevents hookAutoSkillSuggester from firing more than once
-	DelegationAttempted  bool            // coordinator called spawn_agent/create_agent
-	DelegationNudgeFired bool            // multi-agent role decomposition nudge sent once
-	DelegationNudgeAt    int             // iteration of the initial decomposition nudge
-	DelegationReminders  int             // bounded reminders after ignored/malformed spawn calls
-	LedgerSeeded         bool            // hypothesis ledger seeded from the plan once
+	WAFDetected               bool
+	RedirectDetected          bool
+	DetectedTechs             map[string]bool // e.g. "php", "nodejs", "java"
+	SkillSuggestionFired      bool            // prevents hookAutoSkillSuggester from firing more than once
+	DelegationAttempted       bool            // coordinator called spawn_agent/create_agent
+	DelegationNudgeFired      bool            // multi-agent role decomposition nudge sent once
+	DelegationNudgeAt         int             // iteration of the initial decomposition nudge
+	DelegationReminders       int             // bounded reminders after ignored/malformed spawn calls
+	LedgerSeeded              bool            // hypothesis ledger seeded from the plan once
+	AdvisoryLeadsNudged       map[string]bool // exact CVE/advisory leads already committed to the ledger
+	OASTVerificationNudged    map[string]bool // raw callback tokens already routed to class-aware verify_oob
+	OASTVerificationReminders map[string]int  // bounded re-nudges when a positive poll is followed by more polling instead of verify_oob
 }
 
 // NewScanState creates a zero-value ScanState with initialized maps.
 func NewScanState() *ScanState {
 	return &ScanState{
-		UniqueToolsUsed:        make(map[string]bool),
-		DetectedTechs:          make(map[string]bool),
-		InjectionEndpoints:     make(map[string]bool),
-		AccessControlEndpoints: make(map[string]bool),
-		DirBustingHosts:        make(map[string]bool),
-		EndpointsTested:        make(map[string]bool),
-		EndpointClassCoverage:  make(map[string]map[string]bool),
-		VulnClassesTested:      make(map[string]bool),
+		UniqueToolsUsed:           make(map[string]bool),
+		DetectedTechs:             make(map[string]bool),
+		InjectionEndpoints:        make(map[string]bool),
+		AccessControlEndpoints:    make(map[string]bool),
+		DirBustingHosts:           make(map[string]bool),
+		EndpointsTested:           make(map[string]bool),
+		EndpointClassCoverage:     make(map[string]map[string]bool),
+		VulnClassesTested:         make(map[string]bool),
+		AdvisoryLeadsNudged:       make(map[string]bool),
+		OASTVerificationNudged:    make(map[string]bool),
+		OASTVerificationReminders: make(map[string]int),
 	}
 }
 
@@ -389,6 +399,9 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	// Order matters: policy/loop guards run before OnToolExecute records work;
 	// result detection and reset hooks run only after an executed attempt.
 	reg.Register(OnToolCall, hookReportRetryGuard)
+	reg.Register(OnToolCall, hookProfessionalDelegationPlanGuard)
+	reg.Register(OnToolCall, hookOASTSelfProbeGuard)
+	reg.Register(OnToolCall, hookTimingProofPreference)
 	reg.Register(OnToolCall, hookBenchmarkIsolationGuard)
 	reg.Register(OnToolCall, hookSlowReconGuard)
 	reg.Register(OnToolCall, hookStuckTracker)
@@ -399,6 +412,9 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnToolResult, hookRedirectDetector)
 	reg.Register(OnToolResult, hookTargetHealthDetector)
 	reg.Register(OnToolResult, hookTechDetector)
+	reg.Register(OnToolResult, hookAdvisoryLeadCommitment)
+	reg.Register(OnToolResult, hookClientRouteWorkflow)
+	reg.Register(OnToolResult, hookOASTVerificationWorkflow)
 	reg.Register(OnToolResult, hookResultRepeatTracker)
 	reg.Register(OnToolResult, hookReportVulnerabilityTracker)
 	reg.Register(OnFinishAttempt, hookFinishGatekeeper)
@@ -422,6 +438,121 @@ var benchmarkHostTempConsumerPattern = regexp.MustCompile(`(?i)(^|[;&|\n])[[:spa
 var benchmarkHostTempOutputPattern = regexp.MustCompile(`(?i)(^|[[:space:]])(?:-o|-O|--output(?:=)?|>{1,2})[=[:space:]]*["']?/tmp/`)
 var benchmarkHostTempCurlFilePattern = regexp.MustCompile(`(?i)(^|[;&|\n])[[:space:]]*(?:sudo[[:space:]]+)?(?:[^[:space:];|]+/)?curl[^;&|\n]*(?:-b|-c|--cookie|--cookie-jar|--config)[=[:space:]]+["']?/tmp/`)
 var benchmarkBroadHostTraversalPattern = regexp.MustCompile(`(?im)(^|[;&|])[[:space:]]*(?:sudo[[:space:]]+)?(?:[^[:space:];|]+/)?(?:find|du)[[:space:]]+["']?/["']?(?:[[:space:]]|$)`)
+var absoluteHTTPURLPattern = regexp.MustCompile(`(?i)https?://[^[:space:]"'<>]+`)
+var oastHostPattern = regexp.MustCompile(`(?i)(?:[a-z0-9-]+\.)+(?:oast\.[a-z0-9.-]+|interact\.sh|interactsh\.[a-z0-9.-]+|burpcollaborator\.net)`)
+var timingPrimitivePattern = regexp.MustCompile(`(?i)(?:thread\s*\.\s*sleep\s*\(|pg_sleep\s*\(|dbms_lock\s*\.\s*sleep\s*\(|benchmark\s*\(|waitfor\s+delay|\bsleep\s*\([0-9])`)
+
+// hookProfessionalDelegationPlanGuard prevents the coordinator from launching
+// specialists before it has created the grounded root plan they are meant to
+// execute. Without this guard a model can spawn a full wave immediately after
+// reconnaissance, then build an unrelated plan later; the root and children
+// duplicate the entire assessment and completion falls back to legacy breadth
+// behavior. Delegated specialists themselves never spawn another wave.
+func hookProfessionalDelegationPlanGuard(state *ScanState, args map[string]string) HookResult {
+	if state == nil || !state.ProfessionalAssessment || state.DelegatedAgent ||
+		state.DiscoveryMode || state.ReconOnlyMode {
+		return HookResult{}
+	}
+	toolName := strings.TrimSpace(args["tool_name"])
+	if toolName != "spawn_agent" && toolName != "create_agent" {
+		return HookResult{}
+	}
+	if state.PlanBuilt && state.Plan != nil && !state.Plan.IsEmpty() {
+		return HookResult{}
+	}
+	return HookResult{
+		ForceSkip: true,
+		Nudge:     "⛔ PLAN BEFORE DELEGATION: build one grounded root assessment plan from the live endpoint inventory before spawning specialists. The shared plan and ledger define non-overlapping lanes and let child evidence close root tasks; spawning first causes duplicate whole-target scans and an unnecessary completion tail.",
+	}
+}
+
+// hookOASTSelfProbeGuard blocks requests sent directly from the scanner to the
+// callback oracle. Such a request can only contaminate the token with
+// scanner-origin evidence; it cannot prove target-side SSRF/XXE/RCE. Plant the
+// callback in a request to the assessed target instead, then poll it.
+func hookOASTSelfProbeGuard(_ *ScanState, args map[string]string) HookResult {
+	toolName := strings.TrimSpace(args["tool_name"])
+	switch toolName {
+	case "http_request", "send_request", "browser_action":
+		if rawURL := strings.TrimSpace(args["url"]); rawURL != "" && isOASTCallbackURL(rawURL) {
+			return oastSelfProbeBlocked()
+		}
+	case "terminal_execute", "python_action":
+		command := args["command"]
+		if command == "" {
+			command = args["code"]
+		}
+		if !oastHostPattern.MatchString(command) {
+			return HookResult{}
+		}
+		// A non-OAST absolute URL means the callback is being planted in a
+		// target-side request. With only OAST URLs/hosts present, this is a
+		// scanner self-ping (curl/wget/nslookup/browser script) and is invalid.
+		hasTargetURL := false
+		for _, candidate := range absoluteHTTPURLPattern.FindAllString(command, -1) {
+			if !isOASTCallbackURL(candidate) {
+				hasTargetURL = true
+				break
+			}
+		}
+		if !hasTargetURL {
+			return oastSelfProbeBlocked()
+		}
+	}
+	return HookResult{}
+}
+
+func isOASTCallbackURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(raw), ").,;]}"))
+	if err == nil && parsed.Hostname() != "" {
+		return oastHostPattern.MatchString(parsed.Hostname())
+	}
+	return oastHostPattern.MatchString(raw)
+}
+
+func oastSelfProbeBlocked() HookResult {
+	return HookResult{
+		ForceSkip: true,
+		Nudge:     "⛔ OAST SELF-PROBE BLOCKED: never curl, browse, resolve, or otherwise request the callback directly from the scanner. That contaminates the token with scanner-origin interactions and can create false attribution. Plant the callback only inside a request sent to the assessed target (with redirects disabled), then poll/verify the token.",
+	}
+}
+
+// hookTimingProofPreference prevents professional scans from reducing a blind
+// timing claim to one hand-written request. Once the model has selected an
+// explicit target-side delay primitive, the first-class verifier is strictly
+// better: it interleaves controls/probes, repeats trials, rejects outliers and
+// network timeouts, and records engine-owned evidence for reporting.
+func hookTimingProofPreference(state *ScanState, args map[string]string) HookResult {
+	if state == nil || !state.ProfessionalAssessment || state.ReconOnlyMode {
+		return HookResult{}
+	}
+	toolName := strings.TrimSpace(args["tool_name"])
+	if toolName != "terminal_execute" && toolName != "python_action" {
+		return HookResult{}
+	}
+	payload := args["command"]
+	if payload == "" {
+		payload = args["code"]
+	}
+	if !timingPrimitivePattern.MatchString(payload) {
+		return HookResult{}
+	}
+	lower := strings.ToLower(payload)
+	// Reading public source that happens to mention a delay primitive is not a
+	// timing probe. Payload construction, HTTP submission, and executable code
+	// are redirected; narrow grep/rg/sed inspection remains available.
+	isSourceInspection := (strings.Contains(lower, "grep ") || strings.Contains(lower, "rg ") || strings.Contains(lower, "sed -n")) &&
+		!strings.Contains(lower, "payload") && !strings.Contains(lower, "requests.") &&
+		!strings.Contains(lower, "urllib") && !strings.Contains(lower, "--data") &&
+		!strings.Contains(lower, " -d ")
+	if isSourceInspection {
+		return HookResult{}
+	}
+	return HookResult{
+		ForceSkip: true,
+		Nudge:     "⛔ MANUAL TIMING PROBE REDIRECTED: you selected an explicit target-side delay primitive. Do not send or script a one-off timing request. Call verify_timing now with the exact URL/method/headers, a benign baseline_body, the otherwise-identical delayed probe_body, expected_delay_ms, trials=3 (or more), the vulnerability_class, parameter, and hypothesis_id. Its interleaved repeated controls are required proof; timeouts and a single slow response are not evidence.",
+	}
+}
 
 // hookBenchmarkIsolationGuard keeps real-world benchmark evidence honest.
 // A fixture may be hosted locally for repeatability, but the scanning agent
@@ -556,6 +687,19 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 	if isMeaningfulSecurityTestCall(toolName, args) {
 		state.MeaningfulTestCalls++
 	}
+	// OAST coverage belongs to the whole scan, not to whichever delegated
+	// specialist happened to plant the callback. Without this shared marker a
+	// child can complete a valid blind probe, then the coordinator repeats the
+	// same callback ceremony because its private ScanState still says zero.
+	// OnToolExecute runs only after the self-probe guard, so an allowed request
+	// containing an OAST host is necessarily target-mediated. Merely generating
+	// or polling a token does not count as a payload probe.
+	if isTargetMediatedOASTProbe(toolName, args) {
+		state.OASTProbesExecuted++
+		if shared := sharedCoverageForState(state); shared != nil {
+			shared.Mark("__scan__", "oast_probe")
+		}
+	}
 	// A malformed delegation call must not satisfy the coordinator contract.
 	// Both graph tools require name+task; marking an empty/split call as an
 	// attempt suppresses every later reminder even though no child was created.
@@ -617,11 +761,6 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 		// not make /search appear SQLi-tested.
 		recordDetectedClassCoverage(state, endpoint, cmd)
 
-		if strings.Contains(cmd, "interactsh") || strings.Contains(cmd, "oob_callback") ||
-			strings.Contains(cmd, "interact.sh") || strings.Contains(cmd, "oast") ||
-			strings.Contains(cmd, "oob_url") || strings.Contains(cmd, "burpcollaborator") {
-			state.OASTProbesExecuted++
-		}
 		if strings.Contains(cmd, "ffuf") || strings.Contains(cmd, "gobuster") ||
 			strings.Contains(cmd, "dirsearch") || strings.Contains(cmd, "feroxbuster") {
 			markEndpointClassCoverage(state, endpoint, "dirbusting")
@@ -721,6 +860,36 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 	}
 
 	return HookResult{}
+}
+
+func isTargetMediatedOASTProbe(toolName string, args map[string]string) bool {
+	if toolName == "oob_callback" || toolName == "verify_oob" {
+		return false
+	}
+	var values []string
+	for key, value := range args {
+		if key == "tool_name" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		values = append(values, value)
+	}
+	joined := strings.ToLower(strings.Join(values, " "))
+	return strings.Contains(joined, ".oast.") ||
+		strings.Contains(joined, ".oastify.") ||
+		strings.Contains(joined, "interactsh") ||
+		strings.Contains(joined, "interact.sh") ||
+		strings.Contains(joined, "burpcollaborator")
+}
+
+func oastProbeExecuted(state *ScanState) bool {
+	if state == nil {
+		return false
+	}
+	if state.OASTProbesExecuted > 0 {
+		return true
+	}
+	shared := sharedCoverageForState(state)
+	return shared != nil && shared.Has("__scan__", "oast_probe")
 }
 
 func isMeaningfulSecurityTestCall(toolName string, args map[string]string) bool {
@@ -979,6 +1148,8 @@ func recordVerifierCoverage(state *ScanState, endpoint, toolName string, args ma
 		class = "sqli"
 	case "verify_ssti":
 		class = "ssti"
+	case "verify_path_traversal":
+		class = "path_traversal"
 	case "verify_xss":
 		class = "xss"
 	case "verify_xxe":
@@ -996,6 +1167,8 @@ func recordVerifierCoverage(state *ScanState, endpoint, toolName string, args ma
 		if class == "" {
 			class = normalizeCoverageClass(args["class"])
 		}
+	case "verify_timing":
+		class = normalizeCoverageClass(args["vuln_class"])
 	}
 	markEndpointClassCoverage(state, endpoint, class)
 }
@@ -1638,6 +1811,81 @@ func hookTechDetector(state *ScanState, args map[string]string) HookResult {
 	return HookResult{}
 }
 
+// hookClientRouteWorkflow closes the common client-lane gap where the model
+// claims an XSS hypothesis, manually downloads large bundles, and never reaches
+// the browser execution oracle. A successful bounded discovery is remembered;
+// claiming an XSS lane before it produces one precise corrective nudge at the
+// moment the lane starts. This remains advisory because a server-rendered app
+// may legitimately expose no JavaScript routes.
+func hookClientRouteWorkflow(state *ScanState, args map[string]string) HookResult {
+	if state == nil {
+		return HookResult{}
+	}
+	toolName := strings.TrimSpace(args["tool_name"])
+	command := strings.TrimSpace(args["command"])
+	if toolName == "discover_client_routes" || (toolName == "browser_action" && command == "discover_client_routes") {
+		if strings.TrimSpace(args["error"]) == "" && strings.Contains(args["output"], "Discovered ") {
+			state.ClientRoutesDiscovered = true
+		}
+		if strings.Contains(args["output"], "AUTOMATED PATH-XSS CONFIRMED") {
+			return HookResult{Nudge: "DETERMINISTIC CLIENT FINDING: the browser observed a fresh path-XSS nonce execute on a route extracted from the target's own assets. Call report_vulnerability for this CWE-79 now using the confirmed payload URL and browser execution proof before any further reconnaissance."}
+		}
+		return HookResult{}
+	}
+	if toolName != "claim_next_hypothesis" || state.ClientRoutesDiscovered {
+		return HookResult{}
+	}
+	class := strings.ToLower(strings.TrimSpace(args["vuln_class"]))
+	if class != "xss" && class != "dom-xss" {
+		return HookResult{}
+	}
+	return HookResult{Nudge: "CLIENT ROUTE GATE: before manually downloading or grepping JavaScript bundles, call the first-class discover_client_routes on the live root/login page. It automatically browser-checks a bounded set of the highest-priority public path candidates when AngularJS signals exist; report immediately if it returns AUTOMATED PATH-XSS CONFIRMED. Reflection or source text alone is not execution proof."}
+}
+
+// hookOASTVerificationWorkflow turns a raw callback poll into the next
+// deterministic action. oob_callback intentionally exposes every interaction
+// as forensic data; it does not know the injected sink or vulnerability class.
+// A recurring failure mode was treating that raw poll as proof (or repeatedly
+// polling it) without calling verify_oob, so the ledger never received
+// class-aware evidence. Nudge once per token and make the RCE boundary explicit:
+// a database/XML/server-side URL fetch proves that fetch primitive, not code
+// execution.
+func hookOASTVerificationWorkflow(state *ScanState, args map[string]string) HookResult {
+	if state == nil || strings.TrimSpace(args["tool_name"]) != "oob_callback" {
+		return HookResult{}
+	}
+	action := strings.ToLower(strings.TrimSpace(args["action"]))
+	if action != "poll" && action != "check" && action != "read" {
+		return HookResult{}
+	}
+	output := strings.TrimSpace(args["output"])
+	if output == "" || !strings.Contains(output, "OOB interaction(s) observed for token") {
+		return HookResult{}
+	}
+	token := strings.TrimSpace(args["token"])
+	if token == "" {
+		return HookResult{}
+	}
+	if state.OASTVerificationNudged == nil {
+		state.OASTVerificationNudged = make(map[string]bool)
+	}
+	if state.OASTVerificationNudged[token] {
+		// Measured failure (r11 Metabase): the one-time nudge can be ignored
+		// while the model keeps polling the same positive token. Re-nudge,
+		// bounded, with escalating urgency — but never unbounded nagging.
+		if state.OASTVerificationReminders == nil {
+			state.OASTVerificationReminders = make(map[string]int)
+		}
+		state.OASTVerificationReminders[token]++
+		if state.OASTVerificationReminders[token] > 3 {
+			return HookResult{}
+		}
+		return HookResult{Nudge: fmt.Sprintf("OAST CALLBACK STILL UNCLASSIFIED — this is interaction poll #%d for token %s with no verify_oob call. Polling again cannot add information. Call verify_oob NOW with this token (vuln_class, endpoint, parameter, exact callback-bearing payload; for RCE/CMDi also execution_primitive + payload_evidence). It will classify the callback's origin and primitive; report only the class it confirms.", state.OASTVerificationReminders[token]+1, token)}
+	}
+	state.OASTVerificationNudged[token] = true
+	return HookResult{Nudge: "OAST CALLBACK OBSERVED — raw polling is only a lead. Call verify_oob NOW with this exact token plus vuln_class, endpoint, parameter, and the exact callback-bearing payload. For RCE/CMDi, also provide execution_primitive and payload_evidence: only an OS/runtime/template execution primitive can prove code execution. RUNSCRIPT FROM/URL fetch, XXE SYSTEM fetch, webhook/URL fetch, and database network access prove SQL/XXE/SSRF behavior respectively, not RCE. Classify the callback by the primitive that actually emitted it, then report only the class verify_oob confirms."}
+}
+
 // ── hookFinishGatekeeper ─────────────────────────────────────────────────────
 // Decides if the agent has done enough work. Uses proportional coverage
 // tracking: the gate checks how many UNIQUE endpoints were tested per
@@ -1698,7 +1946,7 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 	// Blind vulnerability classes (Blind XXE, Blind SSRF, Blind SQLi/RCE) cannot be proven non-existent
 	// using in-band HTTP responses alone. Require at least one OAST/interactsh callback payload attempt
 	// when blind classes (XXE/SSRF) are tested.
-	if state.OASTProbesExecuted == 0 && (state.VulnClassesTested["xxe"] || state.VulnClassesTested["ssrf"]) && state.FinishAttempts <= 2 {
+	if !oastProbeExecuted(state) && oastRequiredForTestedBlindClasses(state) && state.FinishAttempts <= 2 {
 		return HookResult{
 			Block: true,
 			BlockReason: "⚠️ MANDATORY OUT-OF-BAND (OAST) PROBING REQUIRED:\n" +
@@ -1764,6 +2012,25 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 			Block:       true,
 			BlockReason: "You haven't saved your endpoint inventory with add_note yet. Save a note titled 'Endpoint Inventory' listing ALL discovered paths (at least 3), for example:\n\nDiscovered Endpoints:\n- /api/users\n- /api/login\n- /admin/dashboard\n- /v1/auth/token\n\nThe note must contain: a keyword (endpoint/inventory/discovered/api) AND at least 3 URL paths starting with / or http.",
 		}
+	}
+
+	// Professional assessments use the grounded structural plan as their
+	// completion contract. The prompt explicitly has no fixed iteration quota,
+	// yet the legacy gate below still forced 50 turns plus generic dirbusting and
+	// access-control counters even after every applicable endpoint/class task was
+	// settled. That caused proven findings to be followed by minutes of
+	// irrelevant probes and made stable real-world benchmarks time out. Keep a
+	// small meaningful-work floor, then trust the same plan + ledger + delegated
+	// work + OAST gates that already prevent premature completion. CTF and
+	// planless legacy scans retain the conservative breadth/iteration rules.
+	if state.ProfessionalAssessment && state.PlanBuilt && state.Plan != nil && !state.Plan.IsEmpty() {
+		if state.MeaningfulTestCalls < 3 {
+			return HookResult{
+				Block:       true,
+				BlockReason: fmt.Sprintf("Professional assessment has only %d meaningful security test(s). Execute concrete control/probe checks for the grounded plan before finishing.", state.MeaningfulTestCalls),
+			}
+		}
+		return planFinishGate(state, maxRejections)
 	}
 
 	// Compute test depth: average vuln-class tests per endpoint.
@@ -1910,7 +2177,7 @@ Execute your next tool call NOW.`, iter, minIter, coverageNote, scannerNote, ski
 	// Blind vulnerability classes (Blind XXE, Blind SSRF, Blind SQLi/RCE) cannot be proven non-existent
 	// using in-band HTTP responses alone. Require at least one OAST/interactsh callback payload attempt
 	// when blind classes (XXE/SSRF) are tested.
-	if state.OASTProbesExecuted == 0 && (state.VulnClassesTested["xxe"] || state.VulnClassesTested["ssrf"]) && state.FinishAttempts <= 2 {
+	if !oastProbeExecuted(state) && oastRequiredForTestedBlindClasses(state) && state.FinishAttempts <= 2 {
 		return HookResult{
 			Block: true,
 			BlockReason: "⚠️ MANDATORY OUT-OF-BAND (OAST) PROBING REQUIRED:\n" +
@@ -1949,10 +2216,7 @@ func planFinishGate(state *ScanState, maxRejections int) HookResult {
 			continue
 		}
 		if task.Status == TaskSkipped && state.FinishAttempts <= maxRejections {
-			note := strings.ToLower(task.Notes)
-			if strings.Contains(note, "rce") || strings.Contains(note, "sqli") ||
-				strings.Contains(note, "already achieved") || strings.Contains(note, "already found") ||
-				strings.Contains(note, "already bypass") {
+			if invalidEarlyAbortSkipReason(task.Notes) {
 				invalidSkips = append(invalidSkips, fmt.Sprintf("  • [%s] skipped with excuse: %q", task.ID, task.Notes))
 			}
 		}
@@ -1980,6 +2244,82 @@ func planFinishGate(state *ScanState, maxRejections int) HookResult {
 		}
 	}
 	return HookResult{}
+}
+
+// oastRequiredForTestedBlindClasses avoids forcing a callback ceremony when
+// the live baseline proved that every planned SSRF/XXE sink is rejected at the
+// authentication boundary before URL/XML parsing. OAST remains mandatory when
+// there is no structural plan, any blind-class task remains open, or any task
+// reached a parser/sink. This keeps the protection for genuinely blind behavior
+// without making an anonymous specialist sleep and poll an endpoint that only
+// ever returned 401.
+func oastRequiredForTestedBlindClasses(state *ScanState) bool {
+	if state == nil {
+		return false
+	}
+	for _, class := range []string{"xxe", "ssrf"} {
+		if state.VulnClassesTested[class] && !blindClassBlockedAtPrerequisite(state, class) {
+			return true
+		}
+	}
+	return false
+}
+
+func blindClassBlockedAtPrerequisite(state *ScanState, class string) bool {
+	if state.Plan == nil || state.Plan.IsEmpty() {
+		return false
+	}
+	found := false
+	for _, task := range state.Plan.Tasks {
+		identity := strings.ToLower(task.ID + " " + task.Title + " " + task.VulnClass)
+		if !strings.Contains(identity, class) {
+			continue
+		}
+		found = true
+		if task.Status != TaskCompleted && task.Status != TaskSkipped {
+			return false
+		}
+		note := strings.ToLower(task.Notes)
+		blocked := false
+		for _, marker := range []string{
+			"auth-walled", "requires auth", "require authentication", "authentication required",
+			"no unauth", "without auth", "not anonymously reachable", "before parsing", "before url parsing",
+			"returns 401", "return 401", "401 unauthorized", "401 before",
+		} {
+			if strings.Contains(note, marker) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			return false
+		}
+	}
+	return found
+}
+
+// invalidEarlyAbortSkipReason identifies the actual shortcut rationale rather
+// than rejecting every skip note that merely names SQLi or RCE. The old broad
+// substring test treated legitimate explanations such as "SQLi endpoints are
+// authenticated and no operator session was supplied" as an invalid shortcut,
+// causing specialists to reopen exhausted lanes and loop for minutes.
+func invalidEarlyAbortSkipReason(note string) bool {
+	note = strings.ToLower(strings.TrimSpace(note))
+	if note == "" {
+		return false
+	}
+	for _, shortcut := range []string{
+		"already achieved",
+		"already found",
+		"already bypass",
+		"finding is enough",
+		"one finding is enough",
+	} {
+		if strings.Contains(note, shortcut) {
+			return true
+		}
+	}
+	return false
 }
 
 // testDepthRatio computes the average number of vuln-class tests per endpoint.
@@ -2320,7 +2660,7 @@ func isRefusal(response string) bool {
 // targets and tightly budgeted scans should retain control over provider cost.
 func hookDelegationCoordinator(state *ScanState, args map[string]string) HookResult {
 	if state == nil || state.DiscoveryMode || state.ReconOnlyMode || state.DelegatedAgent ||
-		state.DelegationAttempted || !state.ReconDone || state.Iteration < 5 || state.Plan == nil ||
+		state.DelegationAttempted || !state.ReconDone || !state.EndpointInventorySaved || state.Iteration < 5 || state.Plan == nil ||
 		!state.PlanBuilt || !state.LedgerSeeded {
 		return HookResult{}
 	}
@@ -2419,14 +2759,15 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	if state.EndpointInventorySaved {
 		state.DiscoveredEndpoints = extractEndpointsFromNotes(state)
 	}
-	// Do not wait for the model to attempt finish and be told to save an
-	// Endpoint Inventory before planning. hookWorkTracker already records live
-	// endpoints from curl/httpx/etc.; those observations are enough to seed an
-	// initial, bounded plan and launch the single specialist wave early. A later
-	// explicit inventory remains authoritative and replaces this provisional
-	// surface above.
-	if !state.EndpointInventorySaved && state.ReconDone && len(state.DiscoveredEndpoints) == 0 {
-		state.DiscoveredEndpoints = observedEndpointsForPlanning(state.EndpointsTested, 12)
+	// A curl to /api/health is not a real attack-surface inventory. Building a
+	// generic whole-target plan from one observed path caused the coordinator
+	// to launch broad specialists before client routes and file-serving paths
+	// were mapped, repeatedly missing known bugs. Wait for an inventory note.
+	if !state.EndpointInventorySaved && state.Plan == nil && state.ReconDone {
+		if state.Iteration >= 5 && state.Iteration%5 == 0 {
+			return HookResult{Nudge: "Save an Endpoint Inventory note now: list only LIVE, observed routes from responses, links, forms, and first-party JavaScript, including dynamic path segments and file-serving directories. Then prioritize concrete hypotheses and build the assessment plan. Do not invent paths to satisfy this gate."}
+		}
+		return HookResult{}
 	}
 	// Delegated specialists are already assigned one bounded lane by the root.
 	// AutoPlan is a whole-target plan; creating it here silently expands every
@@ -2442,7 +2783,11 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	// which case PlanBuilt is true and we leave its plan alone.
 	if !state.PlanBuilt && state.Plan == nil && state.ReconDone &&
 		(len(state.DiscoveredEndpoints) > 0 || len(state.DetectedTechs) > 0) {
-		state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
+		if state.AuthContextKnown {
+			state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs, state.AuthContextAvailable)
+		} else {
+			state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
+		}
 		state.PlanBuilt = true
 	}
 

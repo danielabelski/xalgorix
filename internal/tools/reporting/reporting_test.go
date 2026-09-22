@@ -853,6 +853,191 @@ func TestReportVuln_IndependentVerifierGate(t *testing.T) {
 	})
 }
 
+func TestHasConcreteRCEExecutionProof(t *testing.T) {
+	tests := []struct {
+		name  string
+		proof string
+		want  bool
+	}{
+		{
+			name: "h2 evaluation and staging fetch are not rce",
+			proof: "H2 executed SELECT 1 and INIT=RUNSCRIPT fetched http://127.0.0.1:9999/x.sql. " +
+				"Replacing the statement with a trigger calling Runtime.exec would provide RCE, but no command output was obtained.",
+			want: false,
+		},
+		{
+			name:  "one slow request is not rce",
+			proof: "The version appears vulnerable and one request took 7 seconds before returning HTTP 500.",
+			want:  false,
+		},
+		{
+			name:  "unix id output",
+			proof: `POST /setup returned command output: uid=1000(metabase) gid=1000(metabase) groups=1000(metabase)`,
+			want:  true,
+		},
+		{
+			name: "deterministic timing proof",
+			proof: "Blind RCE CONFIRMED by a repeated server-side timing differential at /api/setup/validate: " +
+				"3/3 paired probes supported the delay; median baseline 11 ms versus median probe 7014 ms " +
+				"(delta 7003 ms for an intended 7000 ms delay).",
+			want: true,
+		},
+		{
+			name: "authoritative http oob proof",
+			proof: "Out-of-band blind-rce proof for token abc123: non-scanner HTTP callback received (1) — " +
+				"the target executed the payload out-of-band (interactions: 1 non-scanner-HTTP, 0 DNS, 0 scanner-origin, 0 unassessed). " +
+				"Execution attribution: runtime-api with an exact callback-bearing payload.",
+			want: true,
+		},
+		{
+			name: "raw oob callback without execution attribution is not rce",
+			proof: "Out-of-band blind-rce proof for token abc123: non-scanner HTTP callback received (1) — " +
+				"the target executed the payload out-of-band (interactions: 1 non-scanner-HTTP, 0 DNS, 0 scanner-origin, 0 unassessed).",
+			want: false,
+		},
+		{
+			name:  "response bound random canary",
+			proof: "The response body returned XALGORIX_RCE_CANARY_a81f5d after the injected echo command.",
+			want:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasConcreteRCEExecutionProof(tt.proof); got != tt.want {
+				t.Fatalf("hasConcreteRCEExecutionProof() = %v, want %v for %q", got, tt.want, tt.proof)
+			}
+		})
+	}
+}
+
+func TestReportVuln_RCEVerifierMustSupplyExecutionProof(t *testing.T) {
+	rceArgs := func() map[string]string {
+		return map[string]string{
+			"title":               "Pre-auth remote code execution through H2 setup validation",
+			"severity":            "medium",
+			"description":         "The setup validation sink may allow unauthenticated remote code execution.",
+			"exploitation_proof":  "H2 accepted SELECT 1 and INIT=RUNSCRIPT fetched http://127.0.0.1:9999/x.sql, but the test did not capture command output.",
+			"verification_method": "exploited",
+			"impact":              "Potential server-side code execution.",
+			"target":              "https://example.com",
+			"endpoint":            "https://example.com/api/setup/validate",
+			"method":              "POST",
+			"cwe_id":              "CWE-77",
+		}
+	}
+
+	t.Run("weak confirmed chain remains manual review", func(t *testing.T) {
+		ctx := "verifier-rce-weak-chain"
+		CleanupContext(ctx)
+		defer CleanupContext(ctx)
+		SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+			return VerificationVerdict{
+				Confirmed: true,
+				Reason:    "the exploit chain is plausible",
+				Evidence:  "The verifier reproduced H2 SQL evaluation and observed the target fetch a local SQL file; replacing it with Runtime.exec should execute a command.",
+			}
+		})
+
+		res, err := reportVulnWithContextID(ctx, rceArgs())
+		if err != nil {
+			t.Fatalf("report error: %v", err)
+		}
+		vulns := GetVulnerabilitiesForContext(ctx)
+		if len(vulns) != 1 {
+			t.Fatalf("expected candidate to be preserved, got %d (%s)", len(vulns), res.Output)
+		}
+		if vulns[0].Verified || !containsTag(vulns[0].Tags, TagManualReview) {
+			t.Fatalf("weak RCE chain must remain unverified/manual-review: %+v", vulns[0])
+		}
+		if !strings.Contains(vulns[0].ExploitationProof, "Independent verifier evidence:") {
+			t.Fatalf("verifier evidence was not persisted: %q", vulns[0].ExploitationProof)
+		}
+		if !strings.Contains(res.Output, "supplied no concrete code-execution evidence") {
+			t.Fatalf("missing actionable RCE proof warning: %s", res.Output)
+		}
+	})
+
+	t.Run("concrete verifier command output verifies rce", func(t *testing.T) {
+		ctx := "verifier-rce-command-output"
+		CleanupContext(ctx)
+		defer CleanupContext(ctx)
+		SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+			return VerificationVerdict{
+				Confirmed: true,
+				Reason:    "reproduced with a benign id command",
+				Evidence:  "Verifier response body contained command output: uid=1000(metabase) gid=1000(metabase) groups=1000(metabase)",
+			}
+		})
+
+		res, err := reportVulnWithContextID(ctx, rceArgs())
+		if err != nil {
+			t.Fatalf("report error: %v", err)
+		}
+		vulns := GetVulnerabilitiesForContext(ctx)
+		if len(vulns) != 1 || !vulns[0].Verified || !containsTag(vulns[0].Tags, TagVerified) {
+			t.Fatalf("command-output RCE must be independently verified: %+v output=%s", vulns, res.Output)
+		}
+		if !strings.Contains(vulns[0].ExploitationProof, "uid=1000(metabase)") {
+			t.Fatalf("concrete verifier evidence was not persisted: %q", vulns[0].ExploitationProof)
+		}
+	})
+
+	t.Run("later concrete proof upgrades an unverified rce candidate", func(t *testing.T) {
+		ctx := "verifier-rce-upgrade"
+		CleanupContext(ctx)
+		defer CleanupContext(ctx)
+		calls := 0
+		SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+			calls++
+			if calls == 1 {
+				return VerificationVerdict{
+					Confirmed: true,
+					Reason:    "only the precursor was reproduced",
+					Evidence:  "H2 evaluated SQL and fetched a RUNSCRIPT URL, but no command output was captured.",
+				}
+			}
+			return VerificationVerdict{
+				Confirmed: true,
+				Reason:    "benign command execution reproduced",
+				Evidence:  "Response contained command output: uid=1000(metabase) gid=1000(metabase)",
+			}
+		})
+
+		first, err := reportVulnWithContextID(ctx, rceArgs())
+		if err != nil {
+			t.Fatalf("first report error: %v", err)
+		}
+		initial := GetVulnerabilitiesForContext(ctx)
+		if len(initial) != 1 || initial[0].Verified {
+			t.Fatalf("first weak candidate must be stored unverified: %+v output=%s", initial, first.Output)
+		}
+		initialID := initial[0].ID
+
+		secondArgs := rceArgs()
+		secondArgs["exploitation_proof"] += " Re-testing the same sink with a benign command."
+		second, err := reportVulnWithContextID(ctx, secondArgs)
+		if err != nil {
+			t.Fatalf("second report error: %v", err)
+		}
+		upgraded := GetVulnerabilitiesForContext(ctx)
+		if calls != 2 {
+			t.Fatalf("second attempt did not reach the verifier; calls=%d output=%s", calls, second.Output)
+		}
+		if len(upgraded) != 1 {
+			t.Fatalf("upgrade must replace in place, got %d findings: %+v", len(upgraded), upgraded)
+		}
+		if upgraded[0].ID != initialID || !upgraded[0].Verified || !containsTag(upgraded[0].Tags, TagVerified) {
+			t.Fatalf("candidate was not upgraded in place: before=%s after=%+v", initialID, upgraded[0])
+		}
+		if !strings.Contains(upgraded[0].ExploitationProof, "uid=1000(metabase)") {
+			t.Fatalf("upgraded proof did not retain concrete verifier evidence: %q", upgraded[0].ExploitationProof)
+		}
+		if second.Metadata["upgraded"] != true || !strings.Contains(second.Output, "Vulnerability reported: upgraded with verified evidence") {
+			t.Fatalf("upgrade result was not surfaced to hooks/UI: metadata=%v output=%s", second.Metadata, second.Output)
+		}
+	})
+}
+
 func TestRegistryLocalVerifiersDoNotCrossWire(t *testing.T) {
 	ctx := "registry-local-verifier-isolation"
 	CleanupContext(ctx)
@@ -1418,6 +1603,60 @@ func TestReportVulnChecksDuplicateBeforeAppending(t *testing.T) {
 	if got := len(GetVulnerabilitiesForContext(contextID)); got != 1 {
 		t.Fatalf("stored vulnerabilities = %d, want 1", got)
 	}
+}
+
+func TestReportVulnDuplicateLinksSuppliedLedgerHypothesis(t *testing.T) {
+	contextID := "test-report-duplicate-ledger-link"
+	CleanupContext(contextID)
+	defer CleanupContext(contextID)
+
+	sc := scanctx.New(contextID, t.TempDir())
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(contextID)
+
+	first, err := reportVulnWithContextID(contextID, validReportArgs())
+	if err != nil {
+		t.Fatalf("first report error = %v", err)
+	}
+	findingID, _ := first.Metadata["vuln_id"].(string)
+	if findingID == "" {
+		t.Fatalf("first report metadata = %#v, want vuln_id", first.Metadata)
+	}
+
+	hyp := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title: "Second proof path for the same SQL injection", VulnClass: "sqli",
+		Target: "https://example.com", Endpoint: "/login", Parameter: "id",
+		Status: scanctx.HypothesisTesting,
+	})
+	duplicateArgs := validReportArgs()
+	duplicateArgs["endpoint"] = "https://example.com/login?id=2"
+	duplicateArgs["hypothesis_id"] = hyp.ID
+	second, err := reportVulnWithContextID(contextID, duplicateArgs)
+	if err != nil {
+		t.Fatalf("duplicate report error = %v", err)
+	}
+	if linked, _ := second.Metadata["ledger_linked"].(bool); !linked {
+		t.Fatalf("duplicate metadata = %#v, want ledger_linked=true", second.Metadata)
+	}
+	updated, ok := sc.Ledger.Get(hyp.ID)
+	if !ok || updated.Status != scanctx.HypothesisProven {
+		t.Fatalf("hypothesis after duplicate = %+v, want proven", updated)
+	}
+	if !hypothesisHasFindingRef(updated, findingID) {
+		t.Fatalf("hypothesis evidence = %+v, want finding_ref to %s", updated.Evidence, findingID)
+	}
+	if got := len(GetVulnerabilitiesForContext(contextID)); got != 1 {
+		t.Fatalf("stored vulnerabilities = %d, want 1", got)
+	}
+}
+
+func hypothesisHasFindingRef(h scanctx.Hypothesis, findingID string) bool {
+	for _, ev := range h.Evidence {
+		if ev.Kind == scanctx.EvidenceFindingRef && ev.FindingID == findingID {
+			return true
+		}
+	}
+	return false
 }
 
 func TestReportVulnSalvagesSingleTargetFromScanContext(t *testing.T) {
@@ -2264,6 +2503,72 @@ func TestFindDuplicateVulnerability_SameTargetCVEDedupsAcrossProofEndpoints(t *t
 	}
 }
 
+func TestFindDuplicateVulnerability_SameCVEPrecursorDoesNotSuppressRCE(t *testing.T) {
+	existing := []Vulnerability{{
+		ID:          "XALG-1",
+		Title:       "Unauthenticated setup token disclosure",
+		Description: "The public properties endpoint exposes the setup token.",
+		CVE:         "CVE-2023-38646",
+		CWE:         "CWE-200",
+		Target:      "https://metabase.example.com",
+		Endpoint:    "/api/session/properties",
+	}}
+	if _, _, isDup := findDuplicateVulnerability(existing,
+		"Pre-auth remote code execution through setup validation",
+		"The disclosed token reaches an H2 code-execution sink.",
+		"CVE-2023-38646", "CWE-94", "https://metabase.example.com",
+		"/api/setup/validate"); isDup {
+		t.Fatal("a same-CVE disclosure precursor must not suppress the distinct RCE root cause")
+	}
+
+	existing = append(existing, Vulnerability{
+		ID:          "XALG-2",
+		Title:       "Pre-auth RCE via H2 trigger",
+		Description: "Remote code execution through setup validation.",
+		CVE:         "CVE-2023-38646",
+		CWE:         "CWE-94",
+		Target:      "https://metabase.example.com",
+		Endpoint:    "/api/setup/validate",
+	})
+	dup, _, isDup := findDuplicateVulnerability(existing,
+		"Alternative pre-auth RCE proof",
+		"A second payload reaches the same code-execution primitive.",
+		"CVE-2023-38646", "CWE-77", "https://metabase.example.com",
+		"/api/setup/validate?retry=1")
+	if !isDup || dup.ID != "XALG-2" {
+		t.Fatalf("same-class reports for one CVE must still deduplicate; duplicate=%v id=%q", isDup, dup.ID)
+	}
+}
+
+func TestFindDuplicateVulnerability_TraversalHandlerDedupsAcrossLeakedFilesWithoutCVE(t *testing.T) {
+	passwdEndpoint := "/public/plugins/alertlist/../../../../../../../../etc/passwd"
+	databaseEndpoint := "/public/plugins/alertlist/..%2f..%2f..%2f..%2f..%2f..%2fvar%2flib%2fgrafana%2fgrafana.db"
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "Unauthenticated path traversal", Description: "Local file read",
+		CWE: "CWE-22", Target: "http://127.0.0.1:3310",
+		Endpoint: passwdEndpoint,
+	}}
+	dup, _, isDup := findDuplicateVulnerability(existing,
+		"Full database dump with admin hash", "Path traversal leaked the Grafana SQLite database",
+		"", "CWE-22", "http://127.0.0.1:3310",
+		databaseEndpoint)
+	if !isDup || dup.ID != "XALG-1" {
+		t.Fatalf("same traversal handler must dedup across leaked files without relying on CVE: duplicate=%v id=%q roots=%q/%q types=%q/%q",
+			isDup, dup.ID,
+			traversalSinkKey(dedupEndpointKeyForTarget("http://127.0.0.1:3310", passwdEndpoint)),
+			traversalSinkKey(dedupEndpointKeyForTarget("http://127.0.0.1:3310", databaseEndpoint)),
+			extractVulnTypeWithCWE(existing[0].Title, existing[0].Description, existing[0].CWE),
+			extractVulnTypeWithCWE("Full database dump with admin hash", "Path traversal leaked the Grafana SQLite database", "CWE-22"))
+	}
+
+	if _, _, isDup := findDuplicateVulnerability(existing,
+		"Path traversal in a second plugin", "Local file inclusion",
+		"", "CWE-22", "http://127.0.0.1:3310",
+		"/public/plugins/other/../../../../etc/passwd"); isDup {
+		t.Fatal("different traversal handlers must remain separate findings")
+	}
+}
+
 func TestFindDuplicateVulnerability_SameCVEDifferentTargetNotMerged(t *testing.T) {
 	existing := []Vulnerability{{
 		ID: "XALG-1", Title: "Grafana path traversal", CVE: "CVE-2021-43798",
@@ -2285,6 +2590,8 @@ func TestExtractVulnTypeWithCWE(t *testing.T) {
 		{"keyword wins over cwe", "Reflected XSS in search", "", "CWE-89", "xss"},
 		{"cwe fallback when no keyword", "Unauthenticated contact creation", "adds a record", "CWE-79", "xss"},
 		{"cwe fallback idor", "Access another account's order", "returns the record", "CWE-639", "idor"},
+		{"sqlite is not sqli", "Full database dump", "Path traversal leaked the SQLite database", "CWE-22", "lfi"},
+		{"standalone sqli acronym", "SQLi in login", "database error", "", "sqli"},
 		{"cwe format variants", "no class keyword here", "", "79", "xss"},
 		{"unmapped cwe → empty", "no class keyword here", "", "CWE-770", ""},
 		{"neither → empty", "no class keyword here", "", "", ""},
@@ -2295,6 +2602,30 @@ func TestExtractVulnTypeWithCWE(t *testing.T) {
 				t.Fatalf("extractVulnTypeWithCWE(%q,%q,%q) = %q, want %q", c.title, c.desc, c.cwe, got, c.want)
 			}
 		})
+	}
+}
+
+func TestCheckFalsePositiveRejectsPublicSourceMapWithoutSecret(t *testing.T) {
+	rejection := checkFalsePositive(
+		"JavaScript source maps publicly exposed",
+		"The .js.map file reveals frontend routes, source filenames, and comments.",
+		"medium",
+		"GET /public/build/app.js.map returned 200 and listed webpack source files.",
+	)
+	if !strings.Contains(rejection, "source map is discovery material") {
+		t.Fatalf("map-only disclosure was not rejected: %q", rejection)
+	}
+}
+
+func TestCheckFalsePositiveAllowsSourceMapWithConcreteSecret(t *testing.T) {
+	rejection := checkFalsePositive(
+		"JavaScript source map exposes production credential",
+		"The .js.map file contains an embedded credential value.",
+		"medium",
+		`GET /public/build/app.js.map returned client_secret="a-real-secret-value-12345"`,
+	)
+	if rejection != "" {
+		t.Fatalf("source map with concrete secret value was rejected: %q", rejection)
 	}
 }
 
@@ -2363,7 +2694,7 @@ func TestLedgerBrowserXSSProof(t *testing.T) {
 	defer scanctx.Deactivate(sc.ID)
 
 	// No verify_xss confirmation yet → no bridged proof.
-	if got := ledgerBrowserXSSProof(sc.ID); got != "" {
+	if got := ledgerBrowserXSSProof(sc.ID, "", "http://x", "/search"); got != "" {
 		t.Fatalf("expected empty proof before any verify_xss confirmation, got %q", got)
 	}
 
@@ -2378,11 +2709,18 @@ func TestLedgerBrowserXSSProof(t *testing.T) {
 	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
 		Kind:    "exploit",
 		Summary: `Browser-confirmed XSS: a dialog:alert dialog carrying the nonce "XV-7a91" fired while loading http://x/search?q=<script>alert('XV-7a91')</script>.`,
+		Request: "http://x/search?q=%3Cscript%3E",
 	})
 
-	got := ledgerBrowserXSSProof(sc.ID)
+	got := ledgerBrowserXSSProof(sc.ID, "", "http://x", "/search")
 	if !strings.Contains(strings.ToLower(got), "browser-confirmed xss") {
 		t.Fatalf("expected the browser-confirmed proof summary, got %q", got)
+	}
+	if other := ledgerBrowserXSSProof(sc.ID, "", "http://x", "/other"); other != "" {
+		t.Fatalf("browser proof must not transfer to another route: %q", other)
+	}
+	if other := ledgerBrowserXSSProof(sc.ID, "", "http://other", "/search"); other != "" {
+		t.Fatalf("browser proof must not transfer to another target: %q", other)
 	}
 
 	// The bridged proof must satisfy the reflection-only XSS gate even though the
@@ -2405,6 +2743,170 @@ func TestLedgerBrowserXSSProof(t *testing.T) {
 	}
 }
 
+// TestReportVuln_BrowserLedgerProofRecoversSparseReport locks the complete
+// reporting boundary that a live benchmark exposed: the browser confirmer had
+// already observed a fresh nonce executing, but the reporting model omitted
+// proof/target/endpoint/hypothesis and the weaker LLM verifier then rejected
+// the real finding as "not reflected". Engine-owned browser execution evidence
+// must recover those fields, bypass reinterpretation, persist the finding, and
+// link it back to the exact hypothesis.
+func TestReportVuln_BrowserLedgerProofRecoversSparseReport(t *testing.T) {
+	ctx := "browser-xss-sparse-report"
+	CleanupContext(ctx)
+	defer CleanupContext(ctx)
+
+	sc := scanctx.New(ctx, "")
+	sc.SetTargets([]string{"http://127.0.0.1:3310"})
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(ctx)
+
+	payloadURL := "http://127.0.0.1:3310/invite/%7B%7Bconstructor.constructor('window.__xss%3D7654321')()%7D%7D"
+	h := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title:      "Browser-confirmed XSS at /invite/",
+		VulnClass:  "xss",
+		Target:     "http://127.0.0.1:3310",
+		Endpoint:   "/invite/%7B%7Bconstructor.constructor('window.__xss%3D7654321')()%7D%7D",
+		Parameter:  "path",
+		Origin:     "verify_xss",
+		Confidence: 0.9,
+		Status:     scanctx.HypothesisProven,
+	})
+	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
+		Kind:       "exploit",
+		Summary:    `Browser-confirmed XSS: a dom_marker execution signal carrying the nonce "7654321" was observed while loading the injected /invite/ route.`,
+		Request:    payloadURL,
+		Response:   `dom_marker message: window.__xss=7654321`,
+		Confidence: 0.9,
+		AgentID:    "browser",
+	})
+
+	verifierCalls := 0
+	SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+		verifierCalls++
+		return VerificationVerdict{Reason: "HTML response did not reflect the payload"}
+	})
+	defer SetFindingVerifier(ctx, nil)
+
+	args := map[string]string{
+		"title":       "Path-template XSS in the invite route",
+		"severity":    "medium",
+		"description": "An unauthenticated client-side route evaluates attacker-controlled path content and executes JavaScript in the victim's browser.",
+		"impact":      "An attacker can execute script in the application's origin when a victim follows the crafted link.",
+		"cwe_id":      "CWE-79",
+		"cvss":        "6.1",
+		"cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+	}
+	res, err := reportVulnWithContextID(ctx, args)
+	if err != nil {
+		t.Fatalf("report error: %v", err)
+	}
+	if verifierCalls != 0 {
+		t.Fatalf("weaker LLM verifier was called %d time(s) despite exact browser-execution proof", verifierCalls)
+	}
+
+	vulns := GetVulnerabilitiesForContext(ctx)
+	if len(vulns) != 1 {
+		t.Fatalf("expected browser-confirmed XSS to persist, got %d (%s)", len(vulns), res.Output)
+	}
+	v := vulns[0]
+	if v.Target != "http://127.0.0.1:3310" {
+		t.Fatalf("target was not recovered from scan context: %q", v.Target)
+	}
+	if v.Endpoint != payloadURL || v.Method != "GET" {
+		t.Fatalf("successful browser request was not recovered: endpoint=%q method=%q", v.Endpoint, v.Method)
+	}
+	if !v.Verified || !containsTag(v.Tags, TagExploitProven) {
+		t.Fatalf("browser proof must persist as exploit-proven: verified=%v tags=%v", v.Verified, v.Tags)
+	}
+	if !strings.Contains(strings.ToLower(v.ExploitationProof), "browser-confirmed xss") ||
+		!strings.Contains(v.ExploitationProof, "Exploit request: GET "+payloadURL) {
+		t.Fatalf("folded proof is incomplete: %q", v.ExploitationProof)
+	}
+	got, ok := sc.Ledger.Get(h.ID)
+	linked := false
+	if ok {
+		for _, ev := range got.Evidence {
+			if ev.Kind == scanctx.EvidenceFindingRef && ev.FindingID == v.ID {
+				linked = true
+				break
+			}
+		}
+	}
+	if !ok || got.Status != scanctx.HypothesisProven || !linked {
+		t.Fatalf("finding was not linked back to hypothesis %s: ok=%v hypothesis=%+v", h.ID, ok, got)
+	}
+}
+
+func TestXSSProofRouteMatchesPathTemplate(t *testing.T) {
+	if !xssProofRouteMatches("/dashboard/", "/dashboard/%7B%7Bconstructor.constructor('window.__xss=123456789')()%7D%7D") {
+		t.Fatal("expected stable path-template route to match its injected proof")
+	}
+	if !xssProofRouteMatches(
+		"/invite/{{constructor.constructor('window.__xss=123456789')()}}",
+		"/invite/%7B%7Bconstructor.constructor('window.__xss=123456789')()%7D%7D",
+	) {
+		t.Fatal("expected an exact injected report URL to match the same encoded browser-proof route")
+	}
+	for _, template := range []string{"/invite/:code", "/invite/{code}", "/invite/[code]", "/invite/<code>"} {
+		if !xssProofRouteMatches(template, "/invite/%7B%7Bconstructor.constructor('window.__xss=123456789')()%7D%7D") {
+			t.Fatalf("expected dynamic route template %q to match its browser-proof route", template)
+		}
+	}
+	if xssProofRouteMatches("/dashboard/other", "/dashboard/%7B%7Bconstructor.constructor('window.__xss=123456789')()%7D%7D") {
+		t.Fatal("different route must not reuse browser proof")
+	}
+}
+
+func TestReportVuln_BrowserProofSurvivesDuplicateTemplateHypothesis(t *testing.T) {
+	ctx := "browser-xss-template-report"
+	CleanupContext(ctx)
+	defer CleanupContext(ctx)
+
+	sc := scanctx.New(ctx, "")
+	sc.SetTargets([]string{"http://127.0.0.1:3310"})
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(ctx)
+
+	payloadURL := "http://127.0.0.1:3310/invite/%7B%7Bconstructor.constructor('window.__xss%3D7654321')()%7D%7D"
+	proved := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title: "Browser-confirmed XSS at /invite/", VulnClass: "xss", Target: "http://127.0.0.1:3310",
+		Endpoint:  "/invite/%7B%7Bconstructor.constructor('window.__xss%3D7654321')()%7D%7D",
+		Parameter: "path", Origin: "verify_xss", Confidence: 0.9, Status: scanctx.HypothesisProven,
+	})
+	sc.Ledger.AddEvidence(proved.ID, scanctx.Evidence{
+		Kind: "exploit", Summary: `Browser-confirmed XSS: a dom:marker execution signal carrying nonce "7654321" was observed.`,
+		Request: payloadURL, Response: "window.__xss=7654321", Confidence: 0.9,
+	})
+	duplicate := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title: "Template XSS candidate", VulnClass: "xss", Target: "http://127.0.0.1:3310",
+		Endpoint: "/invite/:code", Parameter: "code", Origin: "agent", Status: scanctx.HypothesisTesting,
+	})
+
+	verifierCalls := 0
+	SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+		verifierCalls++
+		return VerificationVerdict{Reason: "server HTML did not reflect the client-side path"}
+	})
+	defer SetFindingVerifier(ctx, nil)
+
+	res, err := reportVulnWithContextID(ctx, map[string]string{
+		"title": "Path-template XSS in invite route", "severity": "medium",
+		"description": "The public client route evaluates attacker-controlled path content in the browser.",
+		"target":      "http://127.0.0.1:3310", "endpoint": "/invite/:code", "hypothesis_id": duplicate.ID,
+		"cwe_id": "CWE-79", "cvss": "6.1", "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verifierCalls != 0 {
+		t.Fatalf("weaker verifier was called %d time(s) despite same-route browser proof: %s", verifierCalls, res.Output)
+	}
+	vulns := GetVulnerabilitiesForContext(ctx)
+	if len(vulns) != 1 || !vulns[0].Verified || !strings.Contains(strings.ToLower(vulns[0].ExploitationProof), "browser-confirmed xss") {
+		t.Fatalf("template-route browser proof was not preserved: vulns=%+v output=%s", vulns, res.Output)
+	}
+}
+
 // TestReportVulnClass checks the finding→verifier-class mapping used to fold a
 // deterministic verify_* confirmation into a report.
 func TestReportVulnClass(t *testing.T) {
@@ -2418,6 +2920,7 @@ func TestReportVulnClass(t *testing.T) {
 		{"SQLi via search", "", "", "sqli"},
 		{"Server-Side Template Injection in name", "", "CWE-1336", "ssti"},
 		{"XXE in the import endpoint", "xml external entity", "CWE-611", "xxe"},
+		{"Path traversal in plugin assets", "local file inclusion", "CWE-22", "lfi"},
 		{"Reflected XSS in q", "", "CWE-79", "xss"},
 		{"IDOR on /api/orders exposes other users' data", "insecure direct object reference", "CWE-639", "idor"},
 		{"BOLA: any authenticated user reads any order", "broken object level authorization", "", "idor"},
@@ -2429,6 +2932,162 @@ func TestReportVulnClass(t *testing.T) {
 		if got := reportVulnClass(c.title, c.desc, c.cwe); got != c.want {
 			t.Errorf("reportVulnClass(%q,%q,%q) = %q, want %q", c.title, c.desc, c.cwe, got, c.want)
 		}
+	}
+}
+
+func TestLedgerPathTraversalProofRequiresMatchingRouteAndCapturedFile(t *testing.T) {
+	sc := scanctx.New("rep-path-traversal-bridge", "")
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(sc.ID)
+	h := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title: "Path traversal at /public/plugins/alertlist/", VulnClass: "lfi",
+		Endpoint: "/public/plugins/alertlist/", Target: "http://127.0.0.1:3310", Origin: "verify_path_traversal",
+	})
+	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
+		Kind: "exploit", Summary: "Path traversal/local file read CONFIRMED at /public/plugins/alertlist/",
+		Request:  "GET http://127.0.0.1:3310/public/plugins/alertlist/../../etc/passwd",
+		Response: "root:x:0:0:root:/root:/bin/sh\n",
+	})
+	endpoint := "http://127.0.0.1:3310/public/plugins/alertlist/../../etc/passwd"
+	if got := ledgerPathTraversalProof(sc.ID, h.ID, "http://127.0.0.1:3310", endpoint); !strings.Contains(got, "root:x:0:0") {
+		t.Fatalf("expected route-bound captured proof, got %q", got)
+	}
+	if got := ledgerPathTraversalProof(sc.ID, "H-999", "http://127.0.0.1:3310", endpoint); !strings.Contains(got, "root:x:0:0") {
+		t.Fatalf("exact proved route should recover a stale ledger ID, got %q", got)
+	}
+	encodedEndpoint := "/public/plugins/alertlist/..%2F..%2Fetc%2Fpasswd"
+	if got := ledgerPathTraversalProof(sc.ID, "", "http://127.0.0.1:3310", encodedEndpoint); !strings.Contains(got, "root:x:0:0") {
+		t.Fatalf("encoded report endpoint should retain the matching plugin route, got %q", got)
+	}
+	for _, tc := range []struct{ id, target, endpoint string }{
+		{"H-999", "http://127.0.0.1:3310", ""},
+		{h.ID, "http://127.0.0.1:3311", endpoint},
+		{h.ID, "http://127.0.0.1:3310", "http://127.0.0.1:3310/public/plugins/other/../../etc/passwd"},
+	} {
+		if got := ledgerPathTraversalProof(sc.ID, tc.id, tc.target, tc.endpoint); got != "" {
+			t.Fatalf("mismatched route/target borrowed proof: %q", got)
+		}
+	}
+}
+
+func TestEndpointFromProvedRequest(t *testing.T) {
+	proof := "HTTP/1.1 200 OK\nroot:x:0:0:root:/root:/bin/ash\nVulnerable path: GET /public/plugins/input/../../../../../etc/passwd\n"
+	endpoint, method := endpointFromProvedRequest(proof, "http://127.0.0.1:3310")
+	if endpoint != "http://127.0.0.1:3310/public/plugins/input/../../../../../etc/passwd" || method != "GET" {
+		t.Fatalf("lost the literal exploit path: endpoint=%q method=%q", endpoint, method)
+	}
+	for _, candidate := range []string{
+		"Vulnerable path: GET http://other.example/public/plugins/input/../../etc/passwd",
+		"Vulnerable path: GET //other.example/public/plugins/input/../../etc/passwd",
+		"GET /public/plugins/input/../../etc/passwd",
+		"Vulnerable path: GET relative/path",
+	} {
+		if endpoint, _ := endpointFromProvedRequest(candidate, "http://127.0.0.1:3310"); endpoint != "" {
+			t.Fatalf("untrusted or unlabeled request became endpoint: %q from %q", endpoint, candidate)
+		}
+	}
+}
+
+func TestReportPathTraversalInfersEndpointFromCapturedRequest(t *testing.T) {
+	sc := scanctx.New("rep-path-traversal-endpoint", "")
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(sc.ID)
+	proof := "HTTP/1.1 200 OK\nroot:x:0:0:root:/root:/bin/ash\nVulnerable path: GET /public/plugins/input/../../../../../etc/passwd"
+	result, err := reportVulnWithContextIDAndVerifier(sc.ID, nil, map[string]string{
+		"title":    "CVE-2021-43798: Path traversal in plugin assets",
+		"severity": "high", "target": "http://127.0.0.1:3310",
+		"exploitation_proof": proof,
+	})
+	if err != nil || !strings.Contains(result.Output, "Vulnerability reported") {
+		t.Fatalf("proof-bearing report should persist: result=%+v err=%v", result, err)
+	}
+	vulns := GetVulnerabilitiesForContext(sc.ID)
+	if len(vulns) != 1 ||
+		vulns[0].Endpoint != "http://127.0.0.1:3310/public/plugins/input/../../../../../etc/passwd" ||
+		vulns[0].Method != "GET" || vulns[0].VerificationMethod != "data_extracted" {
+		t.Fatalf("structured endpoint/method were not recovered from captured request: %+v", vulns)
+	}
+}
+
+func TestReportPathTraversalUsesMatchedDeterministicProof(t *testing.T) {
+	sc := scanctx.New("rep-path-traversal-report", "")
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(sc.ID)
+	h := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title: "Path traversal at /public/plugins/alertlist/", VulnClass: "lfi",
+		Endpoint: "/public/plugins/alertlist/", Target: "http://127.0.0.1:3310", Origin: "verify_path_traversal",
+	})
+	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
+		Kind: "exploit", Summary: "Path traversal/local file read CONFIRMED at /public/plugins/alertlist/",
+		Request:  "GET http://127.0.0.1:3310/public/plugins/alertlist/../../etc/passwd",
+		Response: "root:x:0:0:root:/root:/bin/sh\n",
+	})
+	result, err := reportVulnWithContextIDAndVerifier(sc.ID, nil, map[string]string{
+		"title": "Path traversal in plugin assets", "severity": "high",
+		"description": "Unauthenticated local file read through plugin asset path.",
+		"target":      "http://127.0.0.1:3310", "endpoint": "http://127.0.0.1:3310/public/plugins/alertlist/../../etc/passwd",
+		"cwe_id": "CWE-22", "hypothesis_id": h.ID,
+	})
+	if err != nil || !strings.Contains(result.Output, "Vulnerability reported") {
+		t.Fatalf("confirmed path traversal must survive omitted model fields: result=%+v err=%v", result, err)
+	}
+	vulns := GetVulnerabilitiesForContext(sc.ID)
+	if len(vulns) != 1 || vulns[0].VerificationMethod != "data_extracted" ||
+		!strings.Contains(vulns[0].ExploitationProof, "root:x:0:0") {
+		t.Fatalf("captured file content/method not persisted: %+v", vulns)
+	}
+}
+
+func TestReportPathTraversalRecoversSparseDeterministicProof(t *testing.T) {
+	ctx := "rep-path-traversal-sparse"
+	CleanupContext(ctx)
+	defer CleanupContext(ctx)
+
+	sc := scanctx.New(ctx, "")
+	sc.SetTargets([]string{"http://127.0.0.1:3310"})
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(sc.ID)
+	h := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title: "Path traversal at /public/plugins/alertlist/", VulnClass: "lfi",
+		Endpoint: "/public/plugins/alertlist/", Target: "http://127.0.0.1:3310", Origin: "verify_path_traversal",
+	})
+	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
+		Kind: "exploit", Summary: "Path traversal/local file read CONFIRMED at /public/plugins/alertlist/",
+		Request:  "GET http://127.0.0.1:3310/public/plugins/alertlist/../../../../../../../../etc/passwd",
+		Response: "root:x:0:0:root:/root:/bin/sh\n",
+	})
+
+	verifierCalls := 0
+	result, err := reportVulnWithContextIDAndVerifier(sc.ID, func(VerificationRequest) VerificationVerdict {
+		verifierCalls++
+		return VerificationVerdict{Reason: "generic verifier failed to reconstruct the raw traversal path"}
+	}, map[string]string{
+		"title":       "CVE-2021-43798 path traversal in plugin assets",
+		"severity":    "high",
+		"description": "An unauthenticated plugin asset request reads arbitrary local files.",
+		"cwe_id":      "CWE-22",
+	})
+	if err != nil || !strings.Contains(result.Output, "Vulnerability reported") {
+		t.Fatalf("sparse deterministic path-traversal report must persist: result=%+v err=%v", result, err)
+	}
+	if verifierCalls != 0 {
+		t.Fatalf("weaker verifier was called %d time(s) despite an exact captured file-read proof", verifierCalls)
+	}
+	vulns := GetVulnerabilitiesForContext(sc.ID)
+	if len(vulns) != 1 {
+		t.Fatalf("expected one persisted finding, got %+v", vulns)
+	}
+	v := vulns[0]
+	if v.Target != "http://127.0.0.1:3310" ||
+		v.Endpoint != "http://127.0.0.1:3310/public/plugins/alertlist/../../../../../../../../etc/passwd" ||
+		v.Method != "GET" || v.VerificationMethod != "data_extracted" {
+		t.Fatalf("sparse path-traversal fields were not recovered: %+v", v)
+	}
+	if !v.Verified || !containsTag(v.Tags, TagExploitProven) || !strings.Contains(v.ExploitationProof, "root:x:0:0") {
+		t.Fatalf("captured file read must be exploit-proven: %+v", v)
+	}
+	if got, ok := sc.Ledger.Get(h.ID); !ok || got.Status != scanctx.HypothesisProven {
+		t.Fatalf("finding was not linked to the recovered hypothesis: ok=%v hypothesis=%+v", ok, got)
 	}
 }
 
@@ -2464,9 +3123,28 @@ func TestLedgerVerifierProof(t *testing.T) {
 	if got := ledgerVerifierProof(sc.ID, "ssti"); !strings.Contains(got, "CONFIRMED") {
 		t.Fatalf("expected the merged-origin SSTI confirmation via evidence, got %q", got)
 	}
+	// verify_oob records blind-rce/blind-cmdi while reports use the canonical
+	// rce class. The bridge must not orphan that authoritative evidence.
+	hoob := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "OOB RCE at /run", VulnClass: "blind-rce", Endpoint: "/run", Origin: "verify_oob"})
+	sc.Ledger.AddEvidence(hoob.ID, scanctx.Evidence{Kind: "exploit", Summary: "Out-of-band blind-rce proof for token tok: DNS callback for the unique token received (1) — the target's resolver looked up your callback, proving payload execution. Execution attribution: runtime-api with an exact callback-bearing payload."})
+	if got := ledgerVerifierProof(sc.ID, "rce", hoob.ID, "", "/run"); !strings.Contains(got, "Execution attribution: runtime-api") {
+		t.Fatalf("expected blind-rce OAST evidence to bridge to canonical rce, got %q", got)
+	}
 	// Class isolation: a csrf confirmation must not answer an xxe query.
 	if got := ledgerVerifierProof(sc.ID, "xxe"); got != "" {
 		t.Fatalf("class isolation failed: answered an xxe query with %q", got)
+	}
+	// Timing proof is route-bound when the report supplies its verifier id and
+	// endpoint, preventing one proven RCE sink from validating another route.
+	hr1 := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "RCE at /one", VulnClass: "rce", Target: "https://example.com", Endpoint: "/one", Origin: "verify_timing"})
+	sc.Ledger.AddEvidence(hr1.ID, scanctx.Evidence{Kind: "exploit", Summary: "Blind RCE CONFIRMED at /one by repeated timing."})
+	hr2 := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "RCE at /two", VulnClass: "rce", Target: "https://example.com", Endpoint: "/two", Origin: "verify_timing"})
+	sc.Ledger.AddEvidence(hr2.ID, scanctx.Evidence{Kind: "exploit", Summary: "Blind RCE CONFIRMED at /two by repeated timing."})
+	if got := ledgerVerifierProof(sc.ID, "rce", hr2.ID, "https://example.com", "https://example.com/two"); !strings.Contains(got, "/two") {
+		t.Fatalf("expected route-bound timing proof for /two, got %q", got)
+	}
+	if got := ledgerVerifierProof(sc.ID, "rce", hr2.ID, "https://example.com", "https://example.com/one"); got != "" {
+		t.Fatalf("proof from /two must not validate /one, got %q", got)
 	}
 	// authz_matrix's HIGH-confidence BOLA/IDOR signal (a lower identity got the
 	// SAME successful response — its exploit summary says "broken access
@@ -2475,6 +3153,63 @@ func TestLedgerVerifierProof(t *testing.T) {
 	sc.Ledger.AddEvidence(ha.ID, scanctx.Evidence{Kind: "exploit", Summary: "role A → status 200, 88 bytes; role B (second account) got status 200 / 88 bytes for the same request — SAME successful response as the authorized identity — likely broken access control"})
 	if got := ledgerVerifierProof(sc.ID, "idor"); !strings.Contains(got, "broken access control") {
 		t.Fatalf("expected the authz_matrix broken-access confirmation, got %q", got)
+	}
+}
+
+func TestReportVuln_TimingLedgerProofMarksRCEExploitProven(t *testing.T) {
+	ctx := "verifier-ledger-rce-timing"
+	CleanupContext(ctx)
+	defer CleanupContext(ctx)
+
+	sc := scanctx.New(ctx, "https://example.com")
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(ctx)
+
+	h := sc.Ledger.Upsert(scanctx.Hypothesis{
+		Title:      "Blind RCE timing execution at /api/setup/validate",
+		VulnClass:  "rce",
+		Target:     "https://example.com",
+		Endpoint:   "/api/setup/validate",
+		Origin:     "verify_timing",
+		Status:     scanctx.HypothesisProven,
+		Confidence: 0.95,
+	})
+	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
+		Kind:       "exploit",
+		Summary:    "Blind RCE CONFIRMED by a repeated server-side timing differential at /api/setup/validate: 3/3 paired probes supported the delay; median baseline 95 ms versus median probe 4102 ms (delta 4007 ms for an intended 4000 ms delay). baseline_ms=[91 95 101]; probe_ms=[4099 4102 4110]; supporting_pairs=3/3.",
+		Confidence: 0.95,
+	})
+	SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+		return VerificationVerdict{Inconclusive: true, Reason: "timing replay is owned by deterministic verifier"}
+	})
+
+	args := map[string]string{
+		"title":               "CVE-2023-38646 pre-auth remote code execution",
+		"severity":            "critical",
+		"description":         "An unauthenticated H2 connection string evaluates attacker-controlled Java code in the server process, enabling remote code execution.",
+		"exploitation_proof":  "Repeated control/probe measurements are recorded in the linked verifier evidence.",
+		"verification_method": "time_based",
+		"target":              "https://example.com",
+		"endpoint":            "https://example.com/api/setup/validate",
+		"method":              "POST",
+		"cwe_id":              "CWE-94",
+		"cve":                 "CVE-2023-38646",
+		"cvss_vector":         "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+		"hypothesis_id":       h.ID,
+	}
+	res, err := reportVulnWithContextID(ctx, args)
+	if err != nil {
+		t.Fatalf("report error: %v", err)
+	}
+	vulns := GetVulnerabilitiesForContext(ctx)
+	if len(vulns) != 1 {
+		t.Fatalf("expected one persisted RCE, got %d (%s)", len(vulns), res.Output)
+	}
+	if !vulns[0].Verified || !containsTag(vulns[0].Tags, TagExploitProven) {
+		t.Fatalf("timing-confirmed RCE must be exploit-proven: %+v output=%s", vulns[0], res.Output)
+	}
+	if !strings.Contains(vulns[0].ExploitationProof, "supporting_pairs=3/3") {
+		t.Fatalf("ledger timing differential was not folded into proof: %q", vulns[0].ExploitationProof)
 	}
 }
 

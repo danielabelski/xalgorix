@@ -23,6 +23,14 @@ import (
 // magnitude) from a real differential test (two or more distinct magnitudes).
 var sleepMagnitudeRe = regexp.MustCompile(`(?:sleep|pg_sleep|delay)\s*[('"\[:\s]\s*0*(\d+)`)
 var cveIDRe = regexp.MustCompile(`(?i)\bCVE-[0-9]{4}-[0-9]{4,7}\b`)
+var provedRequestRE = regexp.MustCompile(`(?im)^\s*(?:vulnerable path|exploit(?: request)?|probe(?: request)?)\s*:\s*(GET|POST|PUT|PATCH|DELETE|HEAD)\s+(\S+)`)
+var standaloneSQLiRe = regexp.MustCompile(`(?:^|[^a-z0-9])sqli(?:$|[^a-z0-9])`)
+var sourceMapSecretValueRe = regexp.MustCompile(`(?i)(?:AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|(?:ghp|github_pat|xox[baprs]|sk_live)_[A-Za-z0-9_-]{12,}|(?:password|passwd|client_secret|api[_-]?key|secret[_-]?key|database_url)\s*[:=]\s*["'][^"'\r\n]{12,}["'])`)
+var unixIdentityOutputRe = regexp.MustCompile(`(?i)\buid=\d+\([^)]+\)(?:\s+gid=\d+\([^)]+\))?`)
+var unixPasswdRootLineRe = regexp.MustCompile(`(?m)^root:[^:\r\n]*:0:0:`)
+var whoamiOutputRe = regexp.MustCompile(`(?i)\bwhoami\s+(?:command\s+)?output\s*[:=]\s*(?:root|www-data|apache|nginx|nobody|system|nt authority\\(?:system|local service|network service))\b`)
+var linuxUnameOutputRe = regexp.MustCompile(`(?im)^Linux\s+\S+\s+\d+\.\d+\.\S+[^\r\n]{0,180}\bGNU/Linux\b`)
+var rceCanaryOutputRe = regexp.MustCompile(`(?i)\b(?:response(?:\s+body)?|command\s+output|returned)\b[^\r\n]{0,160}\b(?:xalgorix[-_ ]?(?:rce|cmd|canary)|rce[-_]?canary)[-_a-z0-9]{4,}\b`)
 
 // Valid verification methods — the agent must specify one when reporting.
 var validVerificationMethods = map[string]bool{
@@ -306,7 +314,7 @@ func RegisterWithVerifier(r *tools.Registry, verifier FindingVerifier) {
 			{Name: "fix", Description: "CONCRETE fix — ideally a minimal code/config patch or diff the developer can apply directly (e.g. replace string-concatenated SQL with a parameterized query, add the missing authorization check, HTML-escape the output). Include the file/function when known from source. This is what makes the report actionable.", Required: false},
 			{Name: "cwe_id", Description: "CWE identifier if known, e.g. CWE-79 for XSS, CWE-89 for SQLi, CWE-78 for command injection", Required: false},
 			{Name: "owasp", Description: "OWASP Top 10 (2021) category if known, e.g. A03 for Injection, A01 for Broken Access Control", Required: false},
-			{Name: "hypothesis_id", Description: "Optional ledger hypothesis id this finding proves (e.g. H-3 from record_hypothesis / authz_matrix / verify_xss / verify_oob). On success the finding is linked to that hypothesis and it is marked proven — this satisfies the finish gate without a separate add_hypothesis_evidence call.", Required: false},
+			{Name: "hypothesis_id", Description: "Ledger hypothesis id this finding proves (e.g. H-3 from record_hypothesis / authz_matrix / verify_xss / verify_oob). Always pass it when reporting ledger work. A new finding or a duplicate of an existing finding is linked to that hypothesis and marked proven, satisfying the finish gate without a separate add_hypothesis_evidence call.", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
 			return reportVulnForRegistryWithVerifier(r, verifier, args)
@@ -357,6 +365,20 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 			}
 		}
 	}
+	// Some models put the exact successful request into exploitation_proof but
+	// omit the structured endpoint/method. Recover those fields only from an
+	// explicitly labeled exploit/probe request on the declared target. This
+	// preserves provenance for triage and prevents a proven finding from
+	// disappearing in endpoint-based benchmarks.
+	if endpoint == "" && proof != "" {
+		if inferredEndpoint, inferredMethod := endpointFromProvedRequest(proof, target); inferredEndpoint != "" {
+			endpoint = inferredEndpoint
+			args["endpoint"] = endpoint
+			if strings.TrimSpace(args["method"]) == "" {
+				args["method"] = inferredMethod
+			}
+		}
+	}
 
 	// ── Salvage a missing description ──
 	// `description` is no longer a hard-required registry field: models (esp.
@@ -387,11 +409,51 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 	// This is repeated under the write lock just before append to close races.
 	store := getStoreByID(contextID)
 	store.mu.RLock()
-	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cve"], args["cwe_id"], target, endpoint); ok {
+	if existing, msg, ok := findDuplicateVulnerabilityForReport(store.vulns, title, args["description"], args["cve"], args["cwe_id"], target, endpoint); ok {
 		store.mu.RUnlock()
-		return duplicateResult(existing, msg), nil
+		return duplicateResult(contextID, existing, msg, args["hypothesis_id"]), nil
 	}
 	store.mu.RUnlock()
+
+	// ── Bridge: recover exact browser-confirmed XSS evidence before rejection ──
+	// verify_xss records a fresh browser-execution nonce, the payload URL, and
+	// the owning hypothesis in the scan ledger. Models sometimes make a sparse
+	// report_vulnerability call and omit that evidence (or its endpoint/id). Fold
+	// the engine-owned evidence in before Gate 0.5 so a genuine finding is not
+	// rejected merely because the model failed to repeat data Xalgorix already
+	// has. With no endpoint/id, recovery is deliberately limited to a single
+	// unambiguous browser-XSS match in this scan.
+	browserXSSProven := false
+	authoritativeDeterministicProof := false
+	if reportLooksLikeXSS(title, args["description"], args["cwe_id"]) {
+		if match := findLedgerBrowserXSSProof(contextID, args["hypothesis_id"], target, endpoint); match.Proof != "" {
+			browserXSSProven = true
+			authoritativeDeterministicProof = true
+			if !strings.Contains(proof, match.Proof) {
+				proof = strings.TrimSpace(proof + "\n" + match.Proof)
+				args["exploitation_proof"] = proof
+			}
+			if strings.TrimSpace(args["hypothesis_id"]) == "" {
+				args["hypothesis_id"] = match.HypothesisID
+			}
+			if target == "" {
+				if u, err := url.Parse(match.Request); err == nil &&
+					(u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+					target = u.Scheme + "://" + u.Host
+					args["target"] = target
+				}
+			}
+			if endpoint == "" {
+				if inferredEndpoint, inferredMethod := endpointFromProvedRequest(proof, target); inferredEndpoint != "" {
+					endpoint = inferredEndpoint
+					args["endpoint"] = endpoint
+					if strings.TrimSpace(args["method"]) == "" {
+						args["method"] = inferredMethod
+					}
+				}
+			}
+		}
+	}
 
 	// ── Gate 0.5: Reject fabricated / target-unreachable non-findings ──
 	// The shape-based gates below only check that a proof is present and
@@ -407,30 +469,9 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 		return tools.Result{Output: rejection}, nil
 	}
 
-	// ── Auto-inference for missing/incomplete fields ──
-	// A prose field is promoted to exploitation_proof ONLY when it itself
-	// already contains a concrete exploitation outcome (i.e. the agent pasted
-	// real output into the wrong field). Generic prose must never masquerade as
-	// proof: doing so silently defeats Gate 2 and yields "evidence" that merely
-	// restates the description, so notifications/reports carry no real proof.
-	// ── Bridge: fold browser-confirmed XSS proof from the ledger into the proof ──
-	// verify_xss records concrete browser-execution proof (a dialog/console/DOM
-	// signal carrying the injected nonce) in the shared ledger, but models do not
-	// reliably paste that verdict into exploitation_proof — so a genuinely
-	// browser-confirmed XSS gets dropped by the reflection-only gate below. When
-	// the ledger holds a verify_xss confirmation for this scan, fold it into the
-	// proof so the finding is judged on the real evidence, not on what the model
-	// happened to paste.
-	if reportLooksLikeXSS(title, args["description"], args["cwe_id"]) {
-		if bp := ledgerBrowserXSSProof(contextID); bp != "" &&
-			!strings.Contains(strings.ToLower(proof), "browser-confirmed xss") {
-			proof = strings.TrimSpace(proof + "\n" + bp)
-			args["exploitation_proof"] = proof
-		}
-	}
-
 	// ── Bridge: fold a deterministic verify_* confirmation from the ledger ──
-	// The verify_sqli / verify_ssti / verify_xxe / verify_csrf / verify_xss tools
+	// The verify_sqli / verify_ssti / verify_xxe / verify_csrf / verify_xss /
+	// verify_timing tools
 	// record exploit-proven evidence on a baseline-vs-probe differential (only on
 	// a positive confirmation). When such a confirmation exists for this
 	// finding's class, fold it into the proof and treat the finding as
@@ -440,10 +481,50 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 	// and SSTI) — undercutting the very confirmers that produced the proof. A
 	// positive DISPROOF from the independent verifier still drops the finding
 	// earlier, so this only rescues the inconclusive/absent-verifier case.
-	verifierProven := false
-	if cls := reportVulnClass(title, args["description"], args["cwe_id"]); cls != "" {
-		if vp := ledgerVerifierProof(contextID, cls); vp != "" {
+	verifierProven := browserXSSProven
+	cls := reportVulnClass(title, args["description"], args["cwe_id"])
+	if cls != "" {
+		vp := ""
+		if cls == "lfi" {
+			// A path-traversal confirmation must belong to this exact candidate
+			// route. A class-only match could attach one file leak to a different
+			// plugin or endpoint and turn an unproven report into a false positive.
+			match := findLedgerPathTraversalProof(contextID, args["hypothesis_id"], target, endpoint)
+			vp = match.Proof
+			if vp != "" {
+				if strings.TrimSpace(args["hypothesis_id"]) == "" {
+					args["hypothesis_id"] = match.HypothesisID
+				}
+				if target == "" {
+					if u, err := url.Parse(match.Request); err == nil &&
+						(u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+						target = u.Scheme + "://" + u.Host
+						args["target"] = target
+					}
+				}
+				if endpoint == "" {
+					if inferredEndpoint, inferredMethod := endpointFromProvedRequest(vp, target); inferredEndpoint != "" {
+						endpoint = inferredEndpoint
+						args["endpoint"] = endpoint
+						if strings.TrimSpace(args["method"]) == "" {
+							args["method"] = inferredMethod
+						}
+					}
+				}
+			}
+		} else if cls != "xss" {
+			// Browser XSS evidence was already matched to this exact route above.
+			// Bind other verifier evidence to an explicit hypothesis or route when
+			// available so proof from one injection point cannot validate another.
+			vp = ledgerVerifierProof(contextID, cls, args["hypothesis_id"], target, endpoint)
+		}
+		if vp != "" {
 			verifierProven = true
+			// Every ledger bridge above now binds to the explicit hypothesis and/or
+			// exact reported route. Each deterministic verifier writes exploit
+			// evidence only after its control-vs-probe acceptance rule succeeds, so
+			// re-asking a weaker free-form verifier can only lose real findings.
+			authoritativeDeterministicProof = true
 			if !strings.Contains(strings.ToLower(proof), strings.ToLower(vp)) {
 				proof = strings.TrimSpace(proof + "\n" + vp)
 				args["exploitation_proof"] = proof
@@ -464,6 +545,21 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 		// Infer verification method from proof or title if evidence is present
 		lp := strings.ToLower(proof + " " + title + " " + args["description"])
 		switch {
+		case cls == "lfi" && (verifierProven || strings.Contains(strings.ToLower(proof), "root:x:0:0")):
+			method = "data_extracted"
+			args["verification_method"] = method
+		case cls == "xss" && strings.Contains(strings.ToLower(proof), "browser-confirmed xss"):
+			// A nonce observed executing in a real browser is stronger than
+			// reflection. Do not mislabel it as merely reflected because the
+			// model also described the reflected payload in prose.
+			method = "manual_verified"
+			args["verification_method"] = method
+		case verifierProven:
+			// A positive engine-owned verify_* differential is already an
+			// exploitation method. Do not reject a real confirmed finding merely
+			// because the reporting model omitted this redundant enum field.
+			method = "exploited"
+			args["verification_method"] = method
 		case strings.Contains(lp, "error") || strings.Contains(lp, "sqlstate") || strings.Contains(lp, "syntax"):
 			method = "error_based"
 			args["verification_method"] = method
@@ -574,26 +670,30 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// ── Gate 4: Smart Deduplication — same vuln type on same endpoint = duplicate ──
 	store = getStoreByID(contextID)
 	store.mu.RLock()
-	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cve"], args["cwe_id"], target, endpoint); ok {
+	if existing, msg, ok := findDuplicateVulnerabilityForReport(store.vulns, title, args["description"], args["cve"], args["cwe_id"], target, endpoint); ok {
 		store.mu.RUnlock()
-		return duplicateResult(existing, msg), nil
+		return duplicateResult(contextID, existing, msg, args["hypothesis_id"]), nil
 	}
 	store.mu.RUnlock()
 
-	// ── Gate 4.5: Independent verification (always-on for every actionable finding) ──
-	// Hand the candidate to the dedicated Verifier agent, which re-tests it
-	// from scratch. Explicit rejection → drop. Confirmed → mark Verified.
-	// Inconclusive → persist but flagged Unverified (never claimed as validated).
-	// No lock is held here: verification is slow (LLM + re-testing).
+	// ── Gate 4.5: Independent verification for unconfirmed actionable findings ──
+	// Hand candidates without authoritative deterministic evidence to the
+	// dedicated Verifier agent, which re-tests them from scratch. A fresh browser
+	// execution nonce or exact-route file read was already independently proven
+	// by an engine-owned verifier; asking a weaker LLM verifier to reinterpret
+	// that evidence can only introduce false negatives (for example, treating DOM
+	// execution as a server-reflection test). No lock is held here: verification
+	// is slow (LLM + re-testing).
 	verifierConfirmed := false
 	verifierInconclusiveKept := false // inconclusive verdict but proof preserved → flagged for manual review
+	verifierConfirmationInsufficient := false
 	// The independent Verifier runs for EVERY actionable finding — critical,
 	// high, medium AND low. A low-severity claim is still a claim, and "real
 	// validation, not just detection" has to hold across the board, so low
 	// findings are re-tested too rather than reported on the agent's say-so.
 	// Only 'info' (advisory, non-exploitable) is exempt — requiresValidation is
 	// false for it — matching the Gate 2 proof requirement.
-	if requiresValidation {
+	if requiresValidation && !authoritativeDeterministicProof {
 		vf := verifier
 		if vf == nil {
 			vf = getFindingVerifier(contextID)
@@ -613,7 +713,28 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 			})
 			switch {
 			case verdict.Confirmed:
-				verifierConfirmed = true
+				// Persist the verifier's concrete re-test evidence, not merely its
+				// boolean verdict. Besides making the report auditable, this lets
+				// class-specific proof gates inspect what the independent run really
+				// demonstrated instead of trusting a free-form "confirmed" label.
+				if evidence := strings.TrimSpace(verdict.Evidence); evidence != "" {
+					if !strings.Contains(proof, evidence) {
+						proof = strings.TrimSpace(proof + "\nIndependent verifier evidence:\n" + evidence)
+						args["exploitation_proof"] = proof
+					}
+				}
+				// RCE/CMDi/code-injection is an especially costly false positive.
+				// A verifier may confirm SQL evaluation, an outbound staging fetch,
+				// or a plausible exploit chain without ever executing code. Treat
+				// that as an important candidate, but not as verified RCE, until the
+				// evidence includes command output, an authoritative target-side OOB
+				// execution callback, or a repeated controlled timing differential.
+				if cls == "rce" && !hasConcreteRCEExecutionProof(proof) {
+					verifierInconclusiveKept = true
+					verifierConfirmationInsufficient = true
+				} else {
+					verifierConfirmed = true
+				}
 			case verdict.Inconclusive:
 				// The verifier did NOT disprove the finding — it simply could not
 				// independently reproduce it (it ran out of turn/time budget, hit an
@@ -706,13 +827,6 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		}
 	}
 
-	store = getStoreByID(contextID) // re-resolve in case of race
-	store.mu.Lock()
-	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cve"], args["cwe_id"], target, endpoint); ok {
-		store.mu.Unlock()
-		return duplicateResult(existing, msg), nil
-	}
-
 	// Does the agent's OWN proof contain a concrete, unambiguous exploitation
 	// outcome (command output like `uid=0(root)`, extracted DB rows, an OOB
 	// callback hit)? This is the STRICT bar (HasConcreteImpact), not the looser
@@ -720,6 +834,12 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// verify_* confirmation recorded in the ledger (verifierProven) is equally
 	// concrete, independent proof, so it also qualifies.
 	exploitProven := HasConcreteImpact(proof) || verifierProven
+	if cls == "rce" {
+		// Generic impact markers are intentionally broad for other classes, but
+		// strings such as "RCE", localhost, or an outbound HTTP fetch do not prove
+		// that attacker-controlled code actually ran. Keep RCE fail-closed.
+		exploitProven = hasConcreteRCEExecutionProof(proof)
+	}
 
 	// Verification tag: every finding carries exactly one, so the UI/report can
 	// show its confidence at a glance.
@@ -745,7 +865,6 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	verifiedFlag := verifierConfirmed || exploitProven
 
 	vuln := Vulnerability{
-		ID:                 fmt.Sprintf("XALG-%d", len(store.vulns)+1),
 		Title:              title,
 		Severity:           severity,
 		OriginalSeverity:   originalSeverity,
@@ -771,7 +890,23 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		Timestamp:          time.Now().Format(time.RFC3339),
 	}
 
-	store.vulns = append(store.vulns, vuln)
+	store = getStoreByID(contextID) // re-resolve in case of race
+	store.mu.Lock()
+	upgraded := false
+	upgradeFrom := ""
+	if idx := findUpgradeableVulnerabilityIndex(store.vulns, vuln); idx >= 0 {
+		upgradeFrom = store.vulns[idx].Title
+		vuln.ID = store.vulns[idx].ID
+		store.vulns[idx] = vuln
+		upgraded = true
+	} else {
+		if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cve"], args["cwe_id"], target, endpoint); ok {
+			store.mu.Unlock()
+			return duplicateResult(contextID, existing, msg, args["hypothesis_id"]), nil
+		}
+		vuln.ID = fmt.Sprintf("XALG-%d", len(store.vulns)+1)
+		store.vulns = append(store.vulns, vuln)
+	}
 	store.mu.Unlock()
 
 	// Panic-safe persistence: if this context is a child of a wildcard parent,
@@ -786,6 +921,9 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	ledgerNote := linkFindingToLedger(contextID, vuln.ID, strings.TrimSpace(args["hypothesis_id"]))
 
 	msg := fmt.Sprintf("✅ Vulnerability reported: [%s] %s (%s | CVSS %.1f) — Verified: %v", vuln.ID, vuln.Title, strings.ToUpper(vuln.Severity), vuln.CVSS, vuln.Verified)
+	if upgraded {
+		msg = fmt.Sprintf("✅ Vulnerability reported: upgraded with verified evidence: [%s] %s (%s | CVSS %.1f) — replaced unverified candidate %q", vuln.ID, vuln.Title, strings.ToUpper(vuln.Severity), vuln.CVSS, upgradeFrom)
+	}
 	if ledgerNote != "" {
 		msg += "\n" + ledgerNote
 	}
@@ -793,6 +931,8 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		msg += "\n✅ Independently CONFIRMED by the verifier."
 	} else if exploitProven {
 		msg += "\n✅ RECORDED as EXPLOIT-PROVEN: the independent verifier could not re-confirm it within its budget, but your first-party proof shows a concrete exploitation outcome, so it stands as proven (NOT flagged for manual review). Do NOT re-report this — it is already saved."
+	} else if verifierConfirmationInsufficient {
+		msg += "\n⚠️ RECORDED as UNVERIFIED (flagged for manual review): the verifier labeled the RCE candidate confirmed, but supplied no concrete code-execution evidence. SQL evaluation, an outbound staging fetch, reachability, or a hypothetical exploit chain is not RCE proof. Re-test the exact sink with command output, verify_oob, or verify_timing before treating it as RCE. Do NOT duplicate this saved candidate."
 	} else if verifierInconclusiveKept {
 		msg += "\n⚠️ RECORDED as UNVERIFIED (flagged for manual review): the independent verifier could not re-confirm it within its budget, and your proof does not yet show a concrete exploitation outcome, so the finding is preserved rather than dropped. Do NOT re-report this — it is already saved. If you can strengthen the proof (e.g. an OOB callback hit or extracted data), add it via add_note."
 	}
@@ -808,6 +948,9 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	}
 
 	metadata := map[string]any{"vuln_id": vuln.ID, "verified": vuln.Verified}
+	if upgraded {
+		metadata["upgraded"] = true
+	}
 	if cvssFix.Valid && cvssFix.Changed {
 		metadata["cvss_adjusted"] = true
 		metadata["original_cvss"] = cvssFix.OriginalScore
@@ -819,6 +962,35 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		Output:   msg,
 		Metadata: metadata,
 	}, nil
+}
+
+func endpointFromProvedRequest(proof, target string) (string, string) {
+	match := provedRequestRE.FindStringSubmatch(proof)
+	if len(match) != 3 {
+		return "", ""
+	}
+	base, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || base.Host == "" || (base.Scheme != "http" && base.Scheme != "https") {
+		return "", ""
+	}
+	raw := strings.TrimRight(match[2], ",;")
+	request, err := url.Parse(raw)
+	if err != nil || request.Fragment != "" {
+		return "", ""
+	}
+	if request.IsAbs() {
+		if (request.Scheme != "http" && request.Scheme != "https") ||
+			!strings.EqualFold(request.Host, base.Host) {
+			return "", ""
+		}
+		return raw, strings.ToUpper(match[1])
+	}
+	if !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+		return "", ""
+	}
+	// Build textually: ResolveReference cleans literal ../ segments, precisely
+	// the bytes needed to reproduce a path-traversal proof.
+	return base.Scheme + "://" + base.Host + raw, strings.ToUpper(match[1])
 }
 
 // linkFindingToLedger links a persisted finding to the ledger hypothesis it
@@ -847,17 +1019,35 @@ func linkFindingToLedger(contextID, findingID, hypID string) string {
 	return fmt.Sprintf("🔗 Linked to ledger hypothesis %s (marked proven).", hypID)
 }
 
-func duplicateResult(existing Vulnerability, msg string) tools.Result {
+func duplicateResult(contextID string, existing Vulnerability, msg, hypID string) tools.Result {
+	ledgerNote := linkFindingToLedger(contextID, existing.ID, hypID)
+	if ledgerNote != "" {
+		msg += "\n" + ledgerNote
+	}
 	return tools.Result{
 		Output: msg,
 		Metadata: map[string]any{
 			"duplicate":        true,
 			"existing_vuln_id": existing.ID,
+			"ledger_linked":    ledgerNote != "",
 		},
 	}
 }
 
 func findDuplicateVulnerability(existing []Vulnerability, title, description, cve, cwe, target, endpoint string) (Vulnerability, string, bool) {
+	return findDuplicateVulnerabilityWithRetry(existing, title, description, cve, cwe, target, endpoint, false)
+}
+
+// findDuplicateVulnerabilityForReport performs the same root-cause dedup check
+// while allowing a new report attempt to pass an existing unverified candidate.
+// The reporting pipeline must re-run its verifier so stronger evidence can
+// upgrade that candidate; the final locked check either replaces it when the
+// new evidence is proven or deduplicates another weak attempt.
+func findDuplicateVulnerabilityForReport(existing []Vulnerability, title, description, cve, cwe, target, endpoint string) (Vulnerability, string, bool) {
+	return findDuplicateVulnerabilityWithRetry(existing, title, description, cve, cwe, target, endpoint, true)
+}
+
+func findDuplicateVulnerabilityWithRetry(existing []Vulnerability, title, description, cve, cwe, target, endpoint string, retryUnverified bool) (Vulnerability, string, bool) {
 	normalizedTitle := normalizeFindingText(title)
 	// Endpoints use the templated key so object-ID variants of the same path
 	// (/orders/1042 vs /orders/2087) are recognized as one finding. Absolute
@@ -865,20 +1055,44 @@ func findDuplicateVulnerability(existing []Vulnerability, title, description, cv
 	// "https://example.com/tokens" cannot evade deduplication.
 	normalizedEndpoint := dedupEndpointKeyForTarget(target, endpoint)
 	vulnType := extractVulnTypeWithCWE(title, description, cwe)
+	traversalRoot := ""
+	if vulnType == "lfi" {
+		traversalRoot = traversalSinkKey(normalizedEndpoint)
+	}
 	reportedCVEs := findingCVEs(title, description, cve)
 
 	for _, vuln := range existing {
+		if retryUnverified && !vuln.Verified {
+			continue
+		}
 		existingTitle := normalizeFindingText(vuln.Title)
 		existingEndpoint := dedupEndpointKeyForTarget(vuln.Target, vuln.Endpoint)
 		existingType := extractVulnTypeWithCWE(vuln.Title, vuln.Description, vuln.CWE)
 		sameTarget := sameDedupTarget(target, vuln.Target)
-		if sameTarget && sharesCVE(reportedCVEs, findingCVEs(vuln.Title, vuln.Description, vuln.CVE)) {
+		sharesReportedCVE := sharesCVE(reportedCVEs, findingCVEs(vuln.Title, vuln.Description, vuln.CVE))
+		// A CVE often describes a chain (for example, a token disclosure feeding
+		// an RCE sink). Do not let a precursor/reporting-class mismatch suppress
+		// the actual code-execution root cause merely because both cite the same
+		// advisory. Same-class alternate proof paths still deduplicate normally.
+		rceBoundary := (vulnType == "rce") != (existingType == "rce")
+		if sameTarget && sharesReportedCVE && !rceBoundary {
 			return vuln, fmt.Sprintf("⚠️ DUPLICATE: The same CVE is already reported on target '%s' as %s ('%s'). Skipping the alternate proof endpoint '%s'.", target, vuln.ID, vuln.Title, endpoint), true
 		}
 
 		// Exact finding match after trimming/case normalization.
 		if sameTarget && normalizedTitle != "" && normalizedTitle == existingTitle && normalizedEndpoint == existingEndpoint {
 			return vuln, fmt.Sprintf("⚠️ DUPLICATE: '%s' at endpoint '%s' already reported as %s. Skipping.", title, endpoint, vuln.ID), true
+		}
+
+		// File-read findings often prove the same vulnerable handler with several
+		// files (/etc/passwd, grafana.db, proc/self/environ). The impact evidence
+		// differs, but the root cause is one traversal sink. Collapse reports when
+		// both are LFI/path-traversal on the same pre-../ route while preserving
+		// separate plugins/handlers and separate targets.
+		if sameTarget && vulnType == "lfi" && existingType == "lfi" && traversalRoot != "" &&
+			traversalRoot == traversalSinkKey(existingEndpoint) {
+			return vuln, fmt.Sprintf("⚠️ DUPLICATE: Path traversal on handler '%s' already reported as %s ('%s'). Skipping alternate leaked file '%s'.",
+				traversalRoot, vuln.ID, vuln.Title, endpoint), true
 		}
 
 		// Same vulnerability class on the same normalized endpoint.
@@ -889,6 +1103,62 @@ func findDuplicateVulnerability(existing []Vulnerability, title, description, cv
 	}
 
 	return Vulnerability{}, "", false
+}
+
+// findUpgradeableVulnerabilityIndex identifies an unverified candidate that a
+// newly proven finding should replace in place. Matching is deliberately
+// narrower than general CVE dedup: the vulnerability class must agree, and the
+// reports must share either the exact normalized endpoint/title or a CVE. This
+// preserves distinct steps in a multi-class exploit chain while preventing a
+// weak first RCE attempt from permanently blocking its later verified proof.
+func findUpgradeableVulnerabilityIndex(existing []Vulnerability, incoming Vulnerability) int {
+	if !incoming.Verified {
+		return -1
+	}
+	incomingType := extractVulnTypeWithCWE(incoming.Title, incoming.Description, incoming.CWE)
+	incomingEndpoint := dedupEndpointKeyForTarget(incoming.Target, incoming.Endpoint)
+	incomingTitle := normalizeFindingText(incoming.Title)
+	incomingCVEs := findingCVEs(incoming.Title, incoming.Description, incoming.CVE)
+	for i, candidate := range existing {
+		if candidate.Verified || !sameDedupTarget(incoming.Target, candidate.Target) {
+			continue
+		}
+		candidateType := extractVulnTypeWithCWE(candidate.Title, candidate.Description, candidate.CWE)
+		if incomingType == "" || incomingType != candidateType {
+			continue
+		}
+		candidateEndpoint := dedupEndpointKeyForTarget(candidate.Target, candidate.Endpoint)
+		sameRoute := incomingEndpoint != "" && incomingEndpoint == candidateEndpoint
+		sameTitle := incomingTitle != "" && incomingTitle == normalizeFindingText(candidate.Title)
+		sameCVE := sharesCVE(incomingCVEs, findingCVEs(candidate.Title, candidate.Description, candidate.CVE))
+		if sameRoute || sameTitle || sameCVE {
+			return i
+		}
+	}
+	return -1
+}
+
+// traversalSinkKey reduces a concrete file-read proof endpoint to the handler
+// prefix before its first traversal segment. It recognizes literal and common
+// percent-encoded ../ spellings without decoding/cleaning the path (which would
+// destroy the exploit bytes). An endpoint without a traversal marker returns
+// empty and therefore never participates in this special dedup rule.
+func traversalSinkKey(endpoint string) string {
+	lower := strings.ToLower(strings.TrimSpace(endpoint))
+	if lower == "" {
+		return ""
+	}
+	markers := []string{"/../", "/..%2f", "/%2e%2e/", "/%2e%2e%2f", "/..%252f", "/%252e%252e%252f"}
+	cut := -1
+	for _, marker := range markers {
+		if i := strings.Index(lower, marker); i >= 0 && (cut < 0 || i < cut) {
+			cut = i
+		}
+	}
+	if cut < 0 {
+		return ""
+	}
+	return strings.TrimRight(lower[:cut], "/")
 }
 
 func findingCVEs(parts ...string) map[string]struct{} {
@@ -1464,32 +1734,117 @@ func reportLooksLikeXSS(title, description, cwe string) bool {
 	return strings.Contains(strings.ToLower(cwe), "79")
 }
 
-// ledgerBrowserXSSProof returns the browser verifier's confirmation summary for
-// a browser-confirmed XSS recorded in this scan's ledger, or "" when none is
-// present. verify_xss (internal/tools/browser) records concrete execution proof
-// — a dialog/console/DOM signal carrying the injected nonce — as an "exploit"
-// evidence on a verify_xss-origin xss hypothesis. That ledger record, not
-// whatever the model pasted into exploitation_proof, is the authoritative proof
-// that the payload actually RAN, so callers fold it into the reported proof to
-// stop the reflection-only false-positive gate from dropping a genuinely
-// confirmed XSS.
-func ledgerBrowserXSSProof(contextID string) string {
+type ledgerBrowserXSSMatch struct {
+	Proof        string
+	Request      string
+	HypothesisID string
+}
+
+// findLedgerBrowserXSSProof returns browser-execution evidence only for the
+// reported route (or an explicitly linked hypothesis). If both are absent, it
+// returns a match only when the scan contains exactly one browser-confirmed XSS
+// hypothesis, making sparse-report recovery deterministic rather than fuzzy.
+// A scan can contain several XSS candidates; execution on one route must never
+// prove another.
+func findLedgerBrowserXSSProof(contextID, hypothesisID, target, endpoint string) ledgerBrowserXSSMatch {
 	sc := scanctx.Get(contextID)
 	if sc == nil || sc.Ledger == nil {
-		return ""
+		return ledgerBrowserXSSMatch{}
 	}
+	hypothesisID = strings.TrimSpace(hypothesisID)
+	var endpointPath, targetHost string
+	if u, err := url.Parse(endpoint); err == nil {
+		endpointPath = u.Path
+	}
+	if u, err := url.Parse(target); err == nil {
+		targetHost = u.Host
+	}
+	matches := make([]ledgerBrowserXSSMatch, 0, 1)
 	for _, h := range sc.Ledger.All() {
-		if !strings.EqualFold(h.VulnClass, "xss") || !strings.EqualFold(h.Origin, "verify_xss") {
+		routeMatches := endpointPath != "" && xssProofRouteMatches(endpointPath, h.Endpoint)
+		if !strings.EqualFold(h.VulnClass, "xss") || !strings.EqualFold(h.Origin, "verify_xss") ||
+			(endpointPath != "" && !routeMatches) ||
+			(hypothesisID != "" && h.ID != hypothesisID && !routeMatches) {
 			continue
 		}
 		for _, ev := range h.Evidence {
 			if strings.EqualFold(ev.Kind, "exploit") &&
 				strings.Contains(strings.ToLower(ev.Summary), "browser-confirmed xss") {
-				return ev.Summary
+				request := strings.TrimSpace(ev.Request)
+				if targetHost != "" {
+					u, err := url.Parse(request)
+					if err != nil || !strings.EqualFold(u.Host, targetHost) {
+						continue
+					}
+				}
+				proof := strings.TrimSpace(ev.Summary)
+				if request != "" {
+					// Keep a machine-readable successful request in the folded proof.
+					// endpointFromProvedRequest deliberately accepts this exact label,
+					// allowing a sparse report to recover endpoint + HTTP method.
+					proof += "\nExploit request: GET " + request
+				}
+				matches = append(matches, ledgerBrowserXSSMatch{
+					Proof:        proof,
+					Request:      request,
+					HypothesisID: h.ID,
+				})
+				break // one authoritative confirmation per hypothesis is sufficient
 			}
 		}
 	}
-	return ""
+	if len(matches) == 0 {
+		return ledgerBrowserXSSMatch{}
+	}
+	if hypothesisID == "" && endpointPath == "" && len(matches) != 1 {
+		return ledgerBrowserXSSMatch{} // ambiguous sparse report: never guess
+	}
+	return matches[0]
+}
+
+// ledgerBrowserXSSProof is retained as the narrow proof-only compatibility
+// helper used by existing reporting tests and callers.
+func ledgerBrowserXSSProof(contextID, hypothesisID, target, endpoint string) string {
+	return findLedgerBrowserXSSProof(contextID, hypothesisID, target, endpoint).Proof
+}
+
+func xssProofRouteMatches(reportedPath, proofEndpoint string) bool {
+	u, err := url.Parse(proofEndpoint)
+	if err != nil || u.Path == "" {
+		return false
+	}
+	stableRoute := func(path string) string {
+		// The path-template confirmer appends a nonce-bearing {{...}}
+		// expression. A report may name either the stable route prefix OR the
+		// exact injected URL, so strip the expression from both sides before
+		// comparing. url.Parse normally decodes %7B, while the encoded fallback
+		// handles callers that pass an already-escaped path representation.
+		if i := strings.Index(path, "{{"); i >= 0 {
+			path = path[:i]
+		} else if i := strings.Index(strings.ToLower(path), "%7b%7b"); i >= 0 {
+			path = path[:i]
+		}
+		// Models often report a discovered client route template rather than
+		// repeating the concrete nonce-bearing proof URL. Treat the first dynamic
+		// segment as the route boundary: /invite/:code, /invite/{code}, and
+		// /invite/[code] are the same stable route as /invite/{{payload}}. Static
+		// segments after the prefix remain distinct, so browser proof cannot bleed
+		// from /invite/ to /invite/admin.
+		segments := strings.Split(strings.Trim(path, "/"), "/")
+		literal := segments[:0]
+		for _, segment := range segments {
+			if strings.HasPrefix(segment, ":") || strings.HasPrefix(segment, "*") ||
+				(strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}")) ||
+				(strings.HasPrefix(segment, "[") && strings.HasSuffix(segment, "]")) ||
+				(strings.HasPrefix(segment, "<") && strings.HasSuffix(segment, ">")) {
+				break
+			}
+			literal = append(literal, segment)
+		}
+		path = "/" + strings.Join(literal, "/")
+		return strings.TrimSuffix(path, "/")
+	}
+	return stableRoute(reportedPath) == stableRoute(u.Path)
 }
 
 // reportVulnClass maps a finding (title/description/CWE) to the canonical
@@ -1510,6 +1865,15 @@ func reportVulnClass(title, description, cwe string) string {
 		return "ssti"
 	case strings.Contains(lower, "xxe") || strings.Contains(lower, "xml external entity") || strings.Contains(c, "611"):
 		return "xxe"
+	case strings.Contains(lower, "remote code execution") || strings.Contains(lower, "code execution") ||
+		strings.Contains(lower, "command injection") || strings.Contains(lower, "command execution") ||
+		strings.Contains(lower, " rce") || strings.HasPrefix(lower, "rce") ||
+		cweToVulnType(c) == "rce":
+		return "rce"
+	case strings.Contains(lower, "path traversal") || strings.Contains(lower, "local file inclusion") ||
+		strings.Contains(lower, "local file read") || strings.Contains(c, "cwe-22") ||
+		strings.Contains(c, "cwe-23") || strings.Contains(c, "cwe-98"):
+		return "lfi"
 	case strings.Contains(lower, "xss") || strings.Contains(lower, "cross-site script") ||
 		strings.Contains(lower, "cross site script") || strings.Contains(c, "79"):
 		return "xss"
@@ -1524,10 +1888,68 @@ func reportVulnClass(title, description, cwe string) string {
 	return ""
 }
 
+// hasConcreteRCEExecutionProof is the fail-closed proof contract for RCE,
+// command injection, and code injection. It intentionally does not accept an
+// exploit-chain description, SQL/H2 evaluation, an outbound file fetch, a
+// version match, a single slow response, or generic words such as "RCE" and
+// "shell". Those are useful leads, but none establishes that attacker-chosen
+// code actually executed.
+//
+// Accepted outcomes are deliberately narrow and auditable:
+//   - recognizable OS command output or a response-bound randomized canary;
+//   - the exact positive result format emitted by verify_timing; or
+//   - the exact target-attributable positive result format emitted by
+//     verify_oob for non-SSRF execution classes.
+func hasConcreteRCEExecutionProof(proof string) bool {
+	proof = strings.TrimSpace(proof)
+	if proof == "" {
+		return false
+	}
+	lower := strings.ToLower(proof)
+
+	if unixIdentityOutputRe.MatchString(proof) ||
+		unixPasswdRootLineRe.MatchString(proof) ||
+		whoamiOutputRe.MatchString(proof) ||
+		linuxUnameOutputRe.MatchString(proof) ||
+		rceCanaryOutputRe.MatchString(proof) ||
+		strings.Contains(lower, "nt authority\\system") ||
+		strings.Contains(lower, "windows ip configuration") ||
+		strings.Contains(lower, "volume serial number") ||
+		strings.Contains(lower, "microsoft windows [version") {
+		return true
+	}
+
+	// Match the deterministic verifier's complete positive sentence, including
+	// paired support, both medians, and the intended delay. This prevents a lone
+	// timeout or copied phrase such as "timing differential" from qualifying.
+	if strings.Contains(lower, "confirmed by a repeated server-side timing differential") &&
+		strings.Contains(lower, "paired probes supported the delay") &&
+		strings.Contains(lower, "median baseline") &&
+		strings.Contains(lower, "median probe") &&
+		strings.Contains(lower, "intended") &&
+		strings.Contains(lower, "ms delay") {
+		return true
+	}
+
+	// Match only the authoritative positive formats produced by verify_oob.
+	// An arbitrary mention of OAST, DNS, or a callback is not enough.
+	oobPrefix := strings.Contains(lower, "out-of-band") && strings.Contains(lower, "proof for token")
+	httpExecution := strings.Contains(lower, "non-scanner http callback received") &&
+		strings.Contains(lower, "the target executed the payload out-of-band")
+	dnsExecution := strings.Contains(lower, "dns callback for the unique token received") &&
+		strings.Contains(lower, "proving payload execution")
+	executionAttribution := strings.Contains(lower, "execution attribution: os-command") ||
+		strings.Contains(lower, "execution attribution: runtime-api") ||
+		strings.Contains(lower, "execution attribution: template-execution")
+	return oobPrefix && executionAttribution && (httpExecution || dnsExecution)
+}
+
 // ledgerVerifierProof returns the confirmation summary recorded by a
 // deterministic verify_* tool for a finding of the given class in this scan's
-// ledger, or "". The verifiers (verify_sqli / verify_ssti / verify_xxe /
-// verify_csrf / verify_xss) record an "exploit" evidence ONLY when they
+// ledger, or "". Optional selectors are hypothesis_id, target, and endpoint;
+// callers that have them bind proof to the exact candidate. The verifiers
+// (verify_sqli / verify_ssti / verify_xxe / verify_csrf / verify_xss /
+// verify_timing) record an "exploit" evidence ONLY when they
 // positively confirm a vuln via a baseline-vs-probe differential (they return
 // early on a non-confirmation, before writing any evidence), so the presence of
 // such evidence is authoritative, independent proof of exploitation. This
@@ -1535,7 +1957,7 @@ func reportVulnClass(title, description, cwe string) string {
 // fold) to every verifier class, so a deterministically confirmed finding is
 // judged exploit-proven instead of being buried under "manual verification
 // needed" just because the LLM re-verifier could not reproduce it.
-func ledgerVerifierProof(contextID, class string) string {
+func ledgerVerifierProof(contextID, class string, selectors ...string) string {
 	if class == "" {
 		return ""
 	}
@@ -1543,8 +1965,27 @@ func ledgerVerifierProof(contextID, class string) string {
 	if sc == nil || sc.Ledger == nil {
 		return ""
 	}
+	hypothesisID, target, endpoint := "", "", ""
+	if len(selectors) > 0 {
+		hypothesisID = strings.TrimSpace(selectors[0])
+	}
+	if len(selectors) > 1 {
+		target = strings.TrimSpace(selectors[1])
+	}
+	if len(selectors) > 2 {
+		endpoint = strings.TrimSpace(selectors[2])
+	}
 	for _, h := range sc.Ledger.All() {
-		if !strings.EqualFold(h.VulnClass, class) {
+		if canonicalVerifierClass(h.VulnClass) != canonicalVerifierClass(class) {
+			continue
+		}
+		if hypothesisID != "" && h.ID != hypothesisID {
+			continue
+		}
+		if endpoint != "" && !verifierProofRouteMatches(endpoint, h.Endpoint) {
+			continue
+		}
+		if target != "" && h.Target != "" && !sameURLHost(target, h.Target) {
 			continue
 		}
 		// A verify_* tool authored this hypothesis, OR (robust to ledger dedup
@@ -1574,6 +2015,133 @@ func ledgerVerifierProof(contextID, class string) string {
 		}
 	}
 	return ""
+}
+
+// canonicalVerifierClass aligns the ledger's blind-class labels with the
+// reporting pipeline's root-cause classes. verify_oob deliberately records
+// labels such as blind-rce/blind-cmdi, while reportVulnClass returns rce; an
+// exact string comparison would orphan otherwise authoritative OAST evidence.
+func canonicalVerifierClass(class string) string {
+	c := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(class)), "_", "-")
+	switch {
+	case strings.Contains(c, "rce"), strings.Contains(c, "cmdi"), strings.Contains(c, "command-injection"), strings.Contains(c, "code-execution"):
+		return "rce"
+	case strings.Contains(c, "sqli"), strings.Contains(c, "sql-injection"):
+		return "sqli"
+	case strings.Contains(c, "ssti"), strings.Contains(c, "template-injection"):
+		return "ssti"
+	case strings.Contains(c, "xxe"), strings.Contains(c, "xml-external-entity"):
+		return "xxe"
+	case strings.Contains(c, "xss"), strings.Contains(c, "cross-site-scripting"):
+		return "xss"
+	case strings.Contains(c, "csrf"), strings.Contains(c, "cross-site-request-forgery"):
+		return "csrf"
+	case strings.Contains(c, "path-traversal"), strings.Contains(c, "local-file"), c == "lfi":
+		return "lfi"
+	case strings.Contains(c, "ssrf"):
+		return "ssrf"
+	default:
+		return c
+	}
+}
+
+func verifierProofRouteMatches(reported, recorded string) bool {
+	pathOf := func(raw string) string {
+		raw = strings.TrimSpace(raw)
+		if u, err := url.Parse(raw); err == nil && u.Path != "" {
+			raw = u.Path
+		}
+		return strings.TrimSuffix(raw, "/")
+	}
+	return pathOf(reported) != "" && pathOf(reported) == pathOf(recorded)
+}
+
+func sameURLHost(a, b string) bool {
+	parseHost := func(raw string) string {
+		if !strings.Contains(raw, "://") {
+			raw = "https://" + raw
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		return strings.ToLower(u.Host)
+	}
+	ah, bh := parseHost(a), parseHost(b)
+	return ah != "" && ah == bh
+}
+
+type ledgerPathTraversalMatch struct {
+	Proof        string
+	Request      string
+	HypothesisID string
+}
+
+// findLedgerPathTraversalProof returns a deterministic file-read confirmation
+// only when it belongs to the reported route (or the explicitly linked
+// hypothesis). If both are absent, it recovers only a single unambiguous
+// confirmation from this scan. Unlike the older class-wide bridge, this cannot
+// lend one plugin's proof to a different path-traversal claim.
+func findLedgerPathTraversalProof(contextID, hypothesisID, target, endpoint string) ledgerPathTraversalMatch {
+	sc := scanctx.Get(contextID)
+	if sc == nil || sc.Ledger == nil {
+		return ledgerPathTraversalMatch{}
+	}
+	hypothesisID = strings.TrimSpace(hypothesisID)
+	var endpointPath, targetHost string
+	if u, err := url.Parse(endpoint); err == nil {
+		endpointPath = u.Path
+	}
+	if u, err := url.Parse(target); err == nil {
+		targetHost = u.Host
+	}
+	matches := make([]ledgerPathTraversalMatch, 0, 1)
+	for _, h := range sc.Ledger.All() {
+		if !strings.EqualFold(h.VulnClass, "lfi") ||
+			// A concrete endpoint is more reliable than a model-supplied ledger ID:
+			// providers sometimes copy the wrong H-N from another specialist.
+			// Still require the exact route below; use the ID only when no route
+			// was supplied.
+			(endpointPath == "" && hypothesisID != "" && h.ID != hypothesisID) ||
+			(endpointPath != "" && !strings.HasPrefix(endpointPath, h.Endpoint)) {
+			continue
+		}
+		if targetHost != "" {
+			hu, err := url.Parse(h.Target)
+			if err != nil || !strings.EqualFold(hu.Host, targetHost) {
+				continue
+			}
+		}
+		for _, ev := range h.Evidence {
+			if strings.EqualFold(ev.Kind, "exploit") &&
+				strings.Contains(strings.ToLower(ev.Summary), "path traversal/local file read confirmed") &&
+				strings.Contains(ev.Request, "/../") &&
+				strings.Contains(ev.Response, "root:x:0:0") {
+				request := strings.TrimSpace(ev.Request)
+				if fields := strings.Fields(request); len(fields) >= 2 && strings.EqualFold(fields[0], "GET") {
+					request = fields[1]
+				}
+				proof := strings.TrimSpace(ev.Summary) + "\nExploit request: GET " + request + "\n" + ev.Response
+				matches = append(matches, ledgerPathTraversalMatch{
+					Proof:        proof,
+					Request:      request,
+					HypothesisID: h.ID,
+				})
+				break
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return ledgerPathTraversalMatch{}
+	}
+	if hypothesisID == "" && endpointPath == "" && len(matches) != 1 {
+		return ledgerPathTraversalMatch{} // ambiguous sparse report: never guess
+	}
+	return matches[0]
+}
+
+func ledgerPathTraversalProof(contextID, hypothesisID, target, endpoint string) string {
+	return findLedgerPathTraversalProof(contextID, hypothesisID, target, endpoint).Proof
 }
 
 func checkFalsePositive(title, description, severity, proof string) string {
@@ -1786,10 +2354,14 @@ func checkFalsePositive(title, description, severity, proof string) string {
 		strings.Contains(lower, "/oauth2/") ||
 		strings.Contains(lower, "single sign-on") ||
 		strings.Contains(lower, "sso")
+	csrfClaim := strings.Contains(lower, "csrf") ||
+		strings.Contains(lower, "cross-site request forgery") ||
+		strings.Contains(lower, "login forgery") ||
+		strings.Contains(lower, "forced login")
 	isStateCSRF := strings.Contains(lower, "state parameter") ||
 		strings.Contains(lower, "missing state validation") ||
 		strings.Contains(lower, "state validation") ||
-		(oauthCtx && strings.Contains(lower, "state"))
+		(oauthCtx && csrfClaim && strings.Contains(lower, "state"))
 	if isStateCSRF && isHighSev {
 		lowerProof := strings.ToLower(proof + " " + description)
 		// Evidence that the CLIENT app (not just the authorize endpoint)
@@ -2093,7 +2665,20 @@ func checkFalsePositive(title, description, severity, proof string) string {
 		return "❌ REJECTED: Sentry DSN is a PUBLIC client-side key designed to be embedded in JavaScript. It only allows sending error reports — no read access, no data extraction. This is NOT a vulnerability. Do not report."
 	}
 
-	// Pattern 17: Generic "information found in JavaScript source" without real impact
+	// Pattern 17: Source maps are route/sink discovery material. Publicly
+	// serving one is not a medium-severity disclosure by itself, especially for
+	// an open-source product; require an actual embedded credential/private key
+	// rather than filenames, routes, comments, or field names. This explicit
+	// rule prevents a rejected map-only claim from being rephrased and stored as
+	// unverified.
+	isSourceMap := strings.Contains(lower, "source map") ||
+		strings.Contains(lower, "sourcemap") ||
+		strings.Contains(lower, ".js.map")
+	if isSourceMap && isHighSev && !sourceMapSecretValueRe.MatchString(proof) {
+		return "❌ REJECTED: A publicly served JavaScript source map is discovery material, not a medium+ vulnerability by itself. Routes, source filenames, comments, and client code are not secret values. Only report the distinct secret-exposure issue if the map contains an actual credential/private key/token value and include that value in the proof; otherwise keep the map in notes."
+	}
+
+	// Pattern 17b: Generic "information found in JavaScript source" without real impact
 	if (strings.Contains(lower, "javascript") || strings.Contains(lower, "js source") || strings.Contains(lower, "source code")) &&
 		(strings.Contains(lower, "information disclosure") || strings.Contains(lower, "sensitive information") || strings.Contains(lower, "exposed in")) {
 		lowerProof := strings.ToLower(proof)
@@ -3176,6 +3761,15 @@ func extractVulnType(title, description string) string {
 
 	for _, vt := range vulnTypes {
 		for _, kw := range vt.keywords {
+			if kw == "sqli" {
+				// "SQLite database" contains the bytes "sqli" but is evidence
+				// of a data store, not an SQL-injection claim. Require the acronym
+				// to stand alone while keeping phrases such as "SQL injection".
+				if standaloneSQLiRe.MatchString(lower) {
+					return vt.typeName
+				}
+				continue
+			}
 			if strings.Contains(lower, kw) {
 				return vt.typeName
 			}

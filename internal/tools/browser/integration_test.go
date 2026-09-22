@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,85 @@ func TestLaunch_WithURL(t *testing.T) {
 	out, _ := action(ctxID, map[string]string{"command": "get_url"})
 	if !strings.Contains(out, "example.com") {
 		t.Errorf("URL = %q, want contains 'example.com'", out)
+	}
+}
+
+func TestBrowserActionInfersOnlyUnambiguousCommand(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("<input name='username'>"))
+	}))
+	defer server.Close()
+	ctxID := "int-infer-unambiguous"
+	t.Cleanup(func() { _, _ = browserActionWithContext(ctxID, map[string]string{"command": "close"}) })
+
+	if _, err := action(ctxID, map[string]string{"url": server.URL}); err != nil {
+		t.Fatalf("URL-only call should launch: %v", err)
+	}
+	if _, err := action(ctxID, map[string]string{"url": server.URL + "/next"}); err != nil {
+		t.Fatalf("URL-only call should navigate after launch: %v", err)
+	}
+	if got, err := action(ctxID, map[string]string{"code": "() => 42"}); err != nil || !strings.Contains(got, "42") {
+		t.Fatalf("code-only call should execute JS: output=%q err=%v", got, err)
+	}
+	if _, err := action(ctxID, map[string]string{"selector": "input"}); err == nil || !strings.Contains(err.Error(), "requires command") {
+		t.Fatalf("ambiguous selector-only call should fail clearly: %v", err)
+	}
+}
+
+func TestDiscoverClientRoutesFromSameOriginBundle(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			_, _ = w.Write([]byte(`/* angular.module */ window.routes = [{path:"/invite/:code"},{path:'/static'}];`))
+		default:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html ng-cloak><body><script src="/app.js"></script></body></html>`))
+		}
+	}))
+	defer server.Close()
+
+	ctxID := "int-discover-client-routes"
+	t.Cleanup(func() { _, _ = browserActionWithContext(ctxID, map[string]string{"command": "close"}) })
+	result, err := discoverClientRoutesAtURL(ctxID, server.URL, "")
+	if err != nil || result.Error != "" {
+		t.Fatalf("route discovery failed: result=%+v err=%v", result, err)
+	}
+	routes, ok := result.Metadata["routes"].([]discoveredClientRoute)
+	if !ok {
+		t.Fatalf("route metadata has unexpected type: %T", result.Metadata["routes"])
+	}
+	if len(routes) != 1 || routes[0].Pattern != "/invite/:code" || routes[0].CandidateURL != server.URL+"/invite/" {
+		t.Fatalf("unexpected discovered routes: %+v", routes)
+	}
+	if angular, _ := result.Metadata["angularjs_signals"].(bool); !angular {
+		t.Fatalf("expected AngularJS signal in discovery: %+v", result.Metadata)
+	}
+}
+
+func TestClientRouteTestPriority(t *testing.T) {
+	if clientRouteTestPriority("/invite/:code") >= clientRouteTestPriority("/admin/settings/:id") {
+		t.Fatal("public invitation route should sort before privileged configuration route")
+	}
+}
+
+func TestAutomaticPathXSSCandidatesAreBoundedAndPublic(t *testing.T) {
+	routes := []discoveredClientRoute{
+		{Pattern: "/invite/:code", CandidateURL: "https://app.test/invite/"},
+		{Pattern: "/dashboard/snapshot/:key", CandidateURL: "https://app.test/dashboard/snapshot/"},
+		{Pattern: "/share/:id", CandidateURL: "https://app.test/share/"},
+		{Pattern: "/preview/:id", CandidateURL: "https://app.test/preview/"},
+		{Pattern: "/admin/settings/:id", CandidateURL: "https://app.test/admin/settings/"},
+		{Pattern: "/d/:uid/:slug", CandidateURL: "https://app.test/d/"},
+	}
+	got := automaticPathXSSCandidates(routes)
+	if len(got) != maxAutomaticPathXSSCandidates {
+		t.Fatalf("got %d candidates, want bounded maximum %d: %+v", len(got), maxAutomaticPathXSSCandidates, got)
+	}
+	for _, route := range got {
+		if strings.Contains(route.Pattern, "admin") || route.Pattern == "/d/:uid/:slug" {
+			t.Fatalf("ambiguous or privileged route entered automatic verifier set: %+v", route)
+		}
 	}
 }
 
@@ -259,6 +339,25 @@ func TestExecuteJS_ReturnValue(t *testing.T) {
 	}
 	if !strings.Contains(out, "4") {
 		t.Errorf("execute_js = %q, want '4'", out)
+	}
+}
+
+func TestExecuteJS_RepairsConsoleStyleBareReturn(t *testing.T) {
+	ctxID := "int-js-bare-return"
+	launchCtx(t, ctxID, "")
+	out, err := action(ctxID, map[string]string{"command": "execute_js", "code": "const answer = 6 * 7; return answer;"})
+	if err != nil {
+		t.Fatalf("execute_js bare-return repair failed: %v", err)
+	}
+	if !strings.Contains(out, "42") {
+		t.Errorf("execute_js repaired result = %q, want '42'", out)
+	}
+	out, err = action(ctxID, map[string]string{"command": "execute_js", "code": `JSON.stringify({answer: 42})`})
+	if err != nil {
+		t.Fatalf("execute_js console-expression repair failed: %v", err)
+	}
+	if !strings.Contains(out, `"answer":42`) {
+		t.Errorf("execute_js repaired expression = %q, want JSON answer", out)
 	}
 }
 
@@ -633,5 +732,98 @@ func TestVerifyXSS_POST_Reflected(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected a verify_xss xss hypothesis in the ledger, got %d", sc.Ledger.Len())
+	}
+}
+
+// Opt-in black-box oracle for the digest-pinned vulnerable/fixed Grafana pair.
+// The scanner never receives this URL or payload; this only validates the
+// benchmark's ground truth and browser execution proof against the local stack.
+func TestDiscoverClientRoutes_GrafanaPair(t *testing.T) {
+	vulnerable := os.Getenv("XALGORIX_GRAFANA_VULN_URL")
+	fixed := os.Getenv("XALGORIX_GRAFANA_FIXED_URL")
+	if vulnerable == "" && fixed == "" {
+		t.Skip("set both XALGORIX_GRAFANA_VULN_URL and XALGORIX_GRAFANA_FIXED_URL for the local Docker oracle")
+	}
+	for _, tc := range []struct {
+		name, base    string
+		wantConfirmed bool
+	}{
+		{"vulnerable", vulnerable, true},
+		{"fixed", fixed, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctxID := "int-grafana-route-discovery-" + tc.name
+			t.Cleanup(func() { _, _ = browserActionWithContext(ctxID, map[string]string{"command": "close"}) })
+			result, err := discoverClientRoutesAtURL(ctxID, strings.TrimRight(tc.base, "/")+"/login", "")
+			if err != nil || result.Error != "" {
+				t.Fatalf("route discovery failed: result=%+v err=%v", result, err)
+			}
+			if angular, _ := result.Metadata["angularjs_signals"].(bool); !angular {
+				t.Fatalf("expected live Grafana bundle/page to expose AngularJS signals: %+v", result.Metadata)
+			}
+			routes, ok := result.Metadata["routes"].([]discoveredClientRoute)
+			if !ok {
+				t.Fatalf("route metadata has unexpected type: %T", result.Metadata["routes"])
+			}
+			foundAt := -1
+			for i, route := range routes {
+				if route.Pattern == "/invite/:code" && route.CandidateURL == strings.TrimRight(tc.base, "/")+"/invite/" {
+					foundAt = i
+					break
+				}
+			}
+			if foundAt < 0 {
+				t.Fatalf("expected the live client bundle to expose /invite/:code, got %d routes", len(routes))
+			}
+			if foundAt >= 20 {
+				t.Fatalf("expected public invitation route in the first 20 ranked candidates, got index %d of %d", foundAt, len(routes))
+			}
+			confirmed, _ := result.Metadata["path_xss_auto_confirmed"].(bool)
+			if confirmed != tc.wantConfirmed {
+				t.Fatalf("automatic path-XSS confirmation=%v, want %v; output=%s metadata=%+v", confirmed, tc.wantConfirmed, result.Output, result.Metadata)
+			}
+			checked, _ := result.Metadata["path_xss_auto_checked"].([]string)
+			if len(checked) == 0 || checked[0] != strings.TrimRight(tc.base, "/")+"/invite/" {
+				t.Fatalf("expected /invite/ to be the first deterministic check, got %+v", checked)
+			}
+		})
+	}
+}
+
+func TestVerifyXSS_GrafanaPathPair(t *testing.T) {
+	vulnerable := os.Getenv("XALGORIX_GRAFANA_VULN_URL")
+	fixed := os.Getenv("XALGORIX_GRAFANA_FIXED_URL")
+	if vulnerable == "" && fixed == "" {
+		t.Skip("set both XALGORIX_GRAFANA_VULN_URL and XALGORIX_GRAFANA_FIXED_URL for the local Docker oracle")
+	}
+	for _, tc := range []struct {
+		name, base string
+		want       bool
+	}{
+		{"vulnerable", vulnerable, true},
+		{"fixed", fixed, false},
+	} {
+		for _, route := range []string{"/dashboard/snapshot/?orgId=1", "/invite/"} {
+			t.Run(tc.name+route, func(t *testing.T) {
+				u, err := url.Parse(tc.base)
+				if err != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" {
+					t.Fatalf("Grafana oracle must target loopback HTTP, got %q", tc.base)
+				}
+				ctxID := "int-grafana-path-xss-" + tc.name
+				sc := scanctx.New(ctxID, tc.base)
+				scanctx.Activate(sc)
+				defer scanctx.Deactivate(ctxID)
+				launchCtx(t, ctxID, "")
+				result, err := browserActionWithContext(ctxID, map[string]string{
+					"command": "verify_path_template_xss", "url": strings.TrimRight(tc.base, "/") + route,
+				})
+				if err != nil || result.Error != "" {
+					t.Fatalf("browser oracle failed: result=%+v err=%v", result, err)
+				}
+				if got, _ := result.Metadata["xss_confirmed"].(bool); got != tc.want {
+					t.Fatalf("unexpected path-XSS oracle result=%+v, want confirmed=%v", result, tc.want)
+				}
+			})
+		}
 	}
 }

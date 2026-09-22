@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 )
 
 // ── extractEndpointFromCmd tests ─────────────────────────────────────────────
@@ -651,6 +653,73 @@ func TestFinishGatekeeper_BlocksInvalidPlanTaskSkips(t *testing.T) {
 	}
 }
 
+func TestFinishGatekeeper_ProfessionalCompletedPlanSkipsLegacyIterationQuota(t *testing.T) {
+	state := NewScanState()
+	state.ProfessionalAssessment = true
+	state.Iteration = 12
+	state.TerminalCalls = 8
+	state.MeaningfulTestCalls = 5
+	state.ReconDone = true
+	state.EndpointInventorySaved = true
+	state.PlanBuilt = true
+	plan := NewPlan()
+	plan.add(&Task{ID: "recon", Title: "Map live surface", Phase: 1, Status: TaskCompleted})
+	plan.add(&Task{ID: "test-xss", Title: "Test public client routes", Phase: 6, VulnClass: "xss", Status: TaskCompleted})
+	plan.add(&Task{ID: "test-authz", Title: "Test role boundaries", Phase: 8, VulnClass: "idor", Status: TaskSkipped, Notes: "Blocked: no operator session was supplied and all role-dependent routes return 401 before object access."})
+	plan.add(&Task{ID: "report", Title: "Report proven findings", Phase: 22, Status: TaskCompleted})
+	state.Plan = plan
+
+	if result := hookFinishGatekeeper(state, nil); result.Block {
+		t.Fatalf("completed professional plan should not inherit the 50-turn/dirbust quota: %s", result.BlockReason)
+	}
+}
+
+func TestFinishGatekeeper_ProfessionalPlanStillRequiresMeaningfulWorkAndCompletion(t *testing.T) {
+	state := NewScanState()
+	state.ProfessionalAssessment = true
+	state.Iteration = 12
+	state.TerminalCalls = 8
+	state.ReconDone = true
+	state.EndpointInventorySaved = true
+	state.PlanBuilt = true
+	plan := NewPlan()
+	plan.add(&Task{ID: "test-xss", Title: "Test client routes", Phase: 6, VulnClass: "xss", Status: TaskPending})
+	state.Plan = plan
+
+	if result := hookFinishGatekeeper(state, nil); !result.Block || !strings.Contains(result.BlockReason, "meaningful security test") {
+		t.Fatalf("professional plan with no testing should be blocked, got: %+v", result)
+	}
+	state.MeaningfulTestCalls = 4
+	if result := hookFinishGatekeeper(state, nil); !result.Block || !strings.Contains(result.BlockReason, "unfinished task") {
+		t.Fatalf("professional plan with pending work should be blocked, got: %+v", result)
+	}
+}
+
+func TestPlanFinishGateAllowsClassNamedInLegitimateBlockedSkip(t *testing.T) {
+	state := NewScanState()
+	state.FinishAttempts = 1
+	plan := NewPlan()
+	plan.add(&Task{
+		ID:     "test-sqli",
+		Phase:  6,
+		Title:  "SQL injection",
+		Status: TaskSkipped,
+		Notes:  "Blocked: SQLi-bearing endpoints require authentication and no operator session was supplied.",
+	})
+	plan.add(&Task{
+		ID:     "test-cmdi",
+		Phase:  7,
+		Title:  "Command injection",
+		Status: TaskSkipped,
+		Notes:  "RCE surface is not anonymously reachable after concrete route checks.",
+	})
+	state.Plan = plan
+
+	if result := planFinishGate(state, 3); result.Block {
+		t.Fatalf("legitimate class-specific skip was rejected: %s", result.BlockReason)
+	}
+}
+
 func TestFinishGatekeeper_BlocksMissingOASTProbes(t *testing.T) {
 	state := NewScanState()
 	state.Iteration = 55
@@ -674,6 +743,72 @@ func TestFinishGatekeeper_BlocksMissingOASTProbes(t *testing.T) {
 	}
 	if !strings.Contains(result.BlockReason, "MANDATORY OUT-OF-BAND (OAST) PROBING REQUIRED") {
 		t.Errorf("Unexpected block reason: %s", result.BlockReason)
+	}
+}
+
+func TestFinishGatekeeper_DelegatedSpecialistSkipsOASTForAuthWalledBlindSinks(t *testing.T) {
+	state := NewScanState()
+	state.DelegatedAgent = true
+	state.MeaningfulTestCalls = 2
+	state.AuthContextKnown = true
+	state.AuthContextAvailable = false
+	state.VulnClassesTested["ssrf"] = true
+	state.VulnClassesTested["xxe"] = true
+	plan := NewPlan()
+	plan.add(&Task{ID: "test-ssrf", Title: "SSRF", VulnClass: "ssrf", Status: TaskCompleted, Notes: "All URL sinks are auth-walled and return 401 before URL parsing."})
+	plan.add(&Task{ID: "test-xxe", Title: "XXE", VulnClass: "xxe", Status: TaskSkipped, Notes: "XML endpoint requires authentication and returns 401 before parsing."})
+	state.Plan = plan
+
+	if result := hookFinishGatekeeper(state, nil); result.Block {
+		t.Fatalf("auth-bound blind sinks should not require OAST: %s", result.BlockReason)
+	}
+}
+
+func TestFinishGatekeeper_DelegatedSpecialistStillRequiresOASTForReachableSink(t *testing.T) {
+	state := NewScanState()
+	state.DelegatedAgent = true
+	state.MeaningfulTestCalls = 2
+	state.VulnClassesTested["ssrf"] = true
+	plan := NewPlan()
+	plan.add(&Task{ID: "test-ssrf", Title: "SSRF", VulnClass: "ssrf", Status: TaskCompleted, Notes: "URL field accepted the baseline but response is asynchronous."})
+	state.Plan = plan
+
+	result := hookFinishGatekeeper(state, nil)
+	if !result.Block || !strings.Contains(result.BlockReason, "OUT-OF-BAND") {
+		t.Fatalf("reachable blind sink should still require OAST, got: %+v", result)
+	}
+}
+
+func TestOASTProbeCoverageIsSharedAcrossDelegatedAgents(t *testing.T) {
+	contextID := "shared-oast-" + t.Name()
+	ctx := scanctx.New(contextID, t.TempDir())
+	scanctx.Activate(ctx)
+	t.Cleanup(func() { scanctx.Deactivate(contextID) })
+
+	child := NewScanState()
+	child.ScanContextID = contextID
+	hookWorkTracker(child, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   `curl --max-redirs 0 "https://target.example/webhook?url=https://fresh-token.oast.me/probe"`,
+	})
+	if child.OASTProbesExecuted != 1 {
+		t.Fatalf("child OAST probes = %d, want 1", child.OASTProbesExecuted)
+	}
+
+	root := NewScanState()
+	root.ScanContextID = contextID
+	if !oastProbeExecuted(root) {
+		t.Fatal("coordinator did not observe delegated OAST probe coverage")
+	}
+
+	generateOnly := NewScanState()
+	generateOnly.ScanContextID = "unregistered-oast-context"
+	hookWorkTracker(generateOnly, map[string]string{
+		"tool_name": "oob_callback",
+		"action":    "generate",
+	})
+	if oastProbeExecuted(generateOnly) {
+		t.Fatal("minting an OAST token without planting it must not count as a probe")
 	}
 }
 
@@ -1373,6 +1508,7 @@ func TestDelegationCoordinatorNudgesOnceAfterRecon(t *testing.T) {
 	state := NewScanState()
 	state.Iteration = 8
 	state.ReconDone = true
+	state.EndpointInventorySaved = true
 	state.DetectedTechs["nodejs"] = true
 	state.DiscoveredEndpoints = []string{"/api/users", "/graphql"}
 	state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
@@ -1417,6 +1553,7 @@ func TestDelegationCoordinatorRetriesMalformedSpawnWithoutLooping(t *testing.T) 
 	state := NewScanState()
 	state.Iteration = 5
 	state.ReconDone = true
+	state.EndpointInventorySaved = true
 	state.Plan = AutoPlan([]string{"/api/users"}, nil)
 	state.PlanBuilt = true
 	state.LedgerSeeded = true
@@ -1493,6 +1630,189 @@ func TestBenchmarkIsolationGuardAllowsTargetEvidence(t *testing.T) {
 		"tool_name": "terminal_execute", "command": "docker ps",
 	}); got.ForceSkip {
 		t.Fatal("benchmark-only guard changed a normal production scan")
+	}
+}
+
+func TestProfessionalDelegationRequiresGroundedRootPlan(t *testing.T) {
+	state := NewScanState()
+	state.ProfessionalAssessment = true
+	args := map[string]string{"tool_name": "spawn_agent", "name": "client-source", "task": "test XSS"}
+	if got := hookProfessionalDelegationPlanGuard(state, args); !got.ForceSkip || !strings.Contains(got.Nudge, "PLAN BEFORE DELEGATION") {
+		t.Fatalf("professional pre-plan delegation was not blocked: %+v", got)
+	}
+
+	state.PlanBuilt = true
+	state.Plan = NewPlan()
+	state.Plan.add(&Task{ID: "test-xss", Title: "Test XSS", Phase: 6, Status: TaskPending})
+	if got := hookProfessionalDelegationPlanGuard(state, args); got.ForceSkip {
+		t.Fatalf("grounded professional delegation was blocked: %+v", got)
+	}
+
+	legacy := NewScanState()
+	if got := hookProfessionalDelegationPlanGuard(legacy, args); got.ForceSkip {
+		t.Fatalf("non-professional compatibility path was changed: %+v", got)
+	}
+}
+
+func TestOASTSelfProbeGuardBlocksScannerContamination(t *testing.T) {
+	blocked := []map[string]string{
+		{"tool_name": "terminal_execute", "command": `curl -sk "https://abc123.oast.site" --max-time 5 -o /dev/null`},
+		{"tool_name": "terminal_execute", "command": `TOKEN=abc123.oast.online; nslookup "$TOKEN"`},
+		{"tool_name": "http_request", "url": "https://abc123.oast.site"},
+		{"tool_name": "browser_action", "command": "goto", "url": "https://abc123.interact.sh/probe"},
+	}
+	for _, args := range blocked {
+		if got := hookOASTSelfProbeGuard(NewScanState(), args); !got.ForceSkip || !strings.Contains(got.Nudge, "OAST SELF-PROBE") {
+			t.Errorf("scanner-origin callback request was not blocked: args=%v result=%+v", args, got)
+		}
+	}
+
+	allowed := []map[string]string{
+		{"tool_name": "terminal_execute", "command": `curl -sk --max-redirs 0 "https://target.test/webhook?url=https://abc123.oast.site"`},
+		{"tool_name": "terminal_execute", "command": `OOB=https://abc123.oast.site; curl -sk --max-redirs 0 https://target.test/import -d "url=$OOB"`},
+		{"tool_name": "http_request", "url": "https://target.test/import", "body": `{"url":"https://abc123.oast.site"}`},
+	}
+	for _, args := range allowed {
+		if got := hookOASTSelfProbeGuard(NewScanState(), args); got.ForceSkip {
+			t.Errorf("target-mediated OAST payload was blocked: args=%v result=%+v", args, got)
+		}
+	}
+}
+
+func TestTimingProofPreferenceRedirectsManualDelayProbe(t *testing.T) {
+	state := NewScanState()
+	state.ProfessionalAssessment = true
+	for _, args := range []map[string]string{
+		{
+			"tool_name": "terminal_execute",
+			"command":   `curl -X POST https://target.example/api/check -d '{"q":"x;SELECT pg_sleep(4)"}'`,
+		},
+		{
+			"tool_name": "python_action",
+			"code":      `requests.post("https://target.example/api/check", json={"db":"INIT=CREATE ALIAS X AS 'void x() throws Exception { Thread.sleep(4000); }'"})`,
+		},
+	} {
+		got := hookTimingProofPreference(state, args)
+		if !got.ForceSkip || !strings.Contains(got.Nudge, "verify_timing") || !strings.Contains(got.Nudge, "trials=3") {
+			t.Fatalf("manual timing probe should be redirected to the repeated oracle: %+v", got)
+		}
+	}
+}
+
+func TestTimingProofPreferenceAllowsSourceInspectionAndOrdinarySleep(t *testing.T) {
+	state := NewScanState()
+	state.ProfessionalAssessment = true
+	for _, args := range []map[string]string{
+		{"tool_name": "terminal_execute", "command": `rg 'Thread\.sleep\(' tmp/public-source.clj`},
+		{"tool_name": "terminal_execute", "command": `sleep 3 && curl -s https://target.example/health`},
+		{"tool_name": "terminal_execute", "command": `curl -s https://raw.githubusercontent.com/example/repo/main/code.java | grep 'Thread.sleep('`},
+	} {
+		if got := hookTimingProofPreference(state, args); got.ForceSkip || got.Nudge != "" {
+			t.Fatalf("non-probe command should remain allowed: args=%+v result=%+v", args, got)
+		}
+	}
+}
+
+func TestTimingProofPreferenceOnlyAppliesToProfessionalAssessment(t *testing.T) {
+	state := NewScanState()
+	got := hookTimingProofPreference(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   `curl -X POST https://target.example/api/check -d 'x=pg_sleep(4)'`,
+	})
+	if got.ForceSkip || got.Nudge != "" {
+		t.Fatalf("ordinary scans should not be redirected by the professional proof guard: %+v", got)
+	}
+}
+
+func TestHookClientRouteWorkflowNudgesXSSLaneUntilDiscovery(t *testing.T) {
+	state := NewScanState()
+	claim := map[string]string{"tool_name": "claim_next_hypothesis", "vuln_class": "xss"}
+	if got := hookClientRouteWorkflow(state, claim); !strings.Contains(got.Nudge, "discover_client_routes") {
+		t.Fatalf("expected route-discovery nudge when XSS lane starts, got %+v", got)
+	}
+
+	hookClientRouteWorkflow(state, map[string]string{
+		"tool_name": "discover_client_routes",
+		"output":    "Discovered 3 dynamic client route(s) from live scripts.",
+	})
+	if !state.ClientRoutesDiscovered {
+		t.Fatal("successful route discovery was not remembered")
+	}
+	if got := hookClientRouteWorkflow(state, claim); got.Nudge != "" {
+		t.Fatalf("completed route discovery should clear the XSS-lane nudge, got %+v", got)
+	}
+}
+
+func TestHookClientRouteWorkflowDoesNotCountFailedDiscovery(t *testing.T) {
+	state := NewScanState()
+	hookClientRouteWorkflow(state, map[string]string{
+		"tool_name": "discover_client_routes",
+		"output":    "Discovered 0 dynamic client route(s).",
+		"error":     "browser failed",
+	})
+	if state.ClientRoutesDiscovered {
+		t.Fatal("failed route discovery must not satisfy the workflow gate")
+	}
+}
+
+func TestHookOASTVerificationWorkflowNudgesOncePerObservedToken(t *testing.T) {
+	state := NewScanState()
+	poll := map[string]string{
+		"tool_name": "oob_callback",
+		"action":    "poll",
+		"token":     "tok-metabase-1",
+		"output":    "⚠️ 2 OOB interaction(s) observed for token tok-metabase-1. An interaction alone does NOT identify which system initiated it:",
+	}
+	first := hookOASTVerificationWorkflow(state, poll)
+	if !strings.Contains(first.Nudge, "Call verify_oob NOW") ||
+		!strings.Contains(first.Nudge, "RUNSCRIPT FROM/URL fetch") ||
+		!strings.Contains(first.Nudge, "execution_primitive") {
+		t.Fatalf("observed callback did not produce class-aware verification guidance: %+v", first)
+	}
+	// Repeated positive polls for the same unverified token escalate with
+	// bounded reminders (r11 evidence: the model ignored the one-shot nudge
+	// and kept polling), then go silent — never unbounded nagging.
+	for i := 1; i <= 3; i++ {
+		again := hookOASTVerificationWorkflow(state, poll)
+		if !strings.Contains(again.Nudge, "verify_oob") || !strings.Contains(again.Nudge, "STILL UNCLASSIFIED") {
+			t.Fatalf("reminder %d for the same observed token must escalate toward verify_oob: %+v", i, again)
+		}
+	}
+	if nag := hookOASTVerificationWorkflow(state, poll); nag.Nudge != "" {
+		t.Fatalf("reminders must be bounded after the first nudge + 3 escalations: %+v", nag)
+	}
+
+	poll["token"] = "tok-metabase-2"
+	poll["output"] = strings.ReplaceAll(poll["output"], "tok-metabase-1", "tok-metabase-2")
+	if next := hookOASTVerificationWorkflow(state, poll); next.Nudge == "" {
+		t.Fatal("a distinct observed token should receive its own verification nudge")
+	}
+}
+
+func TestHookOASTVerificationWorkflowIgnoresEmptyPollAndVerifierResult(t *testing.T) {
+	state := NewScanState()
+	for _, args := range []map[string]string{
+		{
+			"tool_name": "oob_callback",
+			"action":    "poll",
+			"token":     "tok-empty",
+			"output":    "No OOB interactions for token tok-empty yet.",
+		},
+		{
+			"tool_name": "verify_oob",
+			"token":     "tok-confirmed",
+			"output":    "Out-of-band blind-rce proof for token tok-confirmed.",
+		},
+		{
+			"tool_name": "oob_callback",
+			"action":    "generate",
+			"token":     "tok-new",
+			"output":    "OOB callback ready.",
+		},
+	} {
+		if got := hookOASTVerificationWorkflow(state, args); got.Nudge != "" {
+			t.Fatalf("non-positive raw poll must not nudge: args=%v result=%+v", args, got)
+		}
 	}
 }
 

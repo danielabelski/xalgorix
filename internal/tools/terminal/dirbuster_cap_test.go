@@ -1,6 +1,9 @@
 package terminal
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestCapDirbusterRuntime(t *testing.T) {
 	cases := []struct {
@@ -11,17 +14,22 @@ func TestCapDirbusterRuntime(t *testing.T) {
 		{
 			name: "ffuf without maxtime gets capped",
 			in:   "ffuf -u http://t/FUZZ -w wl.txt -mc 200",
-			want: "ffuf -u http://t/FUZZ -w wl.txt -mc 200 -maxtime 180",
+			want: "ffuf -u http://t/FUZZ -w wl.txt -mc 200 -maxtime 180 -noninteractive",
 		},
 		{
 			name: "ffuf piped to head caps the ffuf stage only",
 			in:   "ffuf -u http://t/FUZZ -w wl.txt | head -60",
-			want: "ffuf -u http://t/FUZZ -w wl.txt -maxtime 180 | head -60",
+			want: "ffuf -u http://t/FUZZ -w wl.txt -maxtime 180 -noninteractive | head -60",
 		},
 		{
 			name: "ffuf with explicit maxtime is preserved",
 			in:   "ffuf -u http://t/FUZZ -w wl.txt -maxtime 30",
-			want: "ffuf -u http://t/FUZZ -w wl.txt -maxtime 30",
+			want: "ffuf -u http://t/FUZZ -w wl.txt -maxtime 30 -noninteractive",
+		},
+		{
+			name: "ffuf excessive maxtime is reduced",
+			in:   "ffuf -u http://t/FUZZ -w wl.txt -maxtime 900 -noninteractive",
+			want: "ffuf -u http://t/FUZZ -w wl.txt -maxtime 180 -noninteractive",
 		},
 		{
 			name: "feroxbuster without time-limit gets capped",
@@ -53,6 +61,28 @@ func TestCapDirbusterRuntime(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := CapDirbusterRuntime(tc.in); got != tc.want {
 				t.Errorf("CapDirbusterRuntime(%q)\n got: %q\nwant: %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContentDiscoveryCommandTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want time.Duration
+		ok   bool
+	}{
+		{name: "ffuf explicit shorter limit", cmd: "ffuf -u http://t/FUZZ -maxtime 60 -noninteractive | head", want: 75 * time.Second, ok: true},
+		{name: "ffuf default cap", cmd: "ffuf -u http://t/FUZZ -w wl.txt", want: 195 * time.Second, ok: true},
+		{name: "gobuster process backstop", cmd: "gobuster dir -u http://t -w wl.txt", want: 195 * time.Second, ok: true},
+		{name: "ordinary command", cmd: "curl -sk http://t", ok: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := contentDiscoveryCommandTimeout(tc.cmd)
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("contentDiscoveryCommandTimeout(%q) = %s, %v; want %s, %v", tc.cmd, got, ok, tc.want, tc.ok)
 			}
 		})
 	}

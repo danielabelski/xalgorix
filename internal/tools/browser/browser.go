@@ -216,10 +216,12 @@ ACTIONS:
   iframe       — Switch into an iframe by selector/index
   main_frame   — Switch back to main page frame from iframe
   extract_links— Extract all links from the page (useful for verification emails)
+  discover_client_routes — Extract dynamic route templates from the live page and a bounded set of same-origin JavaScript files. Use this on client-rendered applications before testing path-segment inputs. It does not fetch third-party scripts, use source maps, or inject payloads.
   new_tab      — Open a new browser tab
   switch_tab   — Switch between tabs
   close        — Close browser
   verify_xss   — CONFIRM an XSS payload actually executes in the browser (proof of execution, not reflection). Point it at a payload that emits a unique nonce and pass nonce=<that value>; confirmed only if the nonce is observed executing. Three oracles are accepted: a JS dialog (alert/confirm/prompt('XV-8f3a')), a console call (console.log('XV-8f3a')) — useful when a filter strips alert — or a DOM marker (document.title='XV-8f3a' or window.name='XV-8f3a') for DOM-only sinks. GET (default): pass url=<URL carrying the payload>. POST-reflected XSS: pass url=<form action> plus data=<urlencoded body, e.g. search=<payload>> (method defaults to POST when data is set) — this performs a real form POST and confirms in ONE call, so do NOT hand-build form submissions with browser_action. Use before reporting XSS.
+  verify_path_template_xss — On a DISCOVERED dynamic route that appears to render AngularJS-style {{...}} expressions in URL path segments, pass url=<candidate route prefix ending in />. The browser adds a fresh, harmless numeric marker to one path segment and confirms only if JavaScript executes. Launch the browser first. No product-specific routes are guessed.
 
 SIGNUP/LOGIN WORKFLOW:
   1. launch url=https://target.com/signup
@@ -233,8 +235,8 @@ SIGNUP/LOGIN WORKFLOW:
   9. goto url=VERIFICATION_LINK
   10. get_cookies → save session tokens for authenticated testing`,
 		Parameters: []tools.Parameter{
-			{Name: "command", Description: "Browser action (see list above)", Required: true},
-			{Name: "url", Description: "URL to navigate to (for launch/goto)", Required: false},
+			{Name: "command", Description: "Browser action (see list above). Always provide it; only unambiguous omitted actions can be recovered.", Required: false},
+			{Name: "url", Description: "URL to navigate to (launch/goto/verify_xss), or the discovered route prefix for verify_path_template_xss", Required: false},
 			{Name: "selector", Description: "CSS selector or semantic @eX ID from snapshot (for click/type/submit/wait/iframe/get_html/select)", Required: false},
 			{Name: "text", Description: "Text to type (for type), option value (for select), or cookie value (for set_cookie)", Required: false},
 			{Name: "code", Description: "JavaScript code to execute (for execute_js)", Required: false},
@@ -253,6 +255,22 @@ SIGNUP/LOGIN WORKFLOW:
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
 			return browserActionForRegistry(r, args)
+		},
+	})
+
+	// Keep route discovery as a first-class tool as well as a browser_action
+	// command. Models reliably select a narrowly named tool during reconnaissance,
+	// while the browser command remains useful once an interactive session is
+	// already open. Both paths use the same bounded same-origin implementation.
+	r.Register(&tools.Tool{
+		Name:        "discover_client_routes",
+		Description: "Discover dynamic path templates from a live client-rendered page and a bounded set of same-origin JavaScript bundles. Use this early in reconnaissance before broad wordlists or source-map hunting. It never fetches third-party scripts or source maps. When AngularJS signals are present, it automatically performs a bounded, harmless browser execution check on up to three highest-priority public dynamic prefixes and records any confirmed path XSS; report a confirmed result immediately.",
+		Parameters: []tools.Parameter{
+			{Name: "url", Description: "Absolute HTTP(S) page URL to inspect, usually the target root or login page", Required: true},
+			{Name: "proxy", Description: "Optional browser proxy: 'caido', 'none', or a proxy URL", Required: false},
+		},
+		Execute: func(args map[string]string) (tools.Result, error) {
+			return discoverClientRoutesAtURL(r.GetScanContextID(), args["url"], args["proxy"])
 		},
 	})
 }
@@ -612,7 +630,32 @@ func browserActionForRegistry(reg *tools.Registry, args map[string]string) (tool
 }
 
 func browserActionWithContext(ctxID string, args map[string]string) (tools.Result, error) {
-	command := args["command"]
+	command := strings.TrimSpace(args["command"])
+	if command == "" {
+		// Some providers intermittently omit the command key while still
+		// supplying a complete, unambiguous action. Recover only those forms;
+		// never guess whether a selector means click, submit, type, or wait.
+		switch {
+		case strings.TrimSpace(args["nonce"]) != "" && strings.TrimSpace(args["url"]) != "":
+			command = "verify_xss"
+		case strings.TrimSpace(args["code"]) != "":
+			command = "execute_js"
+		case strings.TrimSpace(args["fields"]) != "":
+			command = "fill_form"
+		case strings.TrimSpace(args["url"]) != "":
+			s := getBrowserStoreByID(ctxID)
+			s.mu.Lock()
+			launched := s.browser != nil
+			s.mu.Unlock()
+			if launched {
+				command = "goto"
+			} else {
+				command = "launch"
+			}
+		default:
+			return tools.Result{}, fmt.Errorf("browser_action requires command for this ambiguous request")
+		}
+	}
 
 	switch command {
 	case "launch":
@@ -659,6 +702,8 @@ func browserActionWithContext(ctxID string, args map[string]string) (tools.Resul
 		return switchToMainFrame(ctxID)
 	case "extract_links":
 		return extractLinks(ctxID)
+	case "discover_client_routes":
+		return discoverClientRoutes(ctxID)
 	case "new_tab":
 		return newTab(ctxID, args["url"])
 	case "switch_tab":
@@ -667,8 +712,10 @@ func browserActionWithContext(ctxID string, args map[string]string) (tools.Resul
 		return closeBrowser(ctxID)
 	case "verify_xss":
 		return verifyXSS(ctxID, args["url"], args["nonce"], args["parameter"], args["data"], args["method"])
+	case "verify_path_template_xss":
+		return verifyPathTemplateXSS(ctxID, args["url"])
 	default:
-		return tools.Result{}, fmt.Errorf("unknown browser action: %s. Available: launch, goto, snapshot, click, type, submit, scroll, screenshot, get_html, execute_js, get_cookies, set_cookie, save_session, load_session, list_sessions, wait, select, fill_form, get_url, iframe, main_frame, extract_links, new_tab, switch_tab, close, verify_xss", command)
+		return tools.Result{}, fmt.Errorf("unknown browser action: %s. Available: launch, goto, snapshot, click, type, submit, scroll, screenshot, get_html, execute_js, get_cookies, set_cookie, save_session, load_session, list_sessions, wait, select, fill_form, get_url, iframe, main_frame, extract_links, discover_client_routes, new_tab, switch_tab, close, verify_xss, verify_path_template_xss", command)
 	}
 }
 
@@ -1542,6 +1589,16 @@ func executeJS(ctxID, code string) (tools.Result, error) {
 	// The dialog handler auto-dismisses alerts, but we add a timeout as a safety net.
 	result, err := s.page.Timeout(10 * time.Second).Eval(code)
 	if err != nil {
+		// Providers commonly emit DevTools-console snippets such as
+		// `return document.title;` or `const x = ...; return x;`. Rod's Eval
+		// expects a callable expression, so those otherwise valid snippets fail
+		// with a syntax error at top level. Retry only syntax failures, wrapped
+		// as a zero-argument function; runtime errors still pass through unchanged.
+		if repaired, ok := repairExecuteJSCode(code, err); ok {
+			result, err = s.page.Timeout(10 * time.Second).Eval(repaired)
+		}
+	}
+	if err != nil {
 		// If it timed out, it's likely a blocking dialog that wasn't caught
 		if strings.Contains(err.Error(), "context deadline") || strings.Contains(err.Error(), "timeout") {
 			return tools.Result{
@@ -1552,6 +1609,43 @@ func executeJS(ctxID, code string) (tools.Result, error) {
 	}
 
 	return tools.Result{Output: result.Value.String()}, nil
+}
+
+func repairExecuteJSCode(code string, evalErr error) (string, bool) {
+	trimmed := strings.TrimSpace(code)
+	if trimmed == "" || evalErr == nil {
+		return "", false
+	}
+	errText := strings.ToLower(evalErr.Error())
+	syntaxFailure := strings.Contains(errText, "syntaxerror") || strings.Contains(errText, "syntax error") ||
+		strings.Contains(errText, "unexpected token")
+	// Rod evaluates a supplied value as a callable. A DevTools-console
+	// expression such as `window.name` or `JSON.stringify(...)` is valid
+	// JavaScript but produces "...apply is not a function" because its result is
+	// not callable. Wrap such expressions in a callable and retry once.
+	nonCallableExpression := strings.Contains(errText, "apply is not a function")
+	if !syntaxFailure && !nonCallableExpression {
+		return "", false
+	}
+	// Already-callable functions need a real fix from the caller; wrapping a
+	// malformed function expression would only obscure the original error.
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(trimmed, "() =>") || strings.HasPrefix(trimmed, "(") ||
+		strings.HasPrefix(lower, "function") || strings.HasPrefix(lower, "async ") {
+		if nonCallableExpression {
+			return "() => (" + trimmed + ")", true
+		}
+		return "", false
+	}
+	statementSnippet := strings.HasPrefix(lower, "return ") || strings.HasPrefix(lower, "const ") ||
+		strings.HasPrefix(lower, "let ") || strings.HasPrefix(lower, "var ") ||
+		strings.HasPrefix(lower, "if ") || strings.HasPrefix(lower, "for ") ||
+		strings.HasPrefix(lower, "while ") || strings.HasPrefix(lower, "try ") ||
+		strings.Contains(trimmed, ";")
+	if statementSnippet {
+		return "() => {\n" + trimmed + "\n}", true
+	}
+	return "() => (" + trimmed + ")", true
 }
 
 func newTab(ctxID, rawURL string) (tools.Result, error) {
