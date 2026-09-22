@@ -127,7 +127,12 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 		agentGraph: graph,
 		state:      state,
 		events:     make(chan Event, 16),
+		targetAuth: "Authorization: Bearer operator-test-token",
 	}
+	if got := a.maybeAutoDelegate([]string{"https://example.test"}); got != "" || graph.DelegationCount() != 0 {
+		t.Fatalf("delegation launched before an endpoint inventory: message=%q count=%d", got, graph.DelegationCount())
+	}
+	state.EndpointInventorySaved = true
 	message := a.maybeAutoDelegate([]string{"https://example.test"})
 	if graph.DelegationCount() != len(defaultSpecialistProfiles) {
 		t.Fatalf("delegated %d agents, want one %d-agent wave", graph.DelegationCount(), len(defaultSpecialistProfiles))
@@ -153,6 +158,23 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 	}
 }
 
+func TestEligibleSpecialistProfilesRequireAuthenticatedIdentityForAuthz(t *testing.T) {
+	unauthenticated := (&Agent{}).eligibleSpecialistProfiles()
+	if len(unauthenticated) != len(defaultSpecialistProfiles)-1 {
+		t.Fatalf("anonymous-only scan got %d profiles, want %d", len(unauthenticated), len(defaultSpecialistProfiles)-1)
+	}
+	for _, profile := range unauthenticated {
+		if profile.Role == "authz-logic" {
+			t.Fatal("anonymous-only scan must not auto-launch the authz specialist")
+		}
+	}
+
+	authenticated := (&Agent{targetAuth: "Authorization: Bearer operator-test-token"}).eligibleSpecialistProfiles()
+	if len(authenticated) != len(defaultSpecialistProfiles) {
+		t.Fatalf("authenticated scan got %d profiles, want %d", len(authenticated), len(defaultSpecialistProfiles))
+	}
+}
+
 func TestMaybeAutoDelegateSkipsNarrowModes(t *testing.T) {
 	graph := agentsgraph.New(context.Background(), func(context.Context, string, string, []string, string) (string, error) {
 		return "done", nil
@@ -164,6 +186,7 @@ func TestMaybeAutoDelegateSkipsNarrowModes(t *testing.T) {
 		state := NewScanState()
 		state.Iteration = 5
 		state.ReconDone = true
+		state.EndpointInventorySaved = true
 		state.Plan = AutoPlan([]string{"/"}, nil)
 		state.PlanBuilt = true
 		state.LedgerSeeded = true

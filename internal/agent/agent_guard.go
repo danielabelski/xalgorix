@@ -10,6 +10,47 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 )
 
+// shouldBlockForMissingAuthPrerequisites prevents an anonymous assessment from
+// turning a leaked password hash or a login form into an unbounded credential
+// attack. A concrete leaked hash is already impact evidence for its root cause;
+// cracking it adds risk and routinely starves unrelated black-box lanes. The
+// guard is lifted when the operator supplied (or the scan ingested) a legitimate
+// session, where authenticated replay and role comparison are expected.
+func (a *Agent) shouldBlockForMissingAuthPrerequisites(toolName string, toolArgs map[string]string) (bool, string) {
+	if a == nil || a.state == nil || !a.state.AuthContextKnown || a.state.AuthContextAvailable {
+		return false, ""
+	}
+	var material string
+	switch toolName {
+	case "terminal_execute":
+		material = toolArgs["command"]
+	case "python_action":
+		material = toolArgs["code"] + " " + toolArgs["script"]
+	default:
+		return false, ""
+	}
+	lower := strings.ToLower(material)
+	for _, marker := range []string{
+		"hashcat", "rockyou", "pbkdf2", "bcrypt", "passlib",
+		"password cracking", "password crack", "crack password", "dictionary attack",
+		" john ", "john-the-ripper",
+	} {
+		if strings.Contains(" "+lower+" ", marker) {
+			return true, "No operator-supplied account or session is available. Preserve a leaked credential hash as impact evidence, but do not crack it; continue anonymous testing and skip role-dependent lanes with that prerequisite."
+		}
+	}
+	for _, pair := range []string{
+		"admin:admin", "admin:password", "admin:grafana", "root:root", "root:password", "grafana:grafana",
+		`"password":"admin"`, `"password": "admin"`, "password=admin",
+		`"password":"password"`, `"password": "password"`, "password=password",
+	} {
+		if strings.Contains(lower, pair) {
+			return true, "No operator-supplied account or session is available. Do not guess default credentials; use one randomized invalid-login baseline if needed, then continue anonymous testing."
+		}
+	}
+	return false, ""
+}
+
 func (a *Agent) shouldUsePassiveReconGuard() bool {
 	return normalizeActivityMode(a.reconMode) == activityModePassive &&
 		normalizeActivityMode(a.scanIntensity) == activityModeActive &&

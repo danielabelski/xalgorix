@@ -8,6 +8,18 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 )
 
+func TestPathTemplateXSSURL(t *testing.T) {
+	got, err := pathTemplateXSSURL("http://127.0.0.1:3310/dashboard/snapshot/?orgId=1", "41174091")
+	if err != nil || got != "http://127.0.0.1:3310/dashboard/snapshot/{{constructor.constructor(%27window.__xss=41174091%27)()}}?orgId=1" {
+		t.Fatalf("unexpected route probe URL %q, err=%v", got, err)
+	}
+	for _, route := range []string{"http://127.0.0.1:3310/", "file:///tmp/page", "http://127.0.0.1:3310/path#fragment"} {
+		if got, err := pathTemplateXSSURL(route, "41174091"); err == nil {
+			t.Fatalf("invalid candidate route %q produced %q", route, got)
+		}
+	}
+}
+
 func TestExecSignalSinkRecordClearAndBound(t *testing.T) {
 	ctxID := "xss-sink-" + t.Name()
 	clearExecSignals(ctxID)
@@ -76,8 +88,8 @@ func TestFinalizeXSSVerdictConfirmedRecordsLedger(t *testing.T) {
 	if len(h.Evidence) != 1 || h.Evidence[0].Kind != "exploit" {
 		t.Fatalf("expected one exploit evidence, got %#v", h.Evidence)
 	}
-	if h.Status != scanctx.HypothesisTesting {
-		t.Fatalf("expected status testing (agent still reports/verifies), got %q", h.Status)
+	if h.Status != scanctx.HypothesisProven {
+		t.Fatalf("expected deterministic browser execution to mark the hypothesis proven, got %q", h.Status)
 	}
 }
 
@@ -93,8 +105,8 @@ func TestFinalizeXSSVerdictNotConfirmed(t *testing.T) {
 	if ok, _ := res.Metadata["xss_confirmed"].(bool); ok {
 		t.Fatal("expected xss_confirmed=false when the nonce did not fire")
 	}
-	if !strings.Contains(res.Output, "unrelated dialog") {
-		t.Fatalf("expected mention of unrelated dialogs, got: %s", res.Output)
+	if !strings.Contains(res.Output, "unrelated signal") {
+		t.Fatalf("expected mention of unrelated execution signals, got: %s", res.Output)
 	}
 	if sc.Ledger.Len() != 0 {
 		t.Fatalf("expected no ledger writes when unconfirmed, got %d", sc.Ledger.Len())

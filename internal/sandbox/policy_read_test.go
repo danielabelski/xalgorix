@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 )
 
 // TestCheckRead_AllowsOutsideAllowList confirms the new read policy:
@@ -141,6 +143,28 @@ func TestCheckResolve_Unchanged(t *testing.T) {
 	outside := filepath.Join(t.TempDir(), "elsewhere.txt")
 	if _, err := p.CheckResolve(nil, "test", outside); err == nil {
 		t.Fatalf("write outside allow-list (%s) should have been rejected", outside)
+	}
+}
+
+func TestCheckResolve_AllowsActiveScanDirOutsideGlobalRoots(t *testing.T) {
+	globalRoot := t.TempDir()
+	scanRoot := t.TempDir()
+	p := New(globalRoot)
+	sc := scanctx.New("sandbox-dynamic-scan-root", scanRoot)
+	defer sc.Close()
+
+	target := filepath.Join(scanRoot, "tmp", "proof.py")
+	resolved, err := p.CheckResolve(sc, "fileedit.create", target)
+	if err != nil {
+		t.Fatalf("write inside active ScanDir rejected: %v", err)
+	}
+	if resolved != target {
+		t.Fatalf("resolved path = %q, want %q", resolved, target)
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if _, err := p.CheckResolve(sc, "fileedit.create", outside); err == nil {
+		t.Fatalf("write outside global roots and ScanDir (%s) should be rejected", outside)
 	}
 }
 

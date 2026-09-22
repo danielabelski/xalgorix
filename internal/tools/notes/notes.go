@@ -2,6 +2,7 @@
 package notes
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -167,7 +168,7 @@ func Register(r *tools.Registry) {
 		Name:        "add_note",
 		Description: "Add a note to persistent memory. Use this to track: discovered endpoints, parameters, tech stack, CSRF tokens, session cookies, exploit chain state, intermediate findings, and anything needed across multiple iterations. Notes persist for the entire scan AND survive context pruning. Use structured keys like 'csrf_token', 'admin_endpoint', 'sqli_confirmed', 'angular_version'.",
 		Parameters: []tools.Parameter{
-			{Name: "key", Description: "Unique key for the note (e.g., 'csrf_token', 'admin_endpoint', 'angular_version', 'exploit_chain_step1')", Required: true},
+			{Name: "key", Description: "Unique key for the note (e.g., 'csrf_token', 'endpoint_inventory'). Provide it when possible; value-only notes receive a stable key automatically.", Required: false},
 			{Name: "value", Description: "Note content", Required: true},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
@@ -193,8 +194,19 @@ func addNote(args map[string]string) (tools.Result, error) {
 }
 
 func addNoteForContext(contextID string, args map[string]string) (tools.Result, error) {
-	key := args["key"]
-	value := args["value"]
+	key := strings.TrimSpace(args["key"])
+	value := strings.TrimSpace(args["value"])
+	if value == "" {
+		return tools.Result{}, fmt.Errorf("add_note requires a nonempty value")
+	}
+	if key == "" {
+		if lower := strings.ToLower(value); strings.Contains(lower, "endpoint") || strings.Contains(lower, "route inventory") {
+			key = "endpoint_inventory"
+		} else {
+			sum := sha256.Sum256([]byte(value))
+			key = fmt.Sprintf("note_%x", sum[:8])
+		}
+	}
 
 	if contextID == "" {
 		contextID = scanctx.Default().ID

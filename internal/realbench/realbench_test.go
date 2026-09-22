@@ -1,6 +1,9 @@
 package realbench
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -104,6 +107,60 @@ func TestLoadRejectsTrailingJSONValue(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidHealthFingerprint(t *testing.T) {
+	bad := strings.Replace(testManifest,
+		`"default_url": "http://127.0.0.1:3300"`,
+		`"default_url": "http://127.0.0.1:3300", "health_path": "/api/health", "health_body_regexp": "["`, 1)
+	if _, err := Load(strings.NewReader(bad)); err == nil || !strings.Contains(err.Error(), "health_body_regexp") {
+		t.Fatalf("expected invalid health fingerprint error, got %v", err)
+	}
+}
+
+func TestPreflightTargetChecksHealthAndVersionFingerprint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/health" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"database":"ok","version":"8.2.6"}`))
+	}))
+	defer server.Close()
+
+	suite := loadTestSuite(t)
+	target, _ := suite.Target("grafana-vulnerable")
+	target.Container.DefaultURL = server.URL
+	target.Container.HealthPath = "/api/health"
+	target.Container.HealthStatus = http.StatusOK
+	target.Container.HealthBodyRegexp = `"version"\s*:\s*"8\.2\.6"`
+	result, err := PreflightTarget(context.Background(), target, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StatusCode != http.StatusOK || result.URL != server.URL+"/api/health" {
+		t.Fatalf("unexpected preflight result: %+v", result)
+	}
+
+	target.Container.HealthBodyRegexp = `"version"\s*:\s*"8\.2\.7"`
+	if _, err := PreflightTarget(context.Background(), target, server.URL); err == nil || !strings.Contains(err.Error(), "fingerprint") {
+		t.Fatalf("expected version fingerprint mismatch, got %v", err)
+	}
+}
+
+func TestPreflightTargetDoesNotFollowRedirects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+	defer server.Close()
+
+	suite := loadTestSuite(t)
+	target, _ := suite.Target("grafana-vulnerable")
+	target.Container.HealthPath = "/api/health"
+	if _, err := PreflightTarget(context.Background(), target, server.URL); err == nil || !strings.Contains(err.Error(), "HTTP 302") {
+		t.Fatalf("expected redirect rejection, got %v", err)
+	}
+}
+
 func TestScorePositiveRequiresExploitProof(t *testing.T) {
 	suite := loadTestSuite(t)
 	target, _ := suite.Target("grafana-vulnerable")
@@ -175,6 +232,87 @@ func TestScoreCVETextDoesNotMatchAnotherIdentifier(t *testing.T) {
 	result := Score(suite, target, []reporting.Vulnerability{finding})
 	if result.Matched != 0 {
 		t.Fatalf("a different CVE identifier must not satisfy the expectation: %+v", result)
+	}
+}
+
+func TestGrafanaDualManifestScoresIndependentBugClasses(t *testing.T) {
+	suite, err := LoadFile("../../benchmarks/real-world/grafana-dual/manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vulnerable, ok := suite.Target("grafana-8.2.2-two-cves")
+	if !ok {
+		t.Fatal("missing vulnerable Grafana 8.2.2 target")
+	}
+	control, ok := suite.Target("grafana-8.2.7-two-cve-control")
+	if !ok {
+		t.Fatal("missing patched Grafana 8.2.7 control")
+	}
+	if len(vulnerable.Expectations) != 2 || len(suite.ExpectationsFor(control)) != 2 {
+		t.Fatalf("the dual corpus must score both CVEs against both versions: %+v %+v", vulnerable, control)
+	}
+
+	lfi := reporting.Vulnerability{
+		ID: "XALG-1", CVE: "CVE-2021-43798", CWE: "CWE-22", Method: "GET",
+		Endpoint: "http://127.0.0.1:3310/public/plugins/alertlist/../../../../etc/passwd",
+		Tags:     []string{reporting.TagExploitProven},
+	}
+	xss := reporting.Vulnerability{
+		ID: "XALG-2", CVE: "CVE-2021-41174", CWE: "CWE-79", Method: "GET",
+		Endpoint: "http://127.0.0.1:3310/dashboard/snapshot/%7B%7Bconstructor.constructor(1)()%7D%7D",
+		Tags:     []string{reporting.TagExploitProven},
+	}
+	result := Score(suite, vulnerable, []reporting.Vulnerability{lfi, xss})
+	if result.Matched != 2 || result.TargetedRecall != 1 || result.Expectations[0].FindingID != lfi.ID || result.Expectations[1].FindingID != xss.ID {
+		t.Fatalf("both independently documented classes should match: %+v", result)
+	}
+	xss.Tags = nil
+	xss.Verified = false
+	result = Score(suite, vulnerable, []reporting.Vulnerability{lfi, xss})
+	if result.Matched != 1 || len(result.Expectations[1].UnprovenIDs) != 1 {
+		t.Fatalf("an unproven XSS must not inflate recall: %+v", result)
+	}
+	result = Score(suite, control, nil)
+	if result.ControlRegressions != 0 || result.Expected != 2 {
+		t.Fatalf("the patched control must check both signatures: %+v", result)
+	}
+}
+
+func TestMetabaseRCEManifestScoresProofAndControl(t *testing.T) {
+	suite, err := LoadFile("../../benchmarks/real-world/metabase-rce/manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vulnerable, ok := suite.Target("metabase-0.46.6-cve-2023-38646")
+	if !ok {
+		t.Fatal("missing vulnerable Metabase 0.46.6 target")
+	}
+	control, ok := suite.Target("metabase-0.46.6.4-rce-control")
+	if !ok {
+		t.Fatal("missing patched Metabase 0.46.6.4 control")
+	}
+
+	rce := reporting.Vulnerability{
+		ID:       "XALG-1",
+		Title:    "CVE-2023-38646 pre-auth H2 connection-string RCE",
+		CVE:      "CVE-2023-38646",
+		CWE:      "CWE-94",
+		Method:   "POST",
+		Endpoint: "http://127.0.0.1:3320/api/setup/validate",
+		Tags:     []string{reporting.TagExploitProven},
+	}
+	result := Score(suite, vulnerable, []reporting.Vulnerability{rce})
+	if result.Matched != 1 || result.TargetedRecall != 1 {
+		t.Fatalf("proof-bearing Metabase RCE should match: %+v", result)
+	}
+	rce.Tags = nil
+	result = Score(suite, vulnerable, []reporting.Vulnerability{rce})
+	if result.Matched != 0 || len(result.Expectations[0].UnprovenIDs) != 1 {
+		t.Fatalf("version-only/unproven RCE must not inflate recall: %+v", result)
+	}
+	result = Score(suite, control, nil)
+	if result.ControlRegressions != 0 || result.Expected != 1 {
+		t.Fatalf("patched Metabase control should check one signature: %+v", result)
 	}
 }
 

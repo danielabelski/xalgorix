@@ -64,6 +64,10 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 	notes.Register(vreg)
 	websearch.Register(vreg)
 	oobtool.Register(vreg) // lets the verifier confirm blind classes out-of-band
+	// Re-run candidate directory traversal with literal ../ segments and a
+	// missing-file control. Ordinary HTTP clients often normalize these paths
+	// before transmission, creating a false negative for real file reads.
+	a.registerVerifyPathTraversalTool(vreg)
 
 	var verdict *reporting.VerificationVerdict
 	vreg.Register(&tools.Tool{
@@ -293,9 +297,11 @@ Claimed proof (DO NOT TRUST — reproduce it yourself):
 3. Apply the EVIDENCE STANDARD — the claim is only real if the evidence matches the class:
    - SSRF (CWE-918): the TARGET'S SERVER made the request. For OOB verification, generate a fresh token, send the injection request with redirects disabled ('curl --max-redirs 0', 'allow_redirects=False', equivalent), and require a non-scanner-origin HTTP interaction. A target 30x pointing to the callback, a scanner-origin hit, or DNS-only activity is NOT SSRF proof. Browser/client-side URL handling is also NOT SSRF.
    - XSS (CWE-79): the script actually EXECUTED (alert(document.domain), OOB callback, screenshot). Reflection alone is NOT XSS.
-   - SQLi (CWE-89): extracted data, a DB error, or a DIFFERENTIAL repeated time delay. A single slow response is NOT proof.
+	   - SQLi (CWE-89): extracted data, a DB error, or a DIFFERENTIAL repeated time delay. A single slow response is NOT proof.
+	   - Blind RCE / command or code injection (CWE-78/CWE-94): command output, a target-attributable callback, or a repeated baseline-vs-delay differential whose payload invokes an unambiguous server-side sleep primitive. A timeout, scanner-origin callback, or one slow response is NOT proof.
    - Access control / IDOR: protected DATA returned or a real STATE CHANGE. A 200 (especially empty body) on POST/PUT/DELETE/OPTIONS is NOT access — usually CORS preflight / no-op.
    - Info disclosure (CWE-200): an actual secret VALUE leaked. Field/parameter NAMES, public OpenAPI/Swagger specs, and by-design data are NOT disclosure.
+   - Path traversal / local file read (CWE-22): preserve literal ../ path segments. Prefer verify_path_traversal on the candidate file-serving DIRECTORY (not the full exploit URL); it sends a missing-file control and raw requests. For a manual curl re-test use --path-as-is --globoff and inspect the request path. A 404 after a client-normalized request is NOT positive disproof.
 4. Sanity-check the narrative: Is this the intended behavior of the technology? Did the "attacker" supply the secret themselves (a token placed in the URL cannot be "stolen" — circular)? Is the CVSS impact (C/I/A) actually demonstrated?
 5. EVIDENCE PROVENANCE — the proof must demonstrate THIS finding's OWN mechanism. If the evidence was actually obtained through a DIFFERENT vulnerability (e.g. "SQLi" proven by dumping the database through an RCE/eval bug instead of through the injection point), it does NOT prove this finding. Re-test the claimed mechanism directly at its own injection point. If only the other vulnerability works, this finding is inconclusive (or rejected if the claimed point is not actually injectable).
 6. BLIND CLASSES (blind XXE / blind SSRF / blind SQLi) — a generic "success"/"OK"/"request made" response is NOT proof. For SSRF, a DNS-only or scanner-origin OOB hit is also not proof; require a non-scanner-origin HTTP interaction from a fresh token tested with redirects disabled, or actually retrieved internal data. For other blind classes, require class-appropriate OOB provenance or retrieved data/file content. Otherwise mark inconclusive.
@@ -310,6 +316,7 @@ CRITICAL: NEVER mark a finding "rejected" merely because you could not reproduce
 ## TOOL USAGE FORMAT
 - http_request: REQUIRED parameter "url" (e.g. <parameter name="url">https://example.com/api</parameter>). Optional: "method" ("GET"/"POST"), "headers", "body". Note: "method" is a PARAMETER inside http_request, NOT a tool name!
 - terminal_execute: REQUIRED parameter "command" (e.g. <parameter name="command">curl -s https://...</parameter>).
+- verify_path_traversal: parameter "url" is the candidate directory URL ending in /, before any ../ exploit segments.
 - submit_verdict: REQUIRED parameters "verdict" and "reason".
 
 Re-test now, then call submit_verdict exactly once.

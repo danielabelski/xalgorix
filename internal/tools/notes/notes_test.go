@@ -44,6 +44,21 @@ func TestRegistryNotesAreIsolatedByScanContext(t *testing.T) {
 	}
 }
 
+func TestValueOnlyEndpointInventoryGetsStableKey(t *testing.T) {
+	const ctxID = "notes-value-only-inventory"
+	t.Cleanup(func() { CleanupContext(ctxID) })
+	reg := tools.NewRegistry()
+	reg.SetScanContextID(ctxID)
+	Register(reg)
+	value := "Discovered endpoints: /login /api/health /public/build"
+	if _, err := reg.Execute("add_note", map[string]string{"value": value}); err != nil {
+		t.Fatalf("value-only note should be recovered: %v", err)
+	}
+	if got := GetAllNotesForContext(ctxID)["endpoint_inventory"]; got != value {
+		t.Fatalf("endpoint inventory not saved: %q", got)
+	}
+}
+
 func TestNotesDiskPersistenceIsContextSpecific(t *testing.T) {
 	dir := t.TempDir()
 	contextID := "persist-ctx"

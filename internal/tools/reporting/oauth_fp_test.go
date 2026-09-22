@@ -68,6 +68,17 @@ func TestCheckFalsePositive_OAuthStateCSRF(t *testing.T) {
 			proof:      "Forged request (cross-site Origin, no CSRF token) -> HTTP 200 (accepted).",
 			wantReject: false,
 		},
+		{
+			// A disclosure can contain arbitrary application configuration text.
+			// Merely mentioning OAuth and a setting whose name contains "state"
+			// must not transform an unrelated, proven file read into OAuth CSRF.
+			name:       "path traversal leaking OAuth state configuration is not OAuth CSRF",
+			title:      "Unauthenticated arbitrary file read via plugin path traversal",
+			desc:       "The response disclosed /etc/grafana/grafana.ini, including [auth.generic_oauth] and oauth_state_cookie_max_age settings.",
+			severity:   "high",
+			proof:      "GET /public/plugins/alertlist/../../../../etc/passwd returned root:x:0:0 from the server filesystem.",
+			wantReject: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

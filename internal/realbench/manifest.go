@@ -59,9 +59,11 @@ type Target struct {
 
 // Container records the immutable deployment used for a benchmark target.
 type Container struct {
-	ImageRef   string `json:"image_ref"`
-	DefaultURL string `json:"default_url"`
-	HealthPath string `json:"health_path,omitempty"`
+	ImageRef         string `json:"image_ref"`
+	DefaultURL       string `json:"default_url"`
+	HealthPath       string `json:"health_path,omitempty"`
+	HealthStatus     int    `json:"health_status,omitempty"`
+	HealthBodyRegexp string `json:"health_body_regexp,omitempty"`
 }
 
 // Expectation is one documented vulnerability that a scan should prove.
@@ -165,6 +167,9 @@ func validateTarget(target Target) error {
 	if err := ValidateLoopbackURL(target.Container.DefaultURL); err != nil {
 		return fmt.Errorf("target %q container.default_url: %w", target.ID, err)
 	}
+	if err := validateHealthCheck(target); err != nil {
+		return err
+	}
 
 	switch target.Mode {
 	case ModeVulnerable:
@@ -197,6 +202,30 @@ func validateTarget(target Target) error {
 		}
 		if !expected.RequireProof {
 			return fmt.Errorf("target %q expectation %q must require exploit proof", target.ID, expected.ID)
+		}
+	}
+	return nil
+}
+
+func validateHealthCheck(target Target) error {
+	c := target.Container
+	path := strings.TrimSpace(c.HealthPath)
+	if path == "" {
+		if c.HealthStatus != 0 || strings.TrimSpace(c.HealthBodyRegexp) != "" {
+			return fmt.Errorf("target %q health_status and health_body_regexp require health_path", target.ID)
+		}
+		return nil
+	}
+	parsed, err := url.Parse(path)
+	if err != nil || !strings.HasPrefix(path, "/") || parsed.IsAbs() || parsed.Host != "" || parsed.Fragment != "" {
+		return fmt.Errorf("target %q health_path must be an absolute path on the target origin", target.ID)
+	}
+	if c.HealthStatus < 0 || c.HealthStatus > 599 || (c.HealthStatus > 0 && c.HealthStatus < 100) {
+		return fmt.Errorf("target %q health_status must be a valid HTTP status", target.ID)
+	}
+	if pattern := strings.TrimSpace(c.HealthBodyRegexp); pattern != "" {
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("target %q health_body_regexp: %w", target.ID, err)
 		}
 	}
 	return nil

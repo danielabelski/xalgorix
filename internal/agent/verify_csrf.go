@@ -12,11 +12,12 @@
 //   - the server ACCEPTS it (2xx/3xx, no token/forbidden rejection) → confirmed
 //   - it is rejected (401/403/419, or a csrf/token/forbidden message) → NOT
 //
-// It deliberately declines when the scan's session auth is an Authorization
-// header (Bearer/Basic): a cross-site attacker's browser auto-sends cookies but
-// NOT Authorization headers, so a header-authenticated endpoint is not
-// CSRF-able and confirming it would be a false positive. This keeps the
-// confirmer honest on modern token-auth APIs.
+// It deliberately requires ambient cookie authentication and declines when the
+// scan has no Cookie header or authenticates with an Authorization header
+// (Bearer/Basic). A cross-site attacker's browser auto-sends cookies, but it
+// does not synthesize an API Authorization header; and an anonymous request
+// accepted with no victim authority is not, by itself, proof of CSRF. This
+// keeps the confirmer honest on public password-reset and modern token APIs.
 //
 // On confirmation it records evidence in the shared ledger (CWE-352); it does
 // NOT auto-report. Same safety envelope as the other verifiers: it scope-checks
@@ -39,7 +40,7 @@ import (
 func (a *Agent) registerVerifyCSRFTool(reg *tools.Registry) {
 	reg.Register(&tools.Tool{
 		Name:        "verify_csrf",
-		Description: "CONFIRM Cross-Site Request Forgery on a state-changing endpoint (the CSRF member of the verifier family). Give it a url (or ledger hypothesis_id) and the form body (data) of the state change. It replays the request the way an attacker's page would — a forged Origin/Referer and NO anti-CSRF token, reusing the scan session cookies — and confirms CSRF when the server ACCEPTS it (2xx/3xx, no token/forbidden rejection): the action fires from any origin with no unpredictable token. It declines when the endpoint is protected by an Authorization header (Bearer/Basic), which a cross-site attacker cannot forge — so it will not false-positive on token-auth APIs. On success it records CWE-352 evidence in the ledger; report it with the accepted cross-site request as proof. Uses the scan session auth, does not follow redirects, disabled in passive mode. Reach for it on any password/email change, role or permission update, delete, funds transfer, or settings write.",
+		Description: "CONFIRM Cross-Site Request Forgery on a cookie-authenticated state-changing endpoint (the CSRF member of the verifier family). Give it a url (or ledger hypothesis_id) and the form body (data) of the state change. It replays the request the way an attacker's page would — a forged Origin/Referer and NO anti-CSRF token, reusing the scan session cookie — and confirms CSRF when the server ACCEPTS it (2xx/3xx, no token/forbidden rejection): the action fires from any origin with the victim's ambient authority. It declines when no Cookie session is configured or the endpoint is protected by an Authorization header (Bearer/Basic), avoiding false positives on anonymous password-reset and token-auth APIs. On success it records CWE-352 evidence in the ledger; report it with the accepted cross-site request as proof. Uses the scan session auth, does not follow redirects, disabled in passive mode. Reach for it on password/email change, role or permission update, delete, funds transfer, or settings writes that require a cookie-authenticated victim.",
 		Parameters: []tools.Parameter{
 			{Name: "url", Description: "Absolute URL (scheme://host/path) or path of the state-changing endpoint. One of url or hypothesis_id is required.", Required: false},
 			{Name: "hypothesis_id", Description: "Optional ledger hypothesis id carrying an HTTP path; used when 'url' is not given.", Required: false},
@@ -116,6 +117,12 @@ func (a *Agent) verifyCSRFTool(args map[string]string) (tools.Result, error) {
 			}, nil
 		}
 	}
+	if !hasAmbientCookie(headers) {
+		return tools.Result{
+			Output:   "CSRF NOT applicable: no ambient Cookie session is configured. An anonymous request accepted without victim authority may indicate missing abuse controls, but it is not proof of Cross-Site Request Forgery. Supply a legitimate cookie-authenticated session and retry the state-changing action.",
+			Metadata: map[string]any{"csrf_confirmed": false, "reason": "no-cookie-auth"},
+		}, nil
+	}
 
 	const attackerOrigin = "https://csrf-attacker.example"
 	headers["Origin"] = attackerOrigin
@@ -163,6 +170,15 @@ func (a *Agent) verifyCSRFTool(args map[string]string) (tools.Result, error) {
 		Output:   confirm + fmt.Sprintf(" Recorded in the ledger (%s) — report it as CWE-352 and link the finding.\n\n%s", h.ID, proof),
 		Metadata: map[string]any{"csrf_confirmed": true, "endpoint": endpoint, "hypothesis_id": h.ID, "status": status},
 	}, nil
+}
+
+func hasAmbientCookie(headers map[string]string) bool {
+	for name, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(name), "Cookie") && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // sendStateChangeProbe issues one state-changing request (the host was

@@ -71,6 +71,152 @@ func TestHookLedgerSeedLifecycle(t *testing.T) {
 	}
 }
 
+func TestHookAdvisoryLeadCommitsExactRouteBeforeBreadth(t *testing.T) {
+	ctx, state := newTestCtxState(t)
+	state.ProfessionalAssessment = true
+	result := hookAdvisoryLeadCommitment(state, map[string]string{
+		"tool_name": "exploit_search",
+		"query":     "Example 4.2 exploit",
+		"output":    "CVE-2026-12345 permits unauthenticated remote code execution through POST /api/setup/validate even after the setup UI is complete.",
+	})
+	for _, want := range []string{"ADVISORY LEAD COMMITTED", "CVE-2026-12345", "/api/setup/validate", "verify_timing", "adjacent setup", "byte-for-byte", "escaped Unicode/newlines", "RUNSCRIPT/URL/XML/webhook/database fetch"} {
+		if !strings.Contains(result.Nudge, want) {
+			t.Fatalf("advisory commitment nudge missing %q: %s", want, result.Nudge)
+		}
+	}
+	all := ctx.Ledger.All()
+	if len(all) != 1 || all[0].VulnClass != "rce" || all[0].Endpoint != "/api/setup/validate" || all[0].Origin != "advisory-lookup" || all[0].Status != scanctx.HypothesisQueued {
+		t.Fatalf("exact advisory lead was not durably seeded: %+v", all)
+	}
+	for _, want := range []string{"byte-for-byte", "escaped Unicode/newlines", "RUNSCRIPT/URL fetch is not code execution proof"} {
+		if !strings.Contains(all[0].NextAction, want) {
+			t.Fatalf("advisory next action missing %q: %s", want, all[0].NextAction)
+		}
+	}
+	if repeat := hookAdvisoryLeadCommitment(state, map[string]string{
+		"tool_name": "cve_search", "cve_id": "CVE-2026-12345",
+		"output": "Remote code execution at /api/setup/validate (CWE-94).",
+	}); repeat.Nudge != "" || ctx.Ledger.Len() != 1 {
+		t.Fatalf("same advisory route should nudge/seed once: result=%+v ledger=%+v", repeat, ctx.Ledger.All())
+	}
+}
+
+func TestHookAdvisoryLeadRequiresClassificationForSparseExactCVE(t *testing.T) {
+	ctx, state := newTestCtxState(t)
+	state.ProfessionalAssessment = true
+	result := hookAdvisoryLeadCommitment(state, map[string]string{
+		"tool_name": "exploit_search",
+		"cve_id":    "CVE-2026-99999",
+		"output":    "Exploit-DB search results for CVE-2026-99999.",
+	})
+	for _, want := range []string{"NEEDS CLASSIFICATION", "CVE-2026-99999", "cve_search", "before broad reconnaissance"} {
+		if !strings.Contains(result.Nudge, want) {
+			t.Fatalf("sparse exact-CVE lookup nudge missing %q: %s", want, result.Nudge)
+		}
+	}
+	if ctx.Ledger.Len() != 0 {
+		t.Fatalf("a CVE without a mechanism must not become a hypothesis: %+v", ctx.Ledger.All())
+	}
+	if repeat := hookAdvisoryLeadCommitment(state, map[string]string{
+		"tool_name": "web_search", "query": "CVE-2026-99999 details",
+	}); repeat.Nudge != "" {
+		t.Fatalf("classification nudge should be deduplicated: %+v", repeat)
+	}
+}
+
+func TestHookAdvisoryLeadEnrichesModelAuthoredTerminalCVE(t *testing.T) {
+	ctx, state := newTestCtxState(t)
+	state.ProfessionalAssessment = true
+	result := hookAdvisoryLeadCommitment(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   `curl -X POST /api/check # test the CVE-2026-54321 path`,
+		"output":    "ordinary target response",
+	})
+	if !strings.Contains(result.Nudge, "NEEDS CLASSIFICATION") || !strings.Contains(result.Nudge, "CVE-2026-54321") {
+		t.Fatalf("model-authored CVE should require authoritative enrichment: %+v", result)
+	}
+	if ctx.Ledger.Len() != 0 {
+		t.Fatalf("unclassified command lead must not seed the ledger: %+v", ctx.Ledger.All())
+	}
+}
+
+func TestHookAdvisoryLeadIgnoresCVEOnlyInTerminalOutput(t *testing.T) {
+	ctx, state := newTestCtxState(t)
+	state.ProfessionalAssessment = true
+	result := hookAdvisoryLeadCommitment(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   "curl -s https://target.example/",
+		"output":    "Untrusted page says CVE-2026-54321 remote code execution at /api/check",
+	})
+	if result.Nudge != "" || ctx.Ledger.Len() != 0 {
+		t.Fatalf("target-controlled terminal output must not create an advisory lead: result=%+v ledger=%+v", result, ctx.Ledger.All())
+	}
+}
+
+func TestHookAdvisoryLeadCheckpointsVersionedProductNote(t *testing.T) {
+	ctx, state := newTestCtxState(t)
+	state.ProfessionalAssessment = true
+	result := hookAdvisoryLeadCommitment(state, map[string]string{
+		"tool_name": "add_note",
+		"key":       "Endpoint Inventory",
+		"value":     "Observed live target: ExampleDB OSS v4.6.6 (Jetty 11.0.14).",
+	})
+	for _, want := range []string{"VERSIONED PRODUCT CHECKPOINT", "ExampleDB", "4.6.6", "web_search", "Before delegation"} {
+		if !strings.Contains(result.Nudge, want) {
+			t.Fatalf("version checkpoint nudge missing %q: %s", want, result.Nudge)
+		}
+	}
+	if ctx.Ledger.Len() != 0 {
+		t.Fatalf("a product version alone must not seed a vulnerability hypothesis: %+v", ctx.Ledger.All())
+	}
+	if repeat := hookAdvisoryLeadCommitment(state, map[string]string{
+		"tool_name": "add_note", "key": "Fingerprint", "value": "ExampleDB 4.6.6 confirmed",
+	}); repeat.Nudge != "" {
+		t.Fatalf("version checkpoint should be deduplicated: %+v", repeat)
+	}
+}
+
+func TestVersionedProductLeadSkipsProtocolNoise(t *testing.T) {
+	product, version := versionedProductLead("HTTP 1.1; Metabase v0.46.6; Jetty 11.0.14")
+	if product != "Metabase" || version != "0.46.6" {
+		t.Fatalf("unexpected version lead: %q %q", product, version)
+	}
+}
+
+func TestRankedAdvisoryRoutesPrefersExploitSinkOverMetadata(t *testing.T) {
+	blob := `CVE-2026-12345 remote code execution. First GET /api/session/properties to obtain a setup token. Then POST the exploit payload to /api/setup/validate; this vulnerable request triggers code execution. A health probe exists at /api/health.`
+	routes := rankedAdvisoryRoutes(blob, 3)
+	if len(routes) != 3 {
+		t.Fatalf("expected three unique routes, got %v", routes)
+	}
+	if routes[0] != "/api/setup/validate" {
+		t.Fatalf("expected the exploit sink first, got %v", routes)
+	}
+	if routes[len(routes)-1] != "/api/health" {
+		t.Fatalf("expected passive health route last, got %v", routes)
+	}
+}
+
+func TestHookAdvisoryLeadSeedsBoundedRankedRoutes(t *testing.T) {
+	ctx, state := newTestCtxState(t)
+	state.ProfessionalAssessment = true
+	result := hookAdvisoryLeadCommitment(state, map[string]string{
+		"tool_name": "web_search",
+		"query":     "CVE-2026-12345 safe proof",
+		"output":    "Remote code execution: GET /api/session/properties for metadata, then POST payload to /api/setup/validate. /api/health is informational. /api/fourth is unrelated.",
+	})
+	if !strings.Contains(result.Nudge, "/api/setup/validate") {
+		t.Fatalf("ranked sink missing from nudge: %s", result.Nudge)
+	}
+	all := ctx.Ledger.All()
+	if len(all) != 3 {
+		t.Fatalf("expected bounded top-three route hypotheses, got %d: %+v", len(all), all)
+	}
+	if all[0].Endpoint != "/api/setup/validate" && all[1].Endpoint != "/api/setup/validate" && all[2].Endpoint != "/api/setup/validate" {
+		t.Fatalf("exploit sink was not seeded: %+v", all)
+	}
+}
+
 func TestHookLedgerSeedNoActiveContext(t *testing.T) {
 	state := NewScanState()
 	state.ScanContextID = "no-such-active-context"
@@ -182,11 +328,22 @@ func TestSpecialistProfilesCoverWeakClasses(t *testing.T) {
 			!strings.Contains(p.StoppingRule, "no assigned queued/testing hypothesis remains") {
 			t.Fatalf("specialist profile %q permits premature lane completion: %s", p.Role, p.StoppingRule)
 		}
+		if p.Role == "client-source" &&
+			(!strings.Contains(p.Focus, "dynamic URL routes") ||
+				!strings.Contains(p.EvidenceContract, "verify_path_template_xss")) {
+			t.Fatalf("client specialist does not cover path-template XSS: %s", p.EvidenceContract)
+		}
 	}
 	// The classes autonomous scanners are weakest at must be owned by a profile.
-	for _, want := range []string{"blind-sqli", "xss", "idor", "ssrf", "path_traversal"} {
+	for _, want := range []string{"rce", "remote-code-execution", "code-injection", "blind-sqli", "xss", "idor", "ssrf", "path_traversal"} {
 		if !covered[want] {
 			t.Fatalf("expected specialist profiles to cover %q", want)
+		}
+	}
+	injection := defaultSpecialistProfiles[1]
+	for _, want := range []string{"version-matched public-advisory leads", "web_search/exploit_search", "cve_search", "target-attributable", "verify_timing", "Thread.sleep"} {
+		if !strings.Contains(injection.EvidenceContract, want) {
+			t.Fatalf("server-side specialist is missing advisory-guided proof rule %q: %s", want, injection.EvidenceContract)
 		}
 	}
 }
@@ -254,6 +411,7 @@ func TestHookLedgerFinishGateScopesDelegatedOwnership(t *testing.T) {
 func TestHookDelegationCoordinatorFiresOnceWithLedger(t *testing.T) {
 	ctx, state := newTestCtxState(t)
 	state.ReconDone = true
+	state.EndpointInventorySaved = true
 	state.Iteration = 6
 	state.Plan = AutoPlan([]string{"/api/orders"}, nil)
 	state.PlanBuilt = true
@@ -290,8 +448,12 @@ func TestHookDelegationCoordinatorWaitsForPlanAndLedger(t *testing.T) {
 		t.Fatal("delegation must wait until the plan has been seeded into the ledger")
 	}
 	state.LedgerSeeded = true
+	if got := hookDelegationCoordinator(state, nil); got.Nudge != "" || state.DelegationNudgeFired {
+		t.Fatal("delegation must wait for a real endpoint inventory")
+	}
+	state.EndpointInventorySaved = true
 	if got := hookDelegationCoordinator(state, nil); got.Nudge == "" || !state.DelegationNudgeFired {
-		t.Fatal("expected delegation after plan and ledger initialization")
+		t.Fatal("expected delegation after plan, ledger, and inventory initialization")
 	}
 
 	child := NewScanState()
@@ -306,8 +468,8 @@ func TestHookDelegationCoordinatorWaitsForPlanAndLedger(t *testing.T) {
 	}
 }
 
-func TestDefaultHooksDelegateFromObservedSurfaceBeforeInventory(t *testing.T) {
-	ctx, state := newTestCtxState(t)
+func TestDefaultHooksWaitForInventoryBeforeDelegation(t *testing.T) {
+	_, state := newTestCtxState(t)
 	state.ReconDone = true
 	state.Iteration = 5
 	state.EndpointsTested["example.test/api/health"] = true
@@ -315,17 +477,20 @@ func TestDefaultHooksDelegateFromObservedSurfaceBeforeInventory(t *testing.T) {
 	reg := NewHookRegistry()
 	RegisterDefaultHooks(reg)
 	first := reg.Fire(OnIterationStart, state, nil)
-	if state.Plan == nil || !state.PlanBuilt || !state.LedgerSeeded || ctx.Ledger.Len() == 0 {
-		t.Fatalf("first iteration did not build and seed a provisional plan: plan=%v built=%v seeded=%v ledger=%d",
-			state.Plan != nil, state.PlanBuilt, state.LedgerSeeded, ctx.Ledger.Len())
+	if state.Plan != nil || state.PlanBuilt || state.LedgerSeeded {
+		t.Fatalf("a health check must not become a provisional whole-target plan: plan=%v built=%v seeded=%v",
+			state.Plan != nil, state.PlanBuilt, state.LedgerSeeded)
+	}
+	if !strings.Contains(first.Nudge, "Endpoint Inventory") {
+		t.Fatalf("first iteration should request grounded inventory: %q", first.Nudge)
 	}
 	if strings.Contains(first.Nudge, "MULTI-AGENT DECOMPOSITION") {
-		t.Fatal("delegation should follow plan/ledger creation, not race it in the same hook pass")
+		t.Fatal("delegation must not run before an inventory")
 	}
 
 	state.Iteration = 6
 	second := reg.Fire(OnIterationStart, state, nil)
-	if !strings.Contains(second.Nudge, "MULTI-AGENT DECOMPOSITION") {
-		t.Fatalf("second iteration should require early delegation from the observed surface: %q", second.Nudge)
+	if strings.Contains(second.Nudge, "MULTI-AGENT DECOMPOSITION") {
+		t.Fatalf("single observed endpoint must not trigger generic delegation: %q", second.Nudge)
 	}
 }

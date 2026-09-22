@@ -103,3 +103,15 @@ Do not point these reproduction requests or active scans at third-party systems.
 Add future targets only when their advisory, vulnerable version, fixed version,
 container digest, reachable configuration, and positive/control behavior can all
 be independently reproduced.
+
+The [Grafana 8.2.2 two-CVE fixture](grafana-dual/README.md) extends this first
+regression to two independent real-world bug classes (file-read traversal and
+browser-executed XSS) with a paired 8.2.7 fixed control. Its separate compose
+stack and manifest leave the original single-CVE baseline intact.
+
+The [Metabase 0.46.6 RCE fixture](metabase-rce/README.md) adds a real
+pre-authentication, blind server-side code-execution regression with Metabase
+0.46.6.4 as the patched control. Its target ports are loopback-only; outbound
+connectivity exists solely so the disposable target can generate a harmless
+OAST proof. The paired safe Java-sleep oracle and Xalgorix's `verify_timing`
+path also exercise blind proof without relying on target egress.

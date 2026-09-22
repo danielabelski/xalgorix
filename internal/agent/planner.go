@@ -398,8 +398,9 @@ func FormatGaps(gaps []CoverageGap) string {
 // endpoints may be empty (pure black-box): the plan then covers the methodology
 // phases as whole-target tasks, which the model refines once it discovers
 // surface. detectedTechs nudges the tech-specific classes (e.g. java → ssti).
-func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
+func AutoPlan(endpoints []string, detectedTechs map[string]bool, authAvailable ...bool) *Plan {
 	p := NewPlan()
+	hasAuthContext := len(authAvailable) == 0 || authAvailable[0]
 
 	// Phase 1-2: recon is a prerequisite for everything. Even with a seeded
 	// surface, live fingerprinting confirms the surface is reachable and
@@ -454,27 +455,44 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 		p.add(t)
 	}
 
-	// Phase 5: auth/session testing when auth material exists (the agent knows
-	// this from target auth / seeded surface; the plan includes it so it isn't
-	// dropped). Depends on recon.
+	// Phase 5: always retain a bounded anonymous authentication-control check.
+	// When the operator supplied a real session/account, this becomes the full
+	// session-testing lane. Otherwise the plan explicitly forbids credential
+	// invention and records role-dependent work as unavailable.
+	authTitle := "Authentication & session testing (login bypass, JWT, session fixation)"
+	authNotes := "Use the operator-provided or ingested authenticated context."
+	if !hasAuthContext {
+		authTitle = "Anonymous authentication controls (login/reset/signup availability; no credential guessing)"
+		authNotes = "No operator-provided account or session. Test concrete anonymous controls once; do not spray passwords, create accounts, or crack hashes."
+	}
 	p.add(&Task{
 		ID:        "auth-session",
-		Title:     "Authentication & session testing (login bypass, JWT, session fixation)",
+		Title:     authTitle,
 		Phase:     5,
 		VulnClass: "auth",
 		Status:    TaskPending,
 		DependsOn: []string{"recon"},
+		Notes:     authNotes,
 		Origin:    "auto",
 	})
 
-	// Phase 8: IDOR / broken access control (the high-value post-auth class).
+	// Phase 8: IDOR / broken access control requires at least one legitimate
+	// role baseline. Do not let a mandatory pending task turn a credential-less
+	// black-box run into password spraying or unauthorized account creation.
+	idorStatus := TaskPending
+	idorNotes := ""
+	if !hasAuthContext {
+		idorStatus = TaskSkipped
+		idorNotes = "Skipped automatically: no operator-provided or ingested account/session exists for a legitimate role baseline."
+	}
 	p.add(&Task{
 		ID:        "idor",
 		Title:     "IDOR / broken access control (horizontal + vertical)",
 		Phase:     8,
 		VulnClass: "idor",
-		Status:    TaskPending,
+		Status:    idorStatus,
 		DependsOn: []string{"recon", "auth-session"},
+		Notes:     idorNotes,
 		Origin:    "auto",
 	})
 

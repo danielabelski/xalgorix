@@ -31,6 +31,11 @@ func TestSystemPromptIncludesCollectableMultiAgentWorkflow(t *testing.T) {
 
 	for _, expected := range []string{
 		"## Multi-Agent Coordinator",
+		"verify_path_traversal",
+		"verify_timing",
+		"curl --path-as-is",
+		"PATH-BASED XSS",
+		"verify_path_template_xss",
 		"ONE wave",
 		"3 delegated agents total for the entire scan",
 		"NON-OVERLAPPING specialists",
@@ -46,6 +51,9 @@ func TestSystemPromptIncludesCollectableMultiAgentWorkflow(t *testing.T) {
 	if strings.Contains(prompt, "%!") {
 		t.Fatalf("prompt contains fmt diagnostic, likely a placeholder/argument mismatch")
 	}
+	if strings.Contains(prompt, "Minimum 50 iterations") {
+		t.Fatal("root prompt must not force a fixed iteration count ahead of proven findings")
+	}
 }
 
 func TestBuildDelegatedTaskInstructionEnforcesProfessionalLaneExhaustion(t *testing.T) {
@@ -59,6 +67,8 @@ func TestBuildDelegatedTaskInstructionEnforcesProfessionalLaneExhaustion(t *test
 		"owner sub-injection",
 		"Do not spawn or delegate additional agents",
 		"Do not stop after the first finding",
+		"do not guess or spray passwords",
+		"source maps are route/sink discovery material",
 		"claim_next_hypothesis",
 		"report every distinct proven vulnerability",
 		"read_ledger again",
@@ -131,6 +141,14 @@ func TestProfessionalPromptRequiresDepthAndCompleteCoverage(t *testing.T) {
 		"uncovered attack surface is a miss",
 		"endpoint × vulnerability-class ledger",
 		"continue after every finding",
+		"web_search/exploit_search",
+		"cve_search",
+		"RCE and code/expression/JNDI/JDBC injection",
+		"Never report the banner/advisory itself without live exploit proof",
+		"source maps as route/sink discovery material",
+		"plugin/module IDs from live bootstrap data",
+		"short gap-driven content-discovery pass",
+		"Run ffuf with -noninteractive and a hard -maxtime",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("professional prompt missing %q", want)
@@ -138,6 +156,61 @@ func TestProfessionalPromptRequiresDepthAndCompleteCoverage(t *testing.T) {
 	}
 	if strings.Contains(prompt, "fully exploiting ONE real weakness wins the bounty") {
 		t.Fatal("professional prompt retained the single-finding objective")
+	}
+	for _, forbidden := range []string{
+		"Capturing a flag (CTF)",
+		"DO NOT SKIP ANY PHASE",
+		"Spend 70% of time here",
+		"MANDATORY Skill Loading Rules",
+		"at LEAST 5 different bypass techniques",
+	} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("professional prompt retained CTF/exhaustive checklist text %q", forbidden)
+		}
+	}
+	if !strings.Contains(prompt, "Knowledge skills — load selectively") {
+		t.Fatal("professional prompt missing evidence-based skill-use rule")
+	}
+}
+
+func TestProfessionalPromptDoesNotInventAuthenticationPrerequisites(t *testing.T) {
+	agent := &Agent{
+		cfg:      &config.Config{RateLimitRPS: 2},
+		registry: tools.NewRegistry(),
+	}
+	prompt := agent.buildSystemPrompt(
+		[]string{"https://example.test"},
+		"Perform a full professional assessment; this is not a CTF.",
+		scanctx.RequestRatePolicy{MaxRPS: 2, Source: "test"},
+	)
+	for _, want := range []string{
+		"operator supplied no account or session",
+		"do not guess or spray default passwords",
+		"Mark role-dependent authorization lanes skipped/blocked for missing prerequisites",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("professional prompt missing authentication-prerequisite rule %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"Test for default credentials: admin/admin",
+		"If the target requires email verification, ALWAYS use agentmail",
+	} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("professional prompt retained unconditional credential workflow %q", forbidden)
+		}
+	}
+}
+
+func TestExplicitCTFPromptKeepsSpecializedChecklist(t *testing.T) {
+	agent := &Agent{cfg: &config.Config{RateLimitRPS: 2}, registry: tools.NewRegistry()}
+	prompt := agent.buildSystemPrompt(
+		[]string{"https://example.test"},
+		"Solve this CTF and retrieve FLAG{...}.",
+		scanctx.RequestRatePolicy{MaxRPS: 2, Source: "test"},
+	)
+	if !strings.Contains(prompt, "Capturing a flag (CTF)") {
+		t.Fatal("explicit CTF prompt lost its specialized checklist")
 	}
 }
 
@@ -174,6 +247,30 @@ func TestProfessionalPromptKeepsLocalScratchInsideWorkspaceTmp(t *testing.T) {
 	}
 }
 
+func TestProfessionalPromptPreservesAuthoritativeRequestAndOASTClass(t *testing.T) {
+	agent := &Agent{
+		cfg:      &config.Config{RateLimitRPS: 2},
+		registry: tools.NewRegistry(),
+	}
+	prompt := agent.buildSystemPrompt(
+		[]string{"https://example.test"},
+		"Perform a full professional assessment; this is not a CTF.",
+		scanctx.RequestRatePolicy{MaxRPS: 2, Source: "test"},
+	)
+	for _, want := range []string{
+		"authoritative request byte-for-byte",
+		"escaped Unicode/newlines",
+		"do not reconstruct a multi-line exploit",
+		"RUNSCRIPT/URL/XML/webhook/database fetch",
+		"not code execution",
+		"exact callback-bearing OS/runtime/template payload",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("professional prompt missing advisory/OAST precision rule %q", want)
+		}
+	}
+}
+
 func TestBenchmarkPromptForbidsHostAssistedEvidence(t *testing.T) {
 	agent := &Agent{
 		cfg:               &config.Config{RateLimitRPS: 2},
@@ -203,7 +300,7 @@ func TestBenchmarkPromptForbidsHostAssistedEvidence(t *testing.T) {
 func TestWhiteboxGuidanceText(t *testing.T) {
 	const root = "/tmp/src"
 
-	bridge := []string{"claim_next_hypothesis", "probe_hypothesis", "verify_sqli", "verify_ssti", "verify_xss", "verify_oob", "seeded"}
+	bridge := []string{"claim_next_hypothesis", "probe_hypothesis", "verify_sqli", "verify_ssti", "verify_xss", "verify_oob", "verify_timing", "seeded"}
 	for _, mode := range []CodeScanMode{CodeScanNone, CodeScanProvision} {
 		g := whiteboxGuidanceText(mode, root, "127.0.0.1:8080")
 		if !strings.Contains(g, root) {
@@ -224,7 +321,7 @@ func TestWhiteboxGuidanceText(t *testing.T) {
 	// Source-review mode has NO live target: it must NOT push live-only tools,
 	// but should retain the static code_search methodology.
 	rev := whiteboxGuidanceText(CodeScanReview, root, "")
-	for _, unwanted := range []string{"probe_hypothesis", "verify_sqli", "verify_ssti", "verify_xss", "verify_oob"} {
+	for _, unwanted := range []string{"probe_hypothesis", "verify_sqli", "verify_ssti", "verify_xss", "verify_oob", "verify_timing"} {
 		if strings.Contains(rev, unwanted) {
 			t.Errorf("source-review guidance must NOT mention live-only tool %q", unwanted)
 		}

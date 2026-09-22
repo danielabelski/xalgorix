@@ -252,6 +252,11 @@ func (p *Policy) Check(canonical string) error {
 //
 // toolName is the namespaced operation (e.g. "fileedit.replace",
 // "python_action") used in both the log line and the returned error.
+// The active ScanContext.ScanDir is also a trusted per-scan write root. It may
+// intentionally live outside the process-global Data_Dir (for example the
+// loopback benchmark runner uses repo-relative tmp/ workspaces), and therefore
+// cannot be baked into the singleton Policy at startup.
+//
 // On success the returned string is the canonical, allow-list-cleared
 // path the caller can hand directly to os.Open / os.MkdirAll / etc.
 //
@@ -263,6 +268,9 @@ func (p *Policy) CheckResolve(sc *scanctx.ScanContext, toolName, raw string) (st
 		return "", err
 	}
 	if err := p.Check(canonical); err != nil {
+		if isWithinActiveScanDir(sc, canonical) {
+			return canonical, nil
+		}
 		// Promote into a fully-populated PathRejectError, count it,
 		// and emit the WARN log line described by R5.6 / R9.1.
 		var rej *PathRejectError
@@ -282,6 +290,18 @@ func (p *Policy) CheckResolve(sc *scanctx.ScanContext, toolName, raw string) (st
 		return "", rej
 	}
 	return canonical, nil
+}
+
+func isWithinActiveScanDir(sc *scanctx.ScanContext, canonical string) bool {
+	if sc == nil || strings.TrimSpace(sc.ScanDir) == "" {
+		return false
+	}
+	root, err := canonicalize(sc.ScanDir)
+	if err != nil {
+		return false
+	}
+	canonical = filepath.Clean(canonical)
+	return canonical == root || strings.HasPrefix(canonical, root+string(filepath.Separator))
 }
 
 // CheckRead is the READ entry point used by Filesystem_Tools that need

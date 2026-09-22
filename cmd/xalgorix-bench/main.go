@@ -38,20 +38,29 @@ func main() {
 	sourceDir := flag.String("source-dir", "", "optional checked-out source tree for a white-box real-world scan")
 	resultJSON := flag.String("result-json", "", "write real-world score and full findings as private JSON (mode 0600)")
 	runs := flag.Int("runs", 1, "independent sequential runs for a real-world target (1-10; default 1)")
+	preflightOnly := flag.Bool("preflight-only", false, "validate a real-world fixture's health/version fingerprint without making model calls")
 	flag.Parse()
 
 	cfg := config.Get()
-	if err := cfg.Validate(); err != nil {
-		fmt.Fprintln(os.Stderr, "xalgorix-bench: config invalid — set XALGORIX_LLM and XALGORIX_API_KEY (or XALGORIX_LLM_PROFILE):", err)
+	if *preflightOnly && *manifestPath == "" {
+		fmt.Fprintln(os.Stderr, "xalgorix-bench: -preflight-only requires -manifest and -target-id")
 		os.Exit(2)
+	}
+	if !*preflightOnly {
+		// Resolve configuration only for model-backed runs. A fixture preflight is
+		// deliberately usable on a clean machine without provider credentials.
+		if err := cfg.Validate(); err != nil {
+			fmt.Fprintln(os.Stderr, "xalgorix-bench: config invalid — set XALGORIX_LLM and XALGORIX_API_KEY (or XALGORIX_LLM_PROFILE):", err)
+			os.Exit(2)
+		}
 	}
 
 	if *manifestPath != "" {
-		runRealWorld(*manifestPath, *targetID, *targetURL, *sourceDir, *resultJSON, *task, *timeout, *runs)
+		runRealWorld(*manifestPath, *targetID, *targetURL, *sourceDir, *resultJSON, *task, *timeout, *runs, *preflightOnly)
 		return
 	}
-	if *targetID != "" || *targetURL != "" || *sourceDir != "" || *resultJSON != "" || *runs != 1 {
-		fmt.Fprintln(os.Stderr, "xalgorix-bench: -target-id, -target-url, -source-dir, -result-json, and -runs require -manifest")
+	if *targetID != "" || *targetURL != "" || *sourceDir != "" || *resultJSON != "" || *runs != 1 || *preflightOnly {
+		fmt.Fprintln(os.Stderr, "xalgorix-bench: -target-id, -target-url, -source-dir, -result-json, -runs, and -preflight-only require -manifest")
 		os.Exit(2)
 	}
 
@@ -75,11 +84,86 @@ type realWorldRunEvidence struct {
 	ElapsedMS   int64                     `json:"elapsed_ms"`
 	TimedOut    bool                      `json:"timed_out,omitempty"`
 	Error       string                    `json:"error,omitempty"`
+	Diagnostics realWorldRunDiagnostics   `json:"diagnostics"`
 	Score       realbench.Result          `json:"score"`
 	Findings    []reporting.Vulnerability `json:"findings"`
 }
 
-func runRealWorld(manifestPath, targetID, targetURL, sourceDir, resultPath, instruction string, timeout time.Duration, runs int) {
+// realWorldRunDiagnostics keeps just enough aggregate event data to diagnose a
+// slow or unstable workflow. It intentionally stores no arguments, response
+// bodies, auth material, or model prose; the private evidence file therefore
+// gains timing/termination visibility without becoming a second raw scan log.
+type realWorldRunDiagnostics struct {
+	EventCounts                    map[string]int `json:"event_counts,omitempty"`
+	ToolCallCounts                 map[string]int `json:"tool_call_counts,omitempty"`
+	ToolErrorCounts                map[string]int `json:"tool_error_counts,omitempty"`
+	SuccessfulReports              int            `json:"successful_reports"`
+	RejectedReports                int            `json:"rejected_reports"`
+	DuplicateReports               int            `json:"duplicate_reports"`
+	FirstSuccessfulReportElapsedMS int64          `json:"first_successful_report_elapsed_ms,omitempty"`
+	FinishedEvents                 int            `json:"finished_events"`
+	AbortedEvents                  int            `json:"aborted_events"`
+	AbortReasons                   map[string]int `json:"abort_reasons,omitempty"`
+	StoppedAfterExpectedMatches    bool           `json:"stopped_after_expected_matches,omitempty"`
+	started                        time.Time
+}
+
+func newRealWorldRunDiagnostics(started time.Time) *realWorldRunDiagnostics {
+	return &realWorldRunDiagnostics{
+		EventCounts:     make(map[string]int),
+		ToolCallCounts:  make(map[string]int),
+		ToolErrorCounts: make(map[string]int),
+		AbortReasons:    make(map[string]int),
+		started:         started,
+	}
+}
+
+func (d *realWorldRunDiagnostics) observe(ev agent.Event) {
+	if d == nil {
+		return
+	}
+	d.EventCounts[ev.Type]++
+	switch ev.Type {
+	case "tool_call":
+		d.ToolCallCounts[ev.ToolName]++
+	case "tool_result":
+		if ev.ToolResult.Error != "" {
+			d.ToolErrorCounts[ev.ToolName]++
+			if ev.ToolName == "report_vulnerability" {
+				d.RejectedReports++
+			}
+			return
+		}
+		if ev.ToolName == "report_vulnerability" {
+			output := strings.ToUpper(ev.ToolResult.Output)
+			if strings.Contains(output, "REJECTED") {
+				d.ToolErrorCounts[ev.ToolName]++
+				d.RejectedReports++
+				return
+			}
+			if strings.Contains(output, "DUPLICATE") {
+				d.DuplicateReports++
+				return
+			}
+			d.SuccessfulReports++
+			if d.FirstSuccessfulReportElapsedMS == 0 {
+				d.FirstSuccessfulReportElapsedMS = time.Since(d.started).Milliseconds()
+			}
+		}
+	case "finished":
+		d.FinishedEvents++
+		if ev.Aborted {
+			d.AbortedEvents++
+			reason := strings.TrimSpace(ev.AbortReason)
+			if reason == "" {
+				reason = "unspecified"
+			}
+			d.AbortReasons[reason]++
+		}
+	}
+}
+
+func runRealWorld(manifestPath, targetID, targetURL, sourceDir, resultPath, instruction string, timeout time.Duration, runs int, preflightOnly bool) {
 	if targetID == "" {
 		fmt.Fprintln(os.Stderr, "xalgorix-bench: -target-id is required with -manifest")
 		os.Exit(2)
@@ -105,6 +189,20 @@ func runRealWorld(manifestPath, targetID, targetURL, sourceDir, resultPath, inst
 		fmt.Fprintln(os.Stderr, "xalgorix-bench: -runs must be between 1 and 10")
 		os.Exit(2)
 	}
+	preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 12*time.Second)
+	preflight, err := realbench.PreflightTarget(preflightCtx, target, targetURL)
+	preflightCancel()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xalgorix-bench: target preflight failed:", err)
+		os.Exit(1)
+	}
+	if preflight.URL != "" {
+		fmt.Fprintf(os.Stderr, "xalgorix-bench: target preflight passed — %s returned HTTP %d with the expected fingerprint\n",
+			preflight.URL, preflight.StatusCode)
+	}
+	if preflightOnly {
+		return
+	}
 
 	fmt.Fprintf(os.Stderr, "xalgorix-bench: real-world target %s (%s %s) at %s — %d independent run(s)\n",
 		target.ID, target.Product, target.Version, targetURL, runs)
@@ -123,7 +221,10 @@ func runRealWorld(manifestPath, targetID, targetURL, sourceDir, resultPath, inst
 		}
 		fmt.Fprintf(os.Stderr, "xalgorix-bench: run %d/%d (%s)\n", run, runs, scanID)
 		started := time.Now().UTC()
-		findings, scanErr := realScan(instruction)(ctx, targetURL, sourceDir, scanID, bench.Auth{})
+		diagnostics := newRealWorldRunDiagnostics(started)
+		findings, scanErr := realScanWithDiagnosticsAndCompletion(instruction, diagnostics, func(findings []reporting.Vulnerability) bool {
+			return vulnerableTargetComplete(suite, target, findings)
+		})(ctx, targetURL, sourceDir, scanID, bench.Auth{})
 		timedOut := ctx.Err() == context.DeadlineExceeded
 		cancel()
 
@@ -135,6 +236,7 @@ func runRealWorld(manifestPath, targetID, targetURL, sourceDir, resultPath, inst
 			GeneratedAt: time.Now().UTC(),
 			ElapsedMS:   time.Since(started).Milliseconds(),
 			TimedOut:    timedOut,
+			Diagnostics: *diagnostics,
 			Score:       result,
 			Findings:    findings,
 		}
@@ -215,6 +317,22 @@ func filterChallenges(all []bench.Challenge, csv string) []bench.Challenge {
 // and returns the findings it produced. Mirrors the production scan wiring
 // (internal/web/scan_session.go) minus the dashboard plumbing.
 func realScan(instruction string) bench.ScanFunc {
+	return realScanWithDiagnostics(instruction, nil)
+}
+
+func realScanWithDiagnostics(instruction string, diagnostics *realWorldRunDiagnostics) bench.ScanFunc {
+	return realScanWithDiagnosticsAndCompletion(instruction, diagnostics, nil)
+}
+
+// realScanWithDiagnosticsAndCompletion optionally stops a targeted vulnerable
+// benchmark as soon as every manifest expectation has a proof-bearing match.
+// A real-world manifest is a targeted recall corpus rather than a declaration
+// that every product vulnerability is known, so making the model finish an
+// unrelated full-assessment plan after the score is already complete wastes
+// provider time and can turn a successful run into a wall-clock failure.
+// Fixed controls never use this shortcut: they must run to their ordinary
+// completion/deadline so a known signature has a chance to regress.
+func realScanWithDiagnosticsAndCompletion(instruction string, diagnostics *realWorldRunDiagnostics, completion func([]reporting.Vulnerability) bool) bench.ScanFunc {
 	return func(ctx context.Context, target, sourceDir, scanID string, auth bench.Auth) ([]reporting.Vulnerability, error) {
 		cfg := config.Get()
 
@@ -242,9 +360,21 @@ func realScan(instruction string) bench.ScanFunc {
 		// and prefixed with the scan id so a multi-challenge run stays readable.
 		events := make(chan agent.Event, 512)
 		done := make(chan struct{})
+		expectationsMatched := make(chan struct{}, 1)
 		go func() {
 			defer close(done)
 			for ev := range events {
+				diagnostics.observe(ev)
+				if completion != nil && ev.Type == "tool_result" && ev.ToolName == "report_vulnerability" && ev.ToolResult.Error == "" &&
+					completion(reporting.GetVulnerabilitiesForContext(sc.ID)) {
+					if diagnostics != nil {
+						diagnostics.StoppedAfterExpectedMatches = true
+					}
+					select {
+					case expectationsMatched <- struct{}{}:
+					default:
+					}
+				}
 				switch ev.Type {
 				case "tool_call":
 					fmt.Fprintf(os.Stderr, "  [ev %s] → %s %s\n", scanID, ev.ToolName, briefArgs(ev.ToolArgs))
@@ -301,6 +431,10 @@ func realScan(instruction string) bench.ScanFunc {
 		}()
 		select {
 		case <-runDone:
+		case <-expectationsMatched:
+			fmt.Fprintf(os.Stderr, "  [bench] %s → all manifest expectations have proof-bearing matches; stopping targeted run\n", scanID)
+			ag.Stop()
+			<-runDone
 		case <-ctx.Done():
 			fmt.Fprintf(os.Stderr, "  [bench] %s → deadline reached, stopping scan\n", scanID)
 			ag.Stop()
@@ -319,14 +453,22 @@ func realScan(instruction string) bench.ScanFunc {
 	}
 }
 
+func vulnerableTargetComplete(suite realbench.Suite, target realbench.Target, findings []reporting.Vulnerability) bool {
+	if target.Mode != realbench.ModeVulnerable {
+		return false
+	}
+	result := realbench.Score(suite, target, findings)
+	return result.Expected > 0 && result.Matched == result.Expected
+}
+
 // isDiagResultTool reports whether a tool's successful result is worth logging
 // in full for diagnosis (verifiers, reporting, OOB polling, authz) — as opposed
 // to noisy recon output (curl/ffuf/nuclei) whose call args already tell the
 // story.
 func isDiagResultTool(name string) bool {
 	switch name {
-	case "verify_xss", "verify_sqli", "verify_ssti", "verify_oob",
-		"report_vulnerability", "oob_callback", "probe_hypothesis", "authz_matrix":
+	case "verify_xss", "verify_sqli", "verify_ssti", "verify_path_traversal", "verify_oob", "verify_timing",
+		"report_vulnerability", "oob_callback", "probe_hypothesis", "authz_matrix", "finish":
 		return true
 	}
 	return false

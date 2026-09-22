@@ -98,6 +98,26 @@ func TestAutoPlanBlackBox(t *testing.T) {
 	}
 }
 
+func TestAutoPlanWithoutAuthSkipsRoleDependentIDOR(t *testing.T) {
+	p := AutoPlan([]string{"/login", "/public/api"}, nil, false)
+
+	auth := p.Get("auth-session")
+	if auth == nil || auth.Status != TaskPending {
+		t.Fatalf("bounded anonymous authentication task = %+v, want pending", auth)
+	}
+	if !strings.Contains(auth.Title, "no credential guessing") {
+		t.Fatalf("anonymous auth task does not constrain credential guessing: %+v", auth)
+	}
+
+	idor := p.Get("idor")
+	if idor == nil || idor.Status != TaskSkipped {
+		t.Fatalf("credential-less IDOR task = %+v, want skipped", idor)
+	}
+	if !strings.Contains(idor.Notes, "no operator-provided or ingested account/session") {
+		t.Fatalf("credential-less IDOR skip lacks prerequisite rationale: %+v", idor)
+	}
+}
+
 // NextTasks returns pending tasks whose dependencies are satisfied, ordered by
 // phase. Initially only recon is ready (everything depends on it).
 func TestNextTasksDependencyOrder(t *testing.T) {
@@ -400,22 +420,19 @@ https://ok.ru/profile/123`
 	}
 }
 
-func TestHookPlannerSeedsFromObservedRequestsBeforeInventory(t *testing.T) {
+func TestHookPlannerWaitsForEndpointInventory(t *testing.T) {
 	state := NewScanState()
 	state.ReconDone = true
+	state.Iteration = 5
 	state.EndpointsTested["example.test/api/health"] = true
 	state.EndpointsTested["example.test/login"] = true
 
 	result := hookPlanner(state, nil)
-	if state.Plan == nil || !state.PlanBuilt {
-		t.Fatal("observed live requests should seed the plan before an explicit inventory note")
+	if state.Plan != nil || state.PlanBuilt || len(state.DiscoveredEndpoints) != 0 {
+		t.Fatal("two observed requests must not become a complete attack-surface plan")
 	}
-	want := []string{"example.test/api/health", "example.test/login"}
-	if !slices.Equal(state.DiscoveredEndpoints, want) {
-		t.Fatalf("provisional endpoints = %v, want %v", state.DiscoveredEndpoints, want)
-	}
-	if result.Nudge == "" || !strings.Contains(result.Nudge, "Active Plan") {
-		t.Fatalf("new provisional plan should be surfaced to the coordinator: %q", result.Nudge)
+	if !strings.Contains(result.Nudge, "Endpoint Inventory") {
+		t.Fatalf("planner should request a grounded route inventory: %q", result.Nudge)
 	}
 }
 
