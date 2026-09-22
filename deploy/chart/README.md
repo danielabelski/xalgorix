@@ -2,7 +2,7 @@
 
 ![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 4.6.91](https://img.shields.io/badge/AppVersion-4.6.91-informational?style=flat-square)
 
-A basic Helm chart for deploying a containerized app with ingress and Gateway API support
+Xalgorix autonomous AI penetration testing platform (dashboard on port 9137, persistent /data volume, optional Ingress or Gateway API exposure)
 
 ## Maintainers
 
@@ -24,7 +24,7 @@ Kubernetes: `>=1.19.0-0`
 | auth.password | string | `""` | Dashboard login password. |
 | auth.username | string | `""` | Dashboard login username. |
 | autoscaling | object | `{"enabled":false,"maxReplicas":10,"minReplicas":1,"targetCPUUtilizationPercentage":80}` | Horizontal pod autoscaler for the deployment. |
-| autoscaling.enabled | bool | `false` | Whether to create a HorizontalPodAutoscaler instead of a fixed replica count. |
+| autoscaling.enabled | bool | `false` | Whether to create a HorizontalPodAutoscaler instead of a fixed replica count. WARNING: Xalgorix is stateful (scans, reports and the persisted settings file live under /data). Scaling beyond one replica is NOT supported with local persistence: the default ReadWriteOnce PVC cannot multi-attach, and even with ReadWriteMany storage each replica keeps independent scan state. Leave disabled unless you run each replica as a single shared-nothing unit. |
 | autoscaling.maxReplicas | int | `10` | Maximum number of replicas. |
 | autoscaling.minReplicas | int | `1` | Minimum number of replicas. |
 | autoscaling.targetCPUUtilizationPercentage | int | `80` | Target average CPU utilization percentage. |
@@ -70,9 +70,9 @@ Kubernetes: `>=1.19.0-0`
 | service | object | `{"port":9137,"type":"ClusterIP"}` | Service exposing the dashboard. |
 | service.port | int | `9137` | Dashboard port (the web UI listens on 9137). |
 | service.type | string | `"ClusterIP"` | Service type. |
-| serviceAccount | object | `{"annotations":{},"automount":true,"create":true,"name":""}` | Service account used by the pods. |
+| serviceAccount | object | `{"annotations":{},"automount":false,"create":true,"name":""}` | Service account used by the pods. |
 | serviceAccount.annotations | object | `{}` | Annotations added to the service account. |
-| serviceAccount.automount | bool | `true` | Whether to automatically mount the service account API credentials. |
+| serviceAccount.automount | bool | `false` | Whether to automatically mount the service account API credentials. Xalgorix never talks to the Kubernetes API; leave disabled unless a sidecar in the pod needs it. |
 | serviceAccount.create | bool | `true` | Whether a service account should be created. |
 | serviceAccount.name | string | A name generated from the full name. | Name of the service account to use. |
 | tolerations | list | `[]` | Tolerations for pod assignment. |
