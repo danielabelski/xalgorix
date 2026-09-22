@@ -1,0 +1,12 @@
+{{- if .Values.env.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "xalgorix.configMapName" . }}
+  labels:
+    {{- include "xalgorix.labels" . | nindent 4 }}
+data:
+{{- range $key, $value := .Values.env.config }}
+  {{ $key }}: {{ $value | quote }}
+{{- end }}
+{{- end }}
