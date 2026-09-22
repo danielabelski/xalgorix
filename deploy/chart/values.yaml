@@ -1,0 +1,223 @@
+# Default values for the xalgorix chart.
+# Each key is documented in helm-docs style so the comments render as
+# documentation on Artifact Hub.
+
+# -- Number of pod replicas. Ignored when `autoscaling.enabled` is true.
+replicaCount: 1
+
+# -- Container image settings.
+image:
+  # -- Image repository.
+  repository: ghcr.io/xalgord/xalgorix
+  # -- Image tag.
+  # @default -- The chart `appVersion`.
+  tag: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Names of existing secrets with registry credentials for private images.
+imagePullSecrets: []
+# - myRegistrySecret
+
+# -- Overrides the chart name in resource names.
+nameOverride: ""
+
+# -- Overrides the fully qualified app name in resource names.
+fullnameOverride: ""
+
+# -- Service account used by the pods.
+serviceAccount:
+  # -- Whether a service account should be created.
+  create: true
+  # -- Whether to automatically mount the service account API credentials.
+  automount: true
+  # -- Annotations added to the service account.
+  annotations: {}
+  # -- Name of the service account to use.
+  # @default -- A name generated from the full name.
+  name: ""
+
+# -- Annotations added to the pods.
+podAnnotations: {}
+
+# -- Extra labels added to the pods.
+podLabels: {}
+
+# -- Security context applied at the pod level.
+# The image runs as root by design (package auto-install and the Kali toolset
+# need write access to system paths); the container is the isolation boundary.
+podSecurityContext: {}
+#  fsGroup: 0
+
+# -- Security context applied to the container.
+# The bundled pentest toolset may need NET_ADMIN, NET_RAW and SYS_PTRACE, and
+# seccomp=unconfined for low-level tools (iptables, ARP spoofing, debuggers).
+securityContext: {}
+#  capabilities:
+#    add:
+#      - NET_ADMIN
+#      - NET_RAW
+#      - SYS_PTRACE
+#  seccompProfile:
+#    type: Unconfined
+
+# -- Service exposing the dashboard.
+service:
+  # -- Service type.
+  type: ClusterIP
+  # -- Dashboard port (the web UI listens on 9137).
+  port: 9137
+  # -- Container port the service routes to.
+  # @default -- The service port.
+  # targetPort: 9137
+
+# -- Dashboard credentials, rendered as XALGORIX_USERNAME and XALGORIX_PASSWORD
+# environment variables in the chart Secret. When empty, the container
+# entrypoint generates a random admin password and prints it once to the
+# container logs.
+auth:
+  # -- Dashboard login username.
+  username: ""
+  # -- Dashboard login password.
+  password: ""
+  # -- Name of an existing Secret holding the dashboard credentials. It
+  # must contain `XALGORIX_USERNAME` and `XALGORIX_PASSWORD` keys. When set,
+  # `username` and `password` are ignored and no credentials are written to
+  # the chart-managed Secret.
+  existingSecret: ""
+
+# -- Extra environment variables injected into the container.
+# - `raw`: plain key/value pairs set directly on the container; use for any
+#   `XALGORIX_*` variable without a dedicated value above.
+# - `config`: rendered into a ConfigMap and injected via `envFrom`.
+# - `secret`: rendered into a Secret and injected via `envFrom`.
+# Settings changed in the dashboard's Settings UI persist to
+# /data/.xalgorix.env and take precedence over these at startup.
+env:
+  # -- Plain key/value pairs set directly on the container.
+  raw: {}
+  #  XALGORIX_LLM: openai/gpt-5.6
+
+  # -- Key/value pairs rendered into a ConfigMap and injected via `envFrom`.
+  config: {}
+  #  XALGORIX_RATE_RPS: "5"
+
+  # -- Key/value pairs rendered into a Secret and injected via `envFrom`.
+  secret: {}
+  #  XALGORIX_API_KEY: change-me
+
+# -- Persistent volume for /data (scans, reports and the persisted settings
+# file the dashboard writes to).
+persistence:
+  # -- Create a PersistentVolumeClaim for the data volume. When disabled an
+  # emptyDir is used and data is lost on pod restart.
+  enabled: true
+  # -- Use an existing PersistentVolumeClaim instead of creating one.
+  existingClaim: ""
+  # -- Access modes for the claim.
+  accessModes:
+    - ReadWriteOnce
+  # -- Storage class for the claim.
+  # @default -- The cluster default storage class.
+  storageClass: ""
+  # -- Size of the claim.
+  size: 10Gi
+
+# -- Compute resources for the container.
+resources: {}
+#  limits:
+#    cpu: "2"
+#    memory: 4Gi
+#  requests:
+#    cpu: 500m
+#    memory: 1Gi
+
+# -- Liveness probe for the container.
+livenessProbe: {}
+#  tcpSocket:
+#    port: http
+
+# -- Readiness probe for the container.
+readinessProbe: {}
+#  tcpSocket:
+#    port: http
+
+# -- Horizontal pod autoscaler for the deployment.
+autoscaling:
+  # -- Whether to create a HorizontalPodAutoscaler instead of a fixed replica count.
+  enabled: false
+  # -- Minimum number of replicas.
+  minReplicas: 1
+  # -- Maximum number of replicas.
+  maxReplicas: 10
+  # -- Target average CPU utilization percentage.
+  targetCPUUtilizationPercentage: 80
+  # -- Target average memory utilization percentage.
+  # @default -- No memory metric is configured.
+  # targetMemoryUtilizationPercentage: 80
+
+# -- Ingress resource for exposing the dashboard.
+# Requires an ingress controller installed in the cluster. Add dashboard auth
+# before exposing the dashboard beyond loopback.
+ingress:
+  # -- Whether to create the Ingress.
+  enabled: false
+  # -- Ingress class name.
+  className: traefik
+  # -- Annotations added to the Ingress.
+  annotations: {}
+  #  kubernetes.io/tls-acme: "true"
+  #  cert-manager.io/cluster-issuer: letsencrypt-prod
+  # -- Hosts and paths served by the application.
+  hosts:
+    - host: xalgorix.local
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- TLS configuration for the Ingress.
+  tls: []
+  #  - secretName: xalgorix-tls
+  #    hosts:
+  #      - xalgorix.local
+
+# -- Gateway API HTTPRoute, an alternative to the Ingress.
+# Requires the `gateway.networking.k8s.io` CRDs and an existing Gateway.
+httproute:
+  # -- Whether to create the HTTPRoute.
+  enabled: false
+  # -- Existing Gateway to attach the route to.
+  # `name` is required when enabled; `namespace` defaults to the release namespace.
+  gateway: {}
+  #  name: my-gateway
+  #  namespace: gateway-system
+  # -- Hostname to match. A hostname prefixed with a dot (e.g. `.example.com`)
+  # matches all subdomains.
+  # @default -- Matches all traffic on the Gateway.
+  hostname: ""
+  # -- Additional hostnames to match.
+  hostnames: []
+  # -- Annotations added to the HTTPRoute.
+  annotations: {}
+  # -- Match rules for the route. An empty list matches all traffic.
+  # @default -- Matches the `/` path prefix.
+  matches:
+    - path:
+        type: PathPrefix
+        value: /
+  #  Additional match types can be combined, e.g.:
+  #  - path:
+  #      type: PathPrefix
+  #      value: /api
+  #    headers:
+  #      - type: RegularExpression
+  #        name: x-version
+  #        value: v1
+
+# -- Node labels for pod assignment.
+nodeSelector: {}
+
+# -- Tolerations for pod assignment.
+tolerations: []
+
+# -- Affinity rules for pod assignment.
+affinity: {}

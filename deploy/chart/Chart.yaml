@@ -1,0 +1,9 @@
+apiVersion: v2
+name: xalgorix
+description: A basic Helm chart for deploying a containerized app with ingress and Gateway API support
+type: application
+version: 1.0.0
+appVersion: "4.6.91"
+kubeVersion: ">=1.19.0-0"
+maintainers:
+  - name: valerianomanassero
