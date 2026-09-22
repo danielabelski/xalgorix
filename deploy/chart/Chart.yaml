@@ -1,0 +1,9 @@
+apiVersion: v2
+name: xalgorix
+description: Xalgorix autonomous AI penetration testing platform (dashboard on port 9137, persistent /data volume, optional Ingress or Gateway API exposure)
+type: application
+version: 1.0.0
+appVersion: "4.6.91"
+kubeVersion: ">=1.19.0-0"
+maintainers:
+  - name: valerianomanassero

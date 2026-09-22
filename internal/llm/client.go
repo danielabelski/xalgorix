@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,13 +41,15 @@ type StreamChunk struct {
 
 // Client is the LLM API client.
 type Client struct {
-	cfg        *config.Config
-	httpClient *http.Client
-	apiModel   string
-	provider   string // "openai", "anthropic", "google", "gemini", "deepseek", etc.
-	mu         sync.Mutex
-	totalIn    int
-	totalOut   int
+	cfg           *config.Config
+	httpClient    *http.Client
+	apiModel      string
+	provider      string // "openai", "anthropic", "google", "gemini", "deepseek", etc.
+	promptCaching bool
+	mu            sync.Mutex
+	totalIn       int
+	totalOut      int
+	totalCached   int
 	// ctx is read concurrently by chatWithRetry / ChatStream and written by
 	// SetContext. Use atomic.Value to avoid a race; loadCtx() is the only
 	// reader, storeCtx() is the only writer.
@@ -69,11 +72,51 @@ type Client struct {
 	tempOverride atomic.Value // *float64
 }
 
+// PromptTokensDetails carries detailed prompt token breakdowns (cached vs audio/etc).
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
 // TokenUsage holds cumulative token counts.
 type TokenUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens         int                  `json:"prompt_tokens"`
+	CompletionTokens     int                  `json:"completion_tokens"`
+	TotalTokens          int                  `json:"total_tokens"`
+	PromptTokensDetails  *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	CachedTokens         int                  `json:"cached_tokens,omitempty"`
+	CacheReadInputTokens int                  `json:"cache_read_input_tokens,omitempty"`
+	// HasCachedTokens is true when the provider actually reported a
+	// cached-token field in this response, so zero is never fabricated into
+	// "not reported" (or the reverse).
+	HasCachedTokens bool `json:"has_cached_tokens,omitempty"`
+}
+
+// GetCachedTokens returns the cached prompt token count from any provider-reported field.
+func (u *TokenUsage) GetCachedTokens() int {
+	if u == nil {
+		return 0
+	}
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		return u.PromptTokensDetails.CachedTokens
+	}
+	if u.CacheReadInputTokens > 0 {
+		return u.CacheReadInputTokens
+	}
+	if u.CachedTokens > 0 {
+		return u.CachedTokens
+	}
+	return 0
+}
+
+// hasAnyCachedField reports whether any provider cached-token field was present.
+func (u *TokenUsage) hasAnyCachedField() bool {
+	if u == nil {
+		return false
+	}
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		return true
+	}
+	return u.CacheReadInputTokens > 0 || u.CachedTokens > 0
 }
 
 // GetTokens returns cumulative token usage.
@@ -83,15 +126,110 @@ func (c *Client) GetTokens() (promptTokens, completionTokens, totalTokens int) {
 	return c.totalIn, c.totalOut, c.totalIn + c.totalOut
 }
 
+// GetCachedTokens returns cumulative cached prompt tokens reported by the provider.
+func (c *Client) GetCachedTokens() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.totalCached
+}
+
+// GetTokenUsage returns a copy of cumulative token usage including cached tokens.
+func (c *Client) GetTokenUsage() TokenUsage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return TokenUsage{
+		PromptTokens:     c.totalIn,
+		CompletionTokens: c.totalOut,
+		TotalTokens:      c.totalIn + c.totalOut,
+		CachedTokens:     c.totalCached,
+		HasCachedTokens:  c.totalCached > 0,
+		PromptTokensDetails: &PromptTokensDetails{
+			CachedTokens: c.totalCached,
+		},
+	}
+}
+
+// Clone returns a shallow copy of the client suitable for use by a subagent.
+// It preserves configuration, HTTP client, provider, model, rate limiter,
+// resolver, and temperature override, while giving the clone an independent
+// context holder and fresh token usage counters.
+func (c *Client) Clone() *Client {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	clone := &Client{
+		cfg:           c.cfg,
+		httpClient:    c.httpClient,
+		apiModel:      c.apiModel,
+		provider:      c.provider,
+		promptCaching: c.promptCaching,
+		rateLimiter:   c.rateLimiter,
+		resolver:      c.resolver,
+	}
+	clone.ctx.Store(ctxHolder{ctx: context.Background()})
+	if v := c.tempOverride.Load(); v != nil {
+		clone.tempOverride.Store(v)
+	}
+	return clone
+}
+
+// SetPromptCaching controls whether provider-supported non-semantic prompt caching hints are enabled.
+func (c *Client) SetPromptCaching(enabled bool) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.promptCaching = enabled
+}
+
+// IsPromptCachingEnabled reports whether prompt caching hints are enabled.
+func (c *Client) IsPromptCachingEnabled() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.promptCaching
+}
+
+// isKnownProvider reports whether candidate matches a known provider slug
+// from legacyProviderBases or the built-in catalog.
+func isKnownProvider(candidate string) bool {
+	candidate = strings.ToLower(strings.TrimSpace(candidate))
+	if candidate == "" {
+		return false
+	}
+	if _, ok := legacyProviderBases[candidate]; ok {
+		return true
+	}
+	if _, ok := providers.LookupBuiltin(candidate); ok {
+		return true
+	}
+	return false
+}
+
 // NewClient creates a new LLM client. Optional opts (such as
 // WithResolver) tune the client for catalog-aware resolution; the
 // no-option form preserves the existing legacy resolveEndpoint
 // behavior so existing callers compile unchanged.
 func NewClient(cfg *config.Config, opts ...Option) *Client {
-	apiModel := cfg.ResolveModel()
+	apiModel := ""
+	if cfg != nil {
+		apiModel = cfg.ResolveModel()
+	}
 	provider := ""
 	if idx := strings.Index(apiModel, "/"); idx >= 0 {
-		provider = strings.ToLower(apiModel[:idx])
+		candidate := strings.ToLower(apiModel[:idx])
+		if isKnownProvider(candidate) {
+			provider = candidate
+		}
+	}
+	if provider == "" && cfg != nil && strings.TrimSpace(cfg.LLMProvider) != "" {
+		provider = strings.ToLower(strings.TrimSpace(cfg.LLMProvider))
 	}
 	c := &Client{
 		cfg:        cfg,
@@ -167,10 +305,48 @@ type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+// contentField accepts the two shapes OpenAI-compatible APIs use for
+// message/delta content: a plain string (the classic form) or an array
+// of typed parts like [{"type":"text","text":"..."], which Mistral
+// returns for newer models (e.g. zai-glm-latest). Non-text parts and
+// null decode to an empty string instead of failing the whole response.
+type contentField string
+
+func (f *contentField) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*f = ""
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*f = contentField(s)
+		return nil
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(data, &parts); err != nil {
+		return err
+	}
+	var sb strings.Builder
+	for _, p := range parts {
+		if p.Type == "text" || p.Type == "" {
+			sb.WriteString(p.Text)
+		}
+	}
+	*f = contentField(sb.String())
+	return nil
+}
+
 // chatChoice represents a response choice.
 type chatChoice struct {
-	Delta   struct{ Content string } `json:"delta"`
-	Message struct{ Content string } `json:"message"`
+	Delta   struct{ Content contentField } `json:"delta"`
+	Message struct{ Content contentField } `json:"message"`
 }
 
 // chatResponse is the OpenAI-compatible response.
@@ -247,9 +423,10 @@ type geminiResponse struct {
 // in a streamed response the counts are cumulative and the final chunk
 // carries the totals.
 type geminiUsageMetadata struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
-	TotalTokenCount      int `json:"totalTokenCount"`
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
 }
 
 // geminiStreamResponse is the same structure but used for SSE streaming responses.
@@ -257,10 +434,20 @@ type geminiStreamResponse = geminiResponse
 
 // ── Anthropic types ──────────────────────────────────────────────────────────
 
+type anthropicCacheControl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+type anthropicSystemBlock struct {
+	Type         string                 `json:"type"` // "text"
+	Text         string                 `json:"text"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
+
 type anthropicRequest struct {
 	Model     string    `json:"model"`
 	Messages  []Message `json:"messages"`
-	System    string    `json:"system,omitempty"`
+	System    any       `json:"system,omitempty"` // string or []anthropicSystemBlock
 	MaxTokens int       `json:"max_tokens"`
 	Stream    bool      `json:"stream"`
 }
@@ -278,8 +465,10 @@ type anthropicMessage struct {
 	Model      string                  `json:"model"`
 	StopReason string                  `json:"stop_reason,omitempty"`
 	Usage      struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	} `json:"usage"`
 }
 
@@ -292,9 +481,17 @@ type anthropicResponse struct {
 	Index int `json:"index,omitempty"`
 	// Usage at the top level (message_delta events carry final output token count here).
 	Usage struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	} `json:"usage,omitempty"`
+}
+
+// ResolveEndpoint returns the Endpoint used for outbound requests.
+// It is useful for testing and verifying provider/model resolution without sending HTTP traffic.
+func (c *Client) ResolveEndpoint(ctx context.Context) (Endpoint, error) {
+	return c.resolveRequestEndpoint(ctx)
 }
 
 // resolveRequestEndpoint returns the Endpoint to use for one
@@ -437,32 +634,33 @@ func applyAuthHeaders(req *http.Request, ep Endpoint) {
 // the no-resolver fallback path in resolveRequestEndpoint can
 // reuse it (Requirement 2.3 — preserved endpoint shape).
 func (c *Client) resolveEndpoint() (string, string) {
-	apiBase := c.cfg.APIBase
+	apiBase := ""
+	if c.cfg != nil {
+		apiBase = c.cfg.APIBase
+	}
 	model := c.apiModel
 
-	// Extract provider prefix if present (e.g., "openai/gpt-5.6" -> provider="openai", model="gpt-5.6")
+	// Extract provider prefix if present and recognized as a known provider
+	// (e.g., "openai/gpt-5.6" -> provider="openai", model="gpt-5.6").
+	// Models with org-scoped names (e.g. "zai-org/GLM-5.3", "meta-llama/Llama-3.1-70B-Instruct")
+	// retain the full model identifier when the prefix is not a known provider.
 	provider := ""
 	if idx := strings.Index(model, "/"); idx >= 0 {
-		provider = strings.ToLower(model[:idx])
-		model = model[idx+1:]
+		candidate := strings.ToLower(model[:idx])
+		if isKnownProvider(candidate) {
+			provider = candidate
+			model = model[idx+1:]
+		}
+	}
+	if provider == "" {
+		if c.cfg != nil && strings.TrimSpace(c.cfg.LLMProvider) != "" {
+			provider = strings.ToLower(strings.TrimSpace(c.cfg.LLMProvider))
+		} else if c.provider != "" {
+			provider = c.provider
+		}
 	}
 
-	// Provider prefix in model name is the source of truth for API base.
-	// However, if a non-empty API base was explicitly set (e.g., from web UI), use it.
-	providerBases := map[string]string{
-		"openai":          "https://api.openai.com/v1",
-		"anthropic":       "https://api.anthropic.com",
-		"minimax":         "https://api.minimax.io/v1",
-		"deepseek":        "https://api.deepseek.com/v1",
-		"groq":            "https://api.groq.com/openai/v1",
-		"ollama":          "http://localhost:11434/v1",
-		"zai":             "https://api.z.ai/api/paas/v4",
-		"zai-coding-plan": "https://api.z.ai/api/coding/paas/v4",
-		// Google's chat endpoint is /v1beta/models/MODEL:generateContent — we
-		// store the bare host here and append the version segment below.
-		"google": "https://generativelanguage.googleapis.com",
-		"gemini": "https://generativelanguage.googleapis.com",
-	}
+	providerBases := legacyProviderBases
 
 	if apiBase == "" {
 		// No explicit API base set — use provider default
@@ -596,23 +794,101 @@ func isRateLimitError(errStr string) bool {
 
 func isNonRetryableLLMError(errStr string) bool {
 	errStr = strings.ToLower(errStr)
+	if strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "context deadline exceeded") {
+		return true
+	}
 	if apiErrorHasStatus(errStr, http.StatusBadRequest) ||
 		apiErrorHasStatus(errStr, http.StatusUnauthorized) ||
 		apiErrorHasStatus(errStr, http.StatusForbidden) ||
-		apiErrorHasStatus(errStr, http.StatusNotFound) {
+		apiErrorHasStatus(errStr, http.StatusNotFound) ||
+		apiErrorHasStatus(errStr, http.StatusMethodNotAllowed) ||
+		apiErrorHasStatus(errStr, http.StatusUnprocessableEntity) {
 		return true
 	}
 	return strings.Contains(errStr, "unauthenticated") ||
 		strings.Contains(errStr, "access_token_type_unsupported") ||
 		strings.Contains(errStr, "invalid authentication credentials") ||
+		strings.Contains(errStr, "invalid_request_error") ||
+		strings.Contains(errStr, "unsupported_parameter") ||
+		strings.Contains(errStr, "invalid_parameter") ||
+		strings.Contains(errStr, "invalid_payload") ||
 		strings.Contains(errStr, "permission_denied") ||
+		strings.Contains(errStr, "permission_error") ||
 		strings.Contains(errStr, "model not found") ||
-		strings.Contains(errStr, "not found")
+		strings.Contains(errStr, "unknown_model") ||
+		strings.Contains(errStr, "not found") ||
+		strings.Contains(errStr, "invalid_api_key") ||
+		strings.Contains(errStr, "account_deactivated") ||
+		strings.Contains(errStr, "billing_not_active") ||
+		strings.Contains(errStr, "context_length_exceeded") ||
+		strings.Contains(errStr, "string_above_max_length")
 }
 
 // Chat sends a non-streaming chat request and returns the full response.
 func (c *Client) Chat(messages []Message) (string, error) {
+	resp, _, err := c.ChatWithUsage(messages)
+	return resp, err
+}
+
+// ChatWithUsage sends a non-streaming chat request and returns the full response along with per-request token usage.
+func (c *Client) ChatWithUsage(messages []Message) (string, *TokenUsage, error) {
 	return c.chatWithRetry(messages)
+}
+
+// minimaxUsageShapeOnce guarantees the redacted usage-structure diagnostic is
+// logged at most once per process per source (streaming/non-streaming).
+var minimaxUsageShapeOnce = map[string]*sync.Once{}
+var minimaxUsageShapeMu sync.Mutex
+
+// logMiniMaxUsageShape logs ONLY the field NAMES (structure) of a provider
+// usage object for MiniMax, once per process per source. Values, prompts,
+// credentials, and target data are never logged. This verifies which exact
+// cached-token field MiniMax actually returns without inventing estimates.
+func (c *Client) logMiniMaxUsageShape(rawUsage json.RawMessage, source string) {
+	if c == nil || len(rawUsage) == 0 {
+		return
+	}
+	if !c.isMiniMaxProvider() {
+		return
+	}
+	minimaxUsageShapeMu.Lock()
+	once, ok := minimaxUsageShapeOnce[source]
+	if !ok {
+		once = &sync.Once{}
+		minimaxUsageShapeOnce[source] = once
+	}
+	minimaxUsageShapeMu.Unlock()
+	once.Do(func() {
+		var top map[string]json.RawMessage
+		if json.Unmarshal(rawUsage, &top) != nil {
+			log.Printf("[llm] MiniMax usage structure (%s): unparseable (keys withheld)", source)
+			return
+		}
+		keys := make([]string, 0, len(top))
+		nested := []string{}
+		for k, v := range top {
+			keys = append(keys, k)
+			var inner map[string]json.RawMessage
+			if json.Unmarshal(v, &inner) != nil {
+				continue
+			}
+			for ik := range inner {
+				nested = append(nested, k+"."+ik)
+			}
+		}
+		sort.Strings(keys)
+		sort.Strings(nested)
+		log.Printf("[llm] MiniMax usage structure (%s): fields=%v nested=%v", source, keys, nested)
+	})
+}
+
+// isMiniMaxProvider reports whether the configured model targets MiniMax.
+func (c *Client) isMiniMaxProvider() bool {
+	if c == nil || c.cfg == nil {
+		return false
+	}
+	model := strings.ToLower(c.cfg.LLM + " " + c.apiModel + " " + c.provider)
+	return strings.Contains(model, "minimax")
 }
 
 // SetTemperature overrides the LLM temperature for subsequent calls.
@@ -828,7 +1104,23 @@ func (c *Client) buildChatRequest(model string, messages []Message, endpoint str
 	return req
 }
 
-func (c *Client) chatWithRetry(messages []Message) (string, error) {
+func (c *Client) buildAnthropicSystem(systemPrompt string) any {
+	if systemPrompt == "" {
+		return nil
+	}
+	if c != nil && c.IsPromptCachingEnabled() {
+		return []anthropicSystemBlock{
+			{
+				Type:         "text",
+				Text:         systemPrompt,
+				CacheControl: &anthropicCacheControl{Type: "ephemeral"},
+			},
+		}
+	}
+	return systemPrompt
+}
+
+func (c *Client) chatWithRetry(messages []Message) (string, *TokenUsage, error) {
 	maxRetries := c.cfg.LLMMaxRetries
 	if maxRetries < 3 {
 		maxRetries = 3
@@ -836,7 +1128,16 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 	var lastErr error
 
 	for attempt := range maxRetries {
+		if ctx := c.loadCtx(); ctx.Err() != nil {
+			return "", nil, fmt.Errorf("LLM request canceled: %w", ctx.Err())
+		}
+
 		if attempt > 0 {
+			if errors.Is(lastErr, context.Canceled) || errors.Is(lastErr, context.DeadlineExceeded) ||
+				strings.Contains(lastErr.Error(), "context canceled") || strings.Contains(lastErr.Error(), "context deadline exceeded") {
+				return "", nil, fmt.Errorf("LLM request canceled: %w", lastErr)
+			}
+
 			// Smart backoff based on error type
 			backoff := time.Duration(attempt*3) * time.Second
 			if lastErr != nil {
@@ -853,19 +1154,28 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 				backoff = 60 * time.Second
 			}
 			log.Printf("[llm] Retry %d/%d after %s (last error: %v)", attempt+1, maxRetries, backoff, lastErr)
-			time.Sleep(backoff)
+			select {
+			case <-c.loadCtx().Done():
+				return "", nil, fmt.Errorf("LLM request canceled: %w", c.loadCtx().Err())
+			case <-time.After(backoff):
+			}
 		}
 
 		// Check if context is canceled before retrying
 		if ctx := c.loadCtx(); ctx.Err() != nil {
-			return "", fmt.Errorf("LLM request canceled: %w", ctx.Err())
+			return "", nil, fmt.Errorf("LLM request canceled: %w", ctx.Err())
 		}
 
-		result, err := c.doChat(messages)
+		result, usage, err := c.doChatWithUsage(messages)
 		if err == nil {
-			return result, nil
+			return result, usage, nil
 		}
 		lastErr = err
+
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+			strings.Contains(err.Error(), "context canceled") || strings.Contains(err.Error(), "context deadline exceeded") {
+			return "", nil, fmt.Errorf("LLM request canceled: %w", err)
+		}
 
 		// Configuration errors are deterministic — a missing base
 		// URL, unknown provider, or unset profile will never succeed
@@ -876,7 +1186,7 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 		var cfgErr *ConfigError
 		if errors.As(err, &cfgErr) {
 			log.Printf("[llm] Non-retryable config error, returning immediately: %v", err)
-			return "", fmt.Errorf("LLM request failed: %w", err)
+			return "", nil, fmt.Errorf("LLM request failed: %w", err)
 		}
 
 		// Non-retryable errors: context window overflow, malformed request, etc.
@@ -885,12 +1195,12 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 		errStr := err.Error()
 		if isContextWindowError(errStr) {
 			log.Printf("[llm] Non-retryable error (context overflow), returning immediately: %v", err)
-			return "", fmt.Errorf("context window overflow: %w", err)
+			return "", nil, fmt.Errorf("context window overflow: %w", err)
 		}
 
 		if isNonRetryableLLMError(errStr) {
 			log.Printf("[llm] Non-retryable LLM error, returning immediately: %v", err)
-			return "", fmt.Errorf("LLM request failed: %w", err)
+			return "", nil, fmt.Errorf("LLM request failed: %w", err)
 		}
 
 		// Track if last error was a rate limit for the post-loop wrapper
@@ -900,15 +1210,15 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 			// Return to the agent loop so its bounded, interruptible backoff owns
 			// the retry decision and we issue at most one provider request per
 			// wait interval.
-			return "", fmt.Errorf("rate limited: %w", err)
+			return "", nil, fmt.Errorf("rate limited: %w", err)
 		}
 	}
 
 	// Preserve rate-limit marker if the final error was rate-limited
 	if lastErr != nil && strings.Contains(lastErr.Error(), "rate limited:") {
-		return "", fmt.Errorf("rate limited: LLM request failed after %d retries: %w", maxRetries, lastErr)
+		return "", nil, fmt.Errorf("rate limited: LLM request failed after %d retries: %w", maxRetries, lastErr)
 	}
-	return "", fmt.Errorf("LLM request failed after %d retries: %w", maxRetries, lastErr)
+	return "", nil, fmt.Errorf("LLM request failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // ChatStream sends a streaming chat request and returns a channel of chunks.
@@ -995,7 +1305,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 			anReq := anthropicRequest{
 				Model:     model,
 				Messages:  anthropicMsgs,
-				System:    systemPrompt,
+				System:    c.buildAnthropicSystem(systemPrompt),
 				MaxTokens: maxTokens,
 				Stream:    true,
 			}
@@ -1013,6 +1323,9 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 
 		req.Header.Set("Content-Type", "application/json")
 		applyAuthHeaders(req, ep)
+		if c.IsPromptCachingEnabled() && c.usesAnthropicAPI(endpoint) {
+			req.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
+		}
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -1064,6 +1377,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 					c.mu.Lock()
 					c.totalIn += anResp.Message.Usage.InputTokens
 					c.totalOut += anResp.Message.Usage.OutputTokens
+					c.totalCached += anResp.Message.Usage.CacheReadInputTokens
 					c.mu.Unlock()
 				case "content_block_delta":
 					if anResp.Delta.Text != "" {
@@ -1071,9 +1385,10 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 					}
 				case "message_delta":
 					// Final usage update — output_tokens arrives at the top level here.
-					if anResp.Usage.OutputTokens > 0 {
+					if anResp.Usage.OutputTokens > 0 || anResp.Usage.CacheReadInputTokens > 0 {
 						c.mu.Lock()
 						c.totalOut += anResp.Usage.OutputTokens
+						c.totalCached += anResp.Usage.CacheReadInputTokens
 						c.mu.Unlock()
 					}
 				case "message_stop":
@@ -1088,7 +1403,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 		// OpenAI/Google streaming: "data: JSON" lines. Gemini reports token usage
 		// under usageMetadata (cumulative per chunk); keep the latest values and
 		// add them to the running totals once, after the stream ends.
-		var gemPromptTokens, gemCandidateTokens int
+		var gemPromptTokens, gemCandidateTokens, gemCachedTokens int
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {
@@ -1110,6 +1425,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 					// Gemini streams cumulative usage; remember the latest.
 					gemPromptTokens = gemResp.UsageMetadata.PromptTokenCount
 					gemCandidateTokens = gemResp.UsageMetadata.CandidatesTokenCount
+					gemCachedTokens = gemResp.UsageMetadata.CachedContentTokenCount
 				}
 				if len(gemResp.Candidates) > 0 && len(gemResp.Candidates[0].Content.Parts) > 0 {
 					content := gemResp.Candidates[0].Content.Parts[0].Text
@@ -1123,15 +1439,24 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 					continue
 				}
 				if sseResp.Usage != nil {
+					sseResp.Usage.HasCachedTokens = sseResp.Usage.hasAnyCachedField()
+					var env struct {
+						Usage json.RawMessage `json:"usage"`
+					}
+					if json.Unmarshal([]byte(data), &env) == nil {
+						c.logMiniMaxUsageShape(env.Usage, "streaming")
+					}
+					cached := sseResp.Usage.GetCachedTokens()
 					c.mu.Lock()
 					c.totalIn += sseResp.Usage.PromptTokens
 					c.totalOut += sseResp.Usage.CompletionTokens
+					c.totalCached += cached
 					c.mu.Unlock()
 				}
 				if len(sseResp.Choices) > 0 {
 					content := sseResp.Choices[0].Delta.Content
 					if content != "" {
-						ch <- StreamChunk{Content: content}
+						ch <- StreamChunk{Content: string(content)}
 					}
 				}
 			}
@@ -1141,6 +1466,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 			c.mu.Lock()
 			c.totalIn += gemPromptTokens
 			c.totalOut += gemCandidateTokens
+			c.totalCached += gemCachedTokens
 			c.mu.Unlock()
 		}
 		ch <- StreamChunk{Done: true}
@@ -1150,7 +1476,13 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 }
 
 // doChat performs a single non-streaming API call.
-func (c *Client) doChat(messages []Message) (out string, err error) {
+func (c *Client) doChat(messages []Message) (string, error) {
+	resp, _, err := c.doChatWithUsage(messages)
+	return resp, err
+}
+
+// doChatWithUsage performs a single non-streaming API call and returns per-request token usage.
+func (c *Client) doChatWithUsage(messages []Message) (out string, usage *TokenUsage, err error) {
 	// Panic boundary (R1.5): any panic in the LLM client (JSON
 	// marshaling, header construction, HTTP transport panic) is
 	// converted into a typed error so the caller can decide whether to
@@ -1164,7 +1496,7 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 	reqCtx := c.loadCtx()
 	if c.rateLimiter != nil {
 		if err = c.rateLimiter.Wait(reqCtx); err != nil {
-			return "", fmt.Errorf("llm rate limit: %w", err)
+			return "", nil, fmt.Errorf("llm rate limit: %w", err)
 		}
 	}
 
@@ -1173,13 +1505,13 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 	// upstream cannot let more requests pile up than the cap allows.
 	release, err := resources.AcquireLLMSlot(reqCtx)
 	if err != nil {
-		return "", fmt.Errorf("llm slot: %w", err)
+		return "", nil, fmt.Errorf("llm slot: %w", err)
 	}
 	defer release()
 
 	ep, err := c.resolveRequestEndpoint(reqCtx)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	endpoint, model := ep.URL, ep.Model
 	log.Printf("[llm] Request → URL=%s model=%s apiModel=%s cfgLLM=%s cfgAPIBase=%s", endpoint, model, c.apiModel, c.cfg.LLM, c.cfg.APIBase)
@@ -1187,7 +1519,7 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 	// OpenAI Responses API (Codex / ChatGPT subscription backend) has its
 	// own request/response contract — delegate to the dedicated path.
 	if ep.HeaderStyle == headerStyleResponses {
-		return c.doResponses(reqCtx, ep, messages)
+		return c.doResponsesWithUsage(reqCtx, ep, messages)
 	}
 
 	isGoogle := ep.HeaderStyle == "gemini"
@@ -1220,7 +1552,7 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 		gemReq.SafetySettings = c.geminiSafetySettings()
 		body, err = json.Marshal(gemReq)
 		if err != nil {
-			return "", fmt.Errorf("failed to marshal Gemini request: %w", err)
+			return "", nil, fmt.Errorf("failed to marshal Gemini request: %w", err)
 		}
 	} else if isAnthropic {
 		// Anthropic: system as top-level field, max_tokens required
@@ -1238,93 +1570,134 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 		anReq := anthropicRequest{
 			Model:     model,
 			Messages:  anthropicMsgs,
-			System:    systemPrompt,
+			System:    c.buildAnthropicSystem(systemPrompt),
 			MaxTokens: maxTokens,
 			Stream:    false,
 		}
 		body, err = json.Marshal(anReq)
 		if err != nil {
-			return "", fmt.Errorf("failed to marshal Anthropic request: %w", err)
+			return "", nil, fmt.Errorf("failed to marshal Anthropic request: %w", err)
 		}
 	} else {
 		reqBody := c.buildChatRequest(model, messages, endpoint, false)
 		body, err = json.Marshal(reqBody)
 		if err != nil {
-			return "", fmt.Errorf("failed to marshal request: %w", err)
+			return "", nil, fmt.Errorf("failed to marshal request: %w", err)
 		}
 	}
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	applyAuthHeaders(req, ep)
+	if c.IsPromptCachingEnabled() && c.usesAnthropicAPI(endpoint) {
+		req.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %w", err)
+		return "", nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	if isGoogle {
 		var gemResp geminiResponse
 		if err := json.Unmarshal(respBody, &gemResp); err != nil {
-			return "", fmt.Errorf("failed to parse Gemini response: %w", err)
+			return "", nil, fmt.Errorf("failed to parse Gemini response: %w", err)
 		}
 		if len(gemResp.Candidates) == 0 || len(gemResp.Candidates[0].Content.Parts) == 0 {
-			return "", fmt.Errorf("no content in Gemini response%s", geminiBlockDetail(gemResp))
+			return "", nil, fmt.Errorf("no content in Gemini response%s", geminiBlockDetail(gemResp))
 		}
+		var gemUsage *TokenUsage
 		if gemResp.UsageMetadata != nil {
+			cached := gemResp.UsageMetadata.CachedContentTokenCount
 			c.mu.Lock()
 			c.totalIn += gemResp.UsageMetadata.PromptTokenCount
 			c.totalOut += gemResp.UsageMetadata.CandidatesTokenCount
+			c.totalCached += cached
 			c.mu.Unlock()
+			gemUsage = &TokenUsage{
+				PromptTokens:     gemResp.UsageMetadata.PromptTokenCount,
+				CompletionTokens: gemResp.UsageMetadata.CandidatesTokenCount,
+				TotalTokens:      gemResp.UsageMetadata.TotalTokenCount,
+				CachedTokens:     cached,
+				HasCachedTokens:  cached > 0,
+				PromptTokensDetails: &PromptTokensDetails{
+					CachedTokens: cached,
+				},
+			}
 		}
-		return gemResp.Candidates[0].Content.Parts[0].Text, nil
+		return gemResp.Candidates[0].Content.Parts[0].Text, gemUsage, nil
 	}
 
 	if isAnthropic {
 		var anMsg anthropicMessage
 		if err := json.Unmarshal(respBody, &anMsg); err != nil {
-			return "", fmt.Errorf("failed to parse Anthropic response: %w", err)
+			return "", nil, fmt.Errorf("failed to parse Anthropic response: %w", err)
 		}
 		// Track token usage
+		cached := anMsg.Usage.CacheReadInputTokens
 		c.mu.Lock()
 		c.totalIn += anMsg.Usage.InputTokens
 		c.totalOut += anMsg.Usage.OutputTokens
+		c.totalCached += cached
 		c.mu.Unlock()
+		anUsage := &TokenUsage{
+			PromptTokens:         anMsg.Usage.InputTokens,
+			CompletionTokens:     anMsg.Usage.OutputTokens,
+			TotalTokens:          anMsg.Usage.InputTokens + anMsg.Usage.OutputTokens,
+			CachedTokens:         cached,
+			CacheReadInputTokens: cached,
+			HasCachedTokens:      cached > 0,
+			PromptTokensDetails: &PromptTokensDetails{
+				CachedTokens: cached,
+			},
+		}
 		// Extract text from content blocks
 		for _, block := range anMsg.Content {
 			if block.Type == "text" && block.Text != "" {
-				return block.Text, nil
+				return block.Text, anUsage, nil
 			}
 		}
 		log.Printf("[llm] Anthropic response with no text content (stop_reason: %s, content_blocks: %d): %s", anMsg.StopReason, len(anMsg.Content), string(respBody))
-		return "", fmt.Errorf("no text content in Anthropic response (stop_reason: %s, content_blocks: %d)", anMsg.StopReason, len(anMsg.Content))
+		return "", anUsage, fmt.Errorf("no text content in Anthropic response (stop_reason: %s, content_blocks: %d)", anMsg.StopReason, len(anMsg.Content))
 	}
 
 	var chatResp chatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
+		return "", nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("no choices in response")
+		return "", nil, fmt.Errorf("no choices in response")
 	}
-	if chatResp.Usage != nil {
+	usage = chatResp.Usage
+	if usage != nil {
+		usage.HasCachedTokens = usage.hasAnyCachedField()
+		// Redacted structure diagnostic: which usage fields did MiniMax
+		// actually return? Names only, once per process.
+		var envelope struct {
+			Usage json.RawMessage `json:"usage"`
+		}
+		if json.Unmarshal(respBody, &envelope) == nil {
+			c.logMiniMaxUsageShape(envelope.Usage, "non-streaming")
+		}
+		cached := usage.GetCachedTokens()
 		c.mu.Lock()
-		c.totalIn += chatResp.Usage.PromptTokens
-		c.totalOut += chatResp.Usage.CompletionTokens
+		c.totalIn += usage.PromptTokens
+		c.totalOut += usage.CompletionTokens
+		c.totalCached += cached
 		c.mu.Unlock()
 	}
-	return chatResp.Choices[0].Message.Content, nil
+	return string(chatResp.Choices[0].Message.Content), usage, nil
 }

@@ -3,7 +3,9 @@ package agent
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/xalgord/xalgorix/v4/internal/llm"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
@@ -295,6 +297,13 @@ func (a *Agent) pruneMessages() {
 		pruned = append(pruned, msg)
 	}
 	a.messages = pruned
+	a.compactionCount++
+	if a.state != nil {
+		a.state.LastPlanBrief = ""
+	}
+	if a.hooks != nil {
+		a.hooks.Fire(OnContextPrune, a.state, nil)
+	}
 
 	log.Printf("[agent] Pruned message history: kept %d messages (was %d), compacted %d messages into digest, notes injected: %v",
 		len(a.messages), originalLen, cutoff-1, notesContext != "")
@@ -356,6 +365,14 @@ func (a *Agent) forcePruneMessages() {
 	}
 
 	a.messages = pruned
+	a.compactionCount++
+	if a.state != nil {
+		a.state.LastPlanBrief = ""
+	}
+	if a.hooks != nil {
+		a.hooks.Fire(OnContextPrune, a.state, nil)
+	}
+
 	log.Printf("[agent] Force-pruned message history: kept %d messages (was %d), compacted %d messages into digest, notes injected: %v",
 		len(a.messages), originalLen, cutoff-1, notesContext != "")
 }
@@ -478,4 +495,167 @@ func compactMessages(msgs []llm.Message) string {
 	}
 
 	return sb.String()
+}
+
+// hasActiveContent reports whether snippet (or its truncated version as produced by
+// capToolOutputForLLM) is still present in the agent's active LLM message history.
+func (a *Agent) hasActiveContent(snippet string) bool {
+	if a == nil || snippet == "" {
+		return false
+	}
+	a.msgMu.Lock()
+	defer a.msgMu.Unlock()
+	capped := capToolOutputForLLM(snippet)
+	for _, m := range a.messages {
+		if strings.Contains(m.Content, capped) || strings.Contains(m.Content, snippet) {
+			return true
+		}
+	}
+	return false
+}
+
+// ── Bounded working context (information-complete) ──────────────────────────
+//
+// Measured on production (scanner2 fleet diagnostics): accumulated tool-result
+// history resent on every iteration dominates token consumption (37–49x resend
+// amplification; 99.3% of all tokens are prompt tokens). The mechanism below
+// keeps every byte reachable — it only changes eager resend into lazy fetch:
+//
+//   1. At tool-result append time the COMPLETE raw output (pre-truncation) is
+//      archived to <ScanDir>/tool-outputs/<id> and the message carries a
+//      small marker naming the archive id.
+//   2. Tool-result messages older than the active window are replaced by a
+//      compact stub. The stub keeps the message's first line and a short head
+//      snippet, and names the archive id.
+//   3. The read_tool_output tool returns the byte-identical archived original
+//      on demand (and the file is also directly readable from the scan
+//      workdir via terminal tools).
+//
+// The recent window stays verbatim, the archive is byte-identical, and the
+// existing compaction digest keeps working unchanged. Gated by
+// XALGORIX_BOUNDED_CONTEXT (default off).
+
+const (
+	// archiveMarkerPrefix marks a tool-result message whose full raw output
+	// was archived at append time.
+	archiveMarkerPrefix = "[full raw output saved as "
+	// archiveStubPrefix marks a message already replaced by a retrieval stub.
+	archiveStubPrefix = "[ARCHIVED as "
+	// archiveHeadBytes is the byte length of the head snippet kept in a stub.
+	archiveHeadBytes = 300
+)
+
+var archiveIDRe = regexp.MustCompile(`to_[0-9]{6,12}`)
+
+// boundedContextEnabled reports whether information-complete bounded context
+// is active for this agent (flag on, scan archive wired).
+func (a *Agent) boundedContextEnabled() bool {
+	return a != nil && a.cfg != nil && a.cfg.BoundedContext &&
+		a.scanCtx != nil && a.scanCtx.ToolOutputs != nil
+}
+
+// toolArchiveMinBytes resolves the archive-size threshold with a sane floor.
+func (a *Agent) toolArchiveMinBytes() int {
+	if a == nil || a.cfg == nil || a.cfg.ToolArchiveMinBytes <= 0 {
+		return 1500
+	}
+	return a.cfg.ToolArchiveMinBytes
+}
+
+// toolArchiveActiveWindow resolves how many recent tool-result messages stay
+// verbatim before older ones are stubbed.
+func (a *Agent) toolArchiveActiveWindow() int {
+	if a == nil || a.cfg == nil || a.cfg.ToolArchiveActiveWindow <= 0 {
+		return 8
+	}
+	return a.cfg.ToolArchiveActiveWindow
+}
+
+// isToolResultMessage identifies tool-result conversation messages produced by
+// formatToolResult (root and delegated agents). Verifier messages
+// ("[tool output]") and other user turns are not tool-result messages.
+func isToolResultMessage(content string) bool {
+	return strings.HasPrefix(content, "Tool '")
+}
+
+// archiveIDFromMessage extracts the archive id from a tool-result message
+// that was annotated at append time.
+func archiveIDFromMessage(content string) (string, bool) {
+	if !strings.Contains(content, archiveMarkerPrefix) {
+		return "", false
+	}
+	id := archiveIDRe.FindString(content)
+	if id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// archiveToolResultMarker annotates a fresh tool-result message with the id of
+// its archived raw output so the aging pass can stub it later.
+func archiveToolResultMarker(id string) string {
+	return fmt.Sprintf("%s%s — call read_tool_output(id=\"%s\") for the untruncated original]", archiveMarkerPrefix, id, id)
+}
+
+// trimToValidUTF8 cuts s to at most maxBytes on a rune boundary.
+func trimToValidUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := s[:maxBytes]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
+}
+
+// ageOutToolOutputs replaces tool-result messages older than the active window
+// with compact retrieval stubs. Idempotent; never touches messages that were
+// not archived (e.g. produced before the flag was enabled); keeps the active
+// window verbatim. Caller: agent main loop, before the LLM call.
+func (a *Agent) ageOutToolOutputs() {
+	if !a.boundedContextEnabled() {
+		return
+	}
+	window := a.toolArchiveActiveWindow()
+
+	a.msgMu.Lock()
+	defer a.msgMu.Unlock()
+
+	// Collect tool-result message indices, newest first.
+	toolIdx := make([]int, 0, window+8)
+	for i := len(a.messages) - 1; i >= 0; i-- {
+		if isToolResultMessage(a.messages[i].Content) {
+			toolIdx = append(toolIdx, i)
+		}
+	}
+
+	stubbed := 0
+	for k, idx := range toolIdx {
+		if k < window {
+			continue // inside the active window → keep verbatim
+		}
+		content := a.messages[idx].Content
+		if strings.Contains(content, archiveStubPrefix) {
+			continue // already stubbed
+		}
+		id, ok := archiveIDFromMessage(content)
+		if !ok {
+			continue // never archived → leave verbatim (no information may be dropped)
+		}
+		firstLine := content
+		if i := strings.IndexByte(content, '\n'); i >= 0 {
+			firstLine = content[:i]
+		}
+		head := trimToValidUTF8(content, archiveHeadBytes)
+		a.messages[idx].Content = fmt.Sprintf(
+			"%s %s%s — full original retrievable]\nHead: %s\n…[archived head only — use read_tool_output(id=\"%s\") to view the complete output]\n",
+			firstLine, archiveStubPrefix, id, head, id,
+		)
+		stubbed++
+	}
+	if stubbed > 0 {
+		log.Printf("[agent] %s: bounded context stubbed %d aged tool-result message(s) (window=%d, archive=%d entries)",
+			a.Name, stubbed, window, a.scanCtx.ToolOutputs.Count())
+	}
 }

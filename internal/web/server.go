@@ -36,6 +36,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/llm"
 	"github.com/xalgord/xalgorix/v4/internal/providers"
+	"github.com/xalgord/xalgorix/v4/internal/proxy"
 	"github.com/xalgord/xalgorix/v4/internal/resources"
 	"github.com/xalgord/xalgorix/v4/internal/safe"
 	"github.com/xalgord/xalgorix/v4/internal/sandbox"
@@ -392,6 +393,9 @@ type ScanRequest struct {
 	ResumeSubIndex       int      `json:"-"`
 	ResumeDiscoveryDone  bool     `json:"-"`
 	ResumeOriginalTarget int      `json:"-"`
+	ResumeIterations     int      `json:"-"`
+	ResumeTotalTokens    int      `json:"-"`
+	ResumeToolCalls      int      `json:"-"`
 	queueOwnership       *queueOwnership
 
 	// Code-scan internals, resolved server-side from CodeScan in handleScan.
@@ -533,6 +537,9 @@ type QueueState struct {
 	WildcardDiscoveryDone bool     `json:"wildcard_discovery_done,omitempty"`
 	WildcardSubdomains    []string `json:"wildcard_subdomains,omitempty"`
 	WildcardSubIndex      int      `json:"wildcard_sub_index,omitempty"`
+	Iterations            int      `json:"iterations,omitempty"`
+	TotalTokens           int      `json:"total_tokens,omitempty"`
+	ToolCalls             int      `json:"tool_calls,omitempty"`
 }
 
 // ScanInstance represents a running or completed scan instance.
@@ -1072,6 +1079,12 @@ func (s *Server) Start() error {
 			s.handleDeleteVuln(w, r)
 			return
 		}
+		// GET /api/scans/{id}/token-usage — token-attribution diagnostics
+		// (observability only). Checked before the generic detail handler.
+		if strings.HasSuffix(r.URL.Path, "/token-usage") && r.Method == http.MethodGet {
+			s.handleScanTokenUsage(w, r)
+			return
+		}
 		// GET /api/scans/{id}/events?offset=&limit= — lazy-page the event log
 		// that the detail response only tails. Must be checked before the
 		// generic detail handler.
@@ -1335,6 +1348,7 @@ func (s *Server) Start() error {
 				inst.StopReason = "signal_" + sig.String()
 				inst.FinishedAt = time.Now().Format(time.RFC3339)
 				normalizeTerminalWildcardInstanceLocked(inst)
+				_ = s.updateQueueStateCounters(inst.ID, inst.Iterations, inst.TotalTokens, inst.ToolCalls)
 				if inst.agent != nil {
 					inst.agent.Stop()
 				}
@@ -1365,6 +1379,7 @@ func (s *Server) Start() error {
 			log.Printf("[SHUTDOWN] HTTP shutdown error: %v", err)
 		}
 
+		_ = proxy.Close()
 		s.rateLimiter.Stop()
 		log.Printf("[SHUTDOWN] Graceful shutdown complete")
 	}()
@@ -1490,6 +1505,7 @@ func (s *Server) restartNow(httpServer *http.Server) {
 			log.Printf("[RESTART] HTTP shutdown error: %v", err)
 		}
 	}
+	_ = proxy.Close()
 
 	// systemd-managed: INVOCATION_ID is set by systemd for service units.
 	// A clean exit triggers Restart=always with a freshly-loaded env file.
@@ -2813,12 +2829,15 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		s.instancesMu.Unlock()
 
 		scanCfg := *s.cfg
-		newID := randomSlug()
-		go s.runMultiScan(req, &scanCfg, newID)
+		targetID := instanceID
+		if r.URL.Query().Get("new_id") == "true" {
+			targetID = randomSlug()
+		}
+		go s.runMultiScan(req, &scanCfg, targetID)
 
 		s.broadcastToInstance(instanceID, WSEvent{Type: "resumed", Content: "Scan resumed"})
 		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "resumed", "instance_id": newID})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "resumed", "instance_id": targetID})
 		return
 	}
 
@@ -2923,6 +2942,14 @@ func (sess *scanSession) cleanup() {
 		func() {
 			defer logRecover("cleanup.scanctx.close")
 			scanctx.Deactivate(sess.sctx.ID)
+			// Flush the token summary + release the records file before the
+			// wider context teardown.
+			if sess.sctx.Tokens != nil {
+				func() {
+					defer logRecover("cleanup.scanctx.tokens")
+					sess.sctx.Tokens.Close()
+				}()
+			}
 			sess.sctx.Close()
 		}()
 	}
@@ -3728,7 +3755,10 @@ func llmProviderKey(model, apiBase string) string {
 		return "vercel"
 	}
 	if idx := strings.Index(model, "/"); idx > 0 {
-		return model[:idx]
+		candidate := model[:idx]
+		if _, ok := providers.LookupBuiltin(candidate); ok {
+			return candidate
+		}
 	}
 	switch {
 	case strings.Contains(apiBase, "minimax"):

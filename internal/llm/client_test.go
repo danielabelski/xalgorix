@@ -409,6 +409,164 @@ func TestResolveEndpoint_ProviderDefaultsAndCustomBases(t *testing.T) {
 	}
 }
 
+func TestResolveEndpoint_PreservesModelWithSlash(t *testing.T) {
+	cases := []struct {
+		name      string
+		cfg       config.Config
+		wantURL   string
+		wantModel string
+	}{
+		{
+			name: "crusoe cloud org model preserved",
+			cfg: config.Config{
+				LLM:     "zai-org/GLM-5.3",
+				APIBase: "https://api.crusoecloud.com/v1",
+				APIKey:  "crusoe-key",
+			},
+			wantURL:   "https://api.crusoecloud.com/v1/chat/completions",
+			wantModel: "zai-org/GLM-5.3",
+		},
+		{
+			name: "vllm meta-llama org model preserved",
+			cfg: config.Config{
+				LLM:     "meta-llama/Llama-3.1-70B-Instruct",
+				APIBase: "https://vllm.internal:8000/v1",
+				APIKey:  "vllm-key",
+			},
+			wantURL:   "https://vllm.internal:8000/v1/chat/completions",
+			wantModel: "meta-llama/Llama-3.1-70B-Instruct",
+		},
+		{
+			name: "deepseek-ai org model preserved",
+			cfg: config.Config{
+				LLM:     "deepseek-ai/DeepSeek-V3",
+				APIBase: "https://api.example.com/v1",
+				APIKey:  "k",
+			},
+			wantURL:   "https://api.example.com/v1/chat/completions",
+			wantModel: "deepseek-ai/DeepSeek-V3",
+		},
+		{
+			name: "custom provider with slash model preserved",
+			cfg: config.Config{
+				LLM:         "zai-org/GLM-5.3",
+				LLMProvider: "custom",
+				APIBase:     "https://api.crusoecloud.com/v1",
+				APIKey:      "k",
+			},
+			wantURL:   "https://api.crusoecloud.com/v1/chat/completions",
+			wantModel: "zai-org/GLM-5.3",
+		},
+		{
+			name: "custom prefix with slash model preserved",
+			cfg: config.Config{
+				LLM:     "custom/zai-org/GLM-5.3",
+				APIBase: "https://api.crusoecloud.com/v1",
+				APIKey:  "k",
+			},
+			wantURL:   "https://api.crusoecloud.com/v1/chat/completions",
+			wantModel: "zai-org/GLM-5.3",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewClient(&tc.cfg)
+			gotURL, gotModel := c.resolveEndpoint()
+			if gotURL != tc.wantURL {
+				t.Fatalf("endpoint = %q, want %q", gotURL, tc.wantURL)
+			}
+			if gotModel != tc.wantModel {
+				t.Fatalf("model = %q, want %q", gotModel, tc.wantModel)
+			}
+		})
+	}
+}
+
+func TestLegacyResolver_PreservesModelWithSlash(t *testing.T) {
+	cfg := &config.Config{
+		LLM:     "zai-org/GLM-5.3",
+		APIBase: "https://api.crusoecloud.com/v1",
+		APIKey:  "k",
+	}
+	lr := &legacyResolver{cfg: cfg}
+	ep, err := lr.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("Resolve err: %v", err)
+	}
+	if ep.Model != "zai-org/GLM-5.3" {
+		t.Fatalf("ep.Model = %q, want %q", ep.Model, "zai-org/GLM-5.3")
+	}
+	if ep.URL != "https://api.crusoecloud.com/v1/chat/completions" {
+		t.Fatalf("ep.URL = %q, want %q", ep.URL, "https://api.crusoecloud.com/v1/chat/completions")
+	}
+}
+
+func TestClient_Clone(t *testing.T) {
+	cfg := &config.Config{
+		LLM:     "zai-org/GLM-5.3",
+		APIBase: "https://api.crusoecloud.com/v1",
+		APIKey:  "secret-key",
+	}
+	fixedEP := Endpoint{
+		URL:         "https://api.crusoecloud.com/v1/chat/completions",
+		Model:       "zai-org/GLM-5.3",
+		HeaderStyle: "openai",
+		Auth:        AuthAPIKey,
+		APIKey:      "secret-key",
+	}
+	client := NewClient(cfg, WithResolver(NewFixedResolver(fixedEP)))
+	client.mu.Lock()
+	client.totalIn = 100
+	client.totalOut = 200
+	client.mu.Unlock()
+
+	temp := 0.7
+	client.SetTemperature(&temp)
+
+	clone := client.Clone()
+	if clone == nil {
+		t.Fatal("clone is nil")
+		return
+	}
+	if clone == client {
+		t.Fatal("clone returned same pointer")
+		return
+	}
+	if clone.cfg != client.cfg {
+		t.Fatalf("clone.cfg = %p, want %p", clone.cfg, client.cfg)
+	}
+	if clone.apiModel != client.apiModel {
+		t.Fatalf("clone.apiModel = %q, want %q", clone.apiModel, client.apiModel)
+	}
+	if clone.resolver == nil {
+		t.Fatal("clone.resolver is nil")
+	}
+
+	// Verify token usage in clone is zeroed
+	in, out, total := clone.GetTokens()
+	if in != 0 || out != 0 || total != 0 {
+		t.Fatalf("clone tokens = (%d, %d, %d), want (0, 0, 0)", in, out, total)
+	}
+
+	// Verify effective temperature was copied
+	if gotTemp := clone.effectiveTemperature(); gotTemp == nil || *gotTemp != 0.7 {
+		t.Fatalf("clone temp = %v, want 0.7", gotTemp)
+	}
+
+	// Verify resolveRequestEndpoint on clone yields the original fixed endpoint
+	ep, err := clone.resolveRequestEndpoint(context.Background())
+	if err != nil {
+		t.Fatalf("clone resolveRequestEndpoint: %v", err)
+	}
+	if ep.Model != "zai-org/GLM-5.3" {
+		t.Fatalf("clone ep.Model = %q, want zai-org/GLM-5.3", ep.Model)
+	}
+	if ep.URL != fixedEP.URL {
+		t.Fatalf("clone ep.URL = %q, want %q", ep.URL, fixedEP.URL)
+	}
+}
+
 func TestDoChat_GeminiAPIBaseWithoutProviderUsesGeminiProtocol(t *testing.T) {
 	c := NewClient(&config.Config{
 		LLM:           "gemini-3.1-pro",
@@ -595,6 +753,31 @@ func TestDoChat_AnthropicTokenUsageTracked(t *testing.T) {
 	}
 	if total != 75 {
 		t.Errorf("total tokens = %d, want 75", total)
+	}
+}
+
+func TestContentFieldUnmarshalShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want string
+	}{
+		{name: "plain string", json: `"hello"`, want: "hello"},
+		{name: "null", json: `null`, want: ""},
+		{name: "text parts array", json: `[{"type":"text","text":"Hi "},{"type":"text","text":"there"}]`, want: "Hi there"},
+		{name: "thinking and text parts", json: `[{"type":"thinking","thinking":[{"type":"text","text":"ponder"}],"closed":true},{"type":"text","text":"answer"}]`, want: "answer"},
+		{name: "thinking only", json: `[{"type":"thinking","thinking":[{"type":"text","text":"ponder"}],"closed":true}]`, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var f contentField
+			if err := json.Unmarshal([]byte(tc.json), &f); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if string(f) != tc.want {
+				t.Fatalf("content = %q, want %q", f, tc.want)
+			}
+		})
 	}
 }
 

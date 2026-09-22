@@ -32,7 +32,7 @@ import (
 // The hardcoded fallback is only used when developers `go run` the package
 // without ldflags. It is a `var` (not `const`) precisely so ldflags can
 // rewrite it.
-var version = "4.6.75"
+var version = "4.6.91"
 
 const defaultWebPort = 9137
 
@@ -221,19 +221,31 @@ func main() {
 	// When USE_PROXY is false (the default) this is a no-op and all existing
 	// behavior is preserved.
 	// -------------------------------------------------------------------------
-	if err := proxy.Init(
+	if err := proxy.InitWithPolicy(
 		cfg.UseProxy,
+		cfg.ProxyRequired,
 		cfg.ProxyURL,
 		cfg.ProxyFile,
 		cfg.ProxyRotation,
 		30*time.Second,
 	); err != nil {
+		if cfg.ProxyRequired {
+			fmt.Fprintf(os.Stderr, "[proxy] required proxy unavailable: %v\n", err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "[proxy] init warning: %v\n", err)
 		// Non-fatal: continue without proxy rather than crashing.
+	}
+	if cfg.ProxyRequired {
+		if _, err := proxy.LocalURL(); err != nil {
+			fmt.Fprintf(os.Stderr, "[proxy] required local proxy unavailable: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	if proxy.Enabled() {
 		fmt.Fprintf(os.Stderr, "[proxy] proxy routing active\n")
 	}
+	defer func() { _ = proxy.Close() }()
 
 	// Set web package version from main — single source of truth
 	web.Version = version
@@ -460,9 +472,10 @@ func printUsage() {
 	fmt.Println("  -h, --help                Show help")
 	fmt.Println()
 	fmt.Println("Proxy:")
-	fmt.Println("  XALGORIX_USE_PROXY=true          Enable proxy routing")
-	fmt.Println("  XALGORIX_PROXY_URL=ip:port        Single proxy (HTTP/SOCKS5)")
-	fmt.Println("  XALGORIX_PROXY_FILE=proxies.txt   Proxy list with rotation")
+	fmt.Println("  XALGORIX_USE_PROXY=true             Enable proxy routing")
+	fmt.Println("  XALGORIX_PROXY_REQUIRED=true        Require single upstream proxy for target HTTP/browser traffic")
+	fmt.Println("  XALGORIX_PROXY_URL=ip:port          Single proxy (HTTP/SOCKS5)")
+	fmt.Println("  XALGORIX_PROXY_FILE=proxies.txt     Proxy list with rotation")
 	fmt.Println("  XALGORIX_PROXY_ROTATION=roundrobin  Rotation: roundrobin or random")
 	fmt.Println()
 	fmt.Println("Examples:")

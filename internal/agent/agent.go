@@ -66,11 +66,10 @@ func init() {
 const defaultToolHardTimeout = 15 * time.Minute
 
 // maxCumulativeRateLimitWait is the safe fallback when a caller constructs a
-// Config literal instead of loading the environment-backed configuration. A
-// provider usage-window exhaustion is not a normal transient tool failure;
-// waiting for hours while replaying the same context can consume the next
-// window without making progress.
-const maxCumulativeRateLimitWait = 30 * time.Minute
+// Config literal instead of loading the environment-backed configuration.
+// Set to 6 hours by default so rolling 5-hour provider quota windows (e.g. MiniMax)
+// can refresh and allow scans to resume without premature termination.
+const maxCumulativeRateLimitWait = 6 * time.Hour
 
 // maxRateLimitWait returns the per-scan ceiling for provider rate-limit waits.
 // A negative configured value disables the ceiling for operators who
@@ -137,6 +136,9 @@ type Agent struct {
 	events                     chan Event
 	maxIter                    int
 	stopped                    atomic.Bool
+	iterationDelayMs           atomic.Int64
+	childrenMu                 sync.Mutex
+	children                   map[*Agent]struct{}
 	ctx                        context.Context
 	cancel                     context.CancelFunc
 	lastActivity               time.Time
@@ -180,13 +182,15 @@ type Agent struct {
 	// agentGraph is shared by every agent delegated from this root, but owned
 	// by the root scan only. The graph itself is scan-scoped, so concurrent
 	// scans cannot overwrite runners or consume one another's worker slots.
-	agentGraph        *agentsgraph.Graph
-	ownsAgentGraph    bool
-	delegatedAgentID  string
-	ctfMission        bool
-	benchmarkIsolated bool
-	scanBudget        *scanBudget
-	lastBudgetTokens  int
+	agentGraph         *agentsgraph.Graph
+	ownsAgentGraph     bool
+	delegatedAgentID   string
+	ctfMission         bool
+	benchmarkIsolated  bool
+	scanBudget         *scanBudget
+	lastBudgetTokens   int
+	compactionCount    int
+	rateLimitBackoffFn func(int) time.Duration
 }
 
 // AgentOption configures optional behavior on a *Agent. The
@@ -221,6 +225,29 @@ func WithBenchmarkIsolation() AgentOption {
 	return func(a *Agent) {
 		a.benchmarkIsolated = true
 	}
+}
+
+// withRateLimitBackoff overrides the progressive rate-limit backoff policy.
+// Used by tests to verify retry loops without sleeping real seconds.
+func withRateLimitBackoff(fn func(int) time.Duration) AgentOption {
+	return func(a *Agent) {
+		a.rateLimitBackoffFn = fn
+	}
+}
+
+// rateLimitBackoff calculates the progressive backoff interval for a 429 episode.
+// 15s (attempt 1) -> 30s (attempt 2) -> 60s (attempt 3+).
+func (a *Agent) rateLimitBackoff(consecutive int) time.Duration {
+	if a.rateLimitBackoffFn != nil {
+		return a.rateLimitBackoffFn(consecutive)
+	}
+	if consecutive <= 1 {
+		return 15 * time.Second
+	}
+	if consecutive == 2 {
+		return 30 * time.Second
+	}
+	return 60 * time.Second
 }
 
 // withAgentGraph makes a delegated agent join its root scan's graph. It is
@@ -277,6 +304,10 @@ func delegatedAgentOptions(ctx context.Context, graph *agentsgraph.Graph, budget
 // letting the per-scan resolver injection skip building a separate
 // constructor.
 func NewAgent(cfg *config.Config, name string, events chan Event, localGuard scopeguard.Config, scOrOpts ...any) *Agent {
+	if cfg == nil {
+		cfg = config.Get()
+	}
+
 	// Fix Python httpx interfering with ProjectDiscovery httpx
 	fixHttpxConflict()
 
@@ -354,6 +385,10 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 		targetAuthB:  cfg.TargetAuthSecondary,
 		sourceRepo:   cfg.SourceRepo,
 		scanContext:  cfg.ScanContext,
+		children:     make(map[*Agent]struct{}),
+	}
+	if cfg.IterationDelaySec > 0 {
+		a.iterationDelayMs.Store(int64(cfg.IterationDelaySec * 1000))
 	}
 
 	// Apply per-call AgentOption values (e.g. WithLLMClient). Options
@@ -365,6 +400,9 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	}
 	if a.scanBudget == nil {
 		a.scanBudget = newScanBudget()
+	}
+	if a.registry != nil {
+		a.registry.SetContentChecker(a.hasActiveContent)
 	}
 
 	// Register the structural planner tools (build_plan / update_plan). These
@@ -461,6 +499,11 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// target, and the ledger.
 	a.registerVerifyCSRFTool(reg)
 
+	// Bounded working context retrieval tool: returns the byte-identical
+	// archived original of any stubbed tool result (flag-gated stubs, but the
+	// tool is always registered so archived outputs are reachable).
+	a.registerToolArchiveTool(reg)
+
 	// Create cancellable context
 	a.ctx, a.cancel = context.WithCancel(a.ctx)
 	// Wire context to LLM client so cancel interrupts pending HTTP requests
@@ -477,7 +520,12 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 			for _, opt := range delegatedAgentOptions(ctx, a.agentGraph, a.scanBudget, agentID, a.benchmarkIsolated) {
 				subArgs = append(subArgs, opt)
 			}
+			if a.client != nil {
+				subArgs = append(subArgs, WithLLMClient(a.client.Clone()))
+			}
 			subAgent := NewAgent(cfg, subName, subEvents, a.localGuard, subArgs...)
+			a.registerChildAgent(subAgent)
+			defer a.unregisterChildAgent(subAgent)
 			subAgent.SetPhaseRestrictions(a.allowedPhases)
 			subAgent.SetActivityPolicy(a.reconMode, a.scanIntensity, a.activityHosts)
 			subAgent.SetTargetAuth(a.targetAuth)
@@ -488,6 +536,10 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 			if a.discoveryMode {
 				subAgent.SetDiscoveryMode(true)
 			}
+			// Role-scoped tool documentation (flag-gated): withhold
+			// role-foreign tool docs from this specialist's prompt. Tools stay
+			// registered/callable and remain listed in a compact index line.
+			subAgent.applyRoleToolScope()
 
 			var results strings.Builder
 			var delegatedErr error
@@ -1112,6 +1164,13 @@ func (a *Agent) Run(targets []string, instruction string) {
 		// the loop and the context-overflow recovery branch below, so
 		// the serialized buffer is bounded before every outbound call,
 		// not only after a 413 from the provider.
+		// Bounded working context (information-complete): replace tool-result
+		// messages older than the active window with retrieval stubs BEFORE
+		// the snapshot is taken, so aged raw output is not resent on every
+		// iteration. Every stubbed byte stays retrievable via read_tool_output.
+		if a.boundedContextEnabled() {
+			a.ageOutToolOutputs()
+		}
 		if a.shouldPruneBeforeLLM() {
 			a.pruneMessages()
 		}
@@ -1137,7 +1196,19 @@ func (a *Agent) Run(targets []string, instruction string) {
 		}
 		a.client.SetTemperature(&scannerTemp)
 
-		response, err := a.client.Chat(msgsSnapshot)
+		category := scanctx.CategoryNormalReasoning
+		if a.state != nil {
+			if a.state.PendingFailedReportCalls > 0 || a.state.MalformedToolOutputCount > 0 {
+				category = scanctx.CategoryMalformedToolRecovery
+			} else if a.state.NoToolCount > 0 {
+				category = scanctx.CategoryNoToolRecovery
+			} else if a.state.FinishAttempts > 0 && iterResult.Nudge != "" {
+				category = scanctx.CategoryFinishRejectionRecovery
+			}
+		}
+
+		response, usage, err := a.client.ChatWithUsage(msgsSnapshot)
+		a.recordTokenAttribution(usage, msgsSnapshot, iter, category, 0)
 		// Update activity after LLM response
 		a.touchActivity()
 		// A benchmark deadline, operator stop, or parent cancellation must win
@@ -1152,13 +1223,9 @@ func (a *Agent) Run(targets []string, instruction string) {
 		if err != nil {
 			a.state.ConsecutiveErrors++
 			errStr := err.Error()
-			isContextOverflow := strings.Contains(errStr, "context window") ||
-				strings.Contains(errStr, "context overflow") ||
-				strings.Contains(errStr, "maximum context length") ||
-				strings.Contains(errStr, "too many tokens") ||
-				strings.Contains(errStr, "token limit")
+			classified := llm.ClassifyErrorString(errStr)
 
-			if isContextOverflow {
+			if classified.Class == llm.ErrorClassContextWindow {
 				// Context window overflow: force-prune messages so the next
 				// attempt has a smaller payload. Don't count this as a
 				// consecutive error — it's recoverable via pruning.
@@ -1171,54 +1238,90 @@ func (a *Agent) Run(targets []string, instruction string) {
 				continue
 			}
 
-			// Rate limit: wait in a bounded interval for a transient provider
-			// recovery. Do not keep a scan alive for the whole provider usage
-			// window: every retry resends the entire conversation and can make
-			// the next window disappear too.
-			isRateLimited := strings.Contains(errStr, "rate limited") ||
-				strings.Contains(errStr, "429") ||
-				strings.Contains(errStr, "too many requests") ||
-				strings.Contains(errStr, "Too Many Requests")
-			if isRateLimited {
-				a.state.ConsecutiveErrors-- // undo the increment above
+			// Rate limit / Overloaded / Quota exhausted: back off in progressive increments
+			// and keep retrying until the upstream provider recovers or the window refreshes.
+			//
+			// CRITICAL:
+			// 1. DO NOT terminate the scan on rate limits or quota resets. Keep the agent alive
+			//    in memory so that when the provider window refreshes (e.g. MiniMax rolling 5h quota,
+			//    RPM/TPM resets), the scan resumes seamlessly without interruption.
+			// 2. DO NOT emit provider rate-limit or quota error messages to the frontend/user.
+			//    All upstream provider wait messages are logged strictly to backend server logs
+			//    (log.Printf) so the SaaS user never sees scary billing or provider notices.
+			if classified.Class == llm.ErrorClassRateLimit ||
+				classified.Class == llm.ErrorClassOverloaded ||
+				classified.Class == llm.ErrorClassQuotaExhausted {
+				a.state.ConsecutiveErrors-- // don't penalize normal consecutive error count
 				if a.state.ConsecutiveErrors < 0 {
 					a.state.ConsecutiveErrors = 0
 				}
-				// Bound the total time the scan may spend parked on provider
-				// rate limits. Once the configured ceiling is reached, fail the
-				// scan cleanly instead of issuing another context-sized request.
+				a.state.ConsecutiveRateLimits++
+
+				var abortReason, reasonLabel string
+				switch classified.Class {
+				case llm.ErrorClassOverloaded:
+					abortReason = "provider_overloaded"
+					reasonLabel = "overload"
+				case llm.ErrorClassQuotaExhausted:
+					abortReason = "provider_quota_exhausted"
+					reasonLabel = "quota wait"
+				default:
+					abortReason = "provider_rate_limited"
+					reasonLabel = "rate-limit"
+				}
+
+				// Progressive retry backoff: 15s -> 30s -> 60s max per attempt.
+				backoff := a.rateLimitBackoff(a.state.ConsecutiveRateLimits)
+				if classified.Class == llm.ErrorClassQuotaExhausted && a.rateLimitBackoffFn == nil && backoff < 30*time.Second {
+					backoff = 30 * time.Second
+				}
+
 				maxWait := a.maxRateLimitWait()
 				if maxWait > 0 && a.state.CumulativeRateLimitWait >= maxWait {
-					a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ Agent stopped: LLM provider rate limited for a cumulative %s without recovering.", a.state.CumulativeRateLimitWait), TotalTokens: tokenCount()})
-					a.emit(Event{Type: "finished", Content: fmt.Sprintf("Agent stopped: provider rate limited for a cumulative %s without recovering.", a.state.CumulativeRateLimitWait), TotalTokens: tokenCount(), Aborted: true, AbortReason: "llm_rate_limited"})
+					log.Printf("[agent:%s] LLM %s wait budget exhausted after %s", a.ID, reasonLabel, a.state.CumulativeRateLimitWait)
+					a.emit(Event{Type: "paused", Content: "Scan paused: upstream provider temporarily unavailable; existing findings preserved.", TotalTokens: tokenCount(), Aborted: true, AbortReason: abortReason})
 					return
 				}
-				waitFor := 30 * time.Minute
-				if maxWait > 0 && maxWait-a.state.CumulativeRateLimitWait < waitFor {
-					waitFor = maxWait - a.state.CumulativeRateLimitWait
+
+				// Cap backoff by remaining cumulative budget
+				if maxWait > 0 {
+					remaining := maxWait - a.state.CumulativeRateLimitWait
+					if remaining <= 0 {
+						log.Printf("[agent:%s] LLM %s wait budget exhausted", a.ID, reasonLabel)
+						a.emit(Event{Type: "paused", Content: "Scan paused: upstream provider temporarily unavailable; existing findings preserved.", TotalTokens: tokenCount(), Aborted: true, AbortReason: abortReason})
+						return
+					}
+					if remaining < backoff {
+						backoff = remaining
+					}
 				}
-				if waitFor <= 0 {
-					a.emit(Event{Type: "finished", Content: "Agent stopped: provider rate-limit wait budget exhausted.", TotalTokens: tokenCount(), Aborted: true, AbortReason: "llm_rate_limited"})
+
+				// Log strictly to backend server logs for operator visibility (silent on user frontend)
+				log.Printf("[agent:%s] Upstream LLM %s encountered (%s). Waiting %s before retry (attempt %d, cumulative wait: %s)...",
+					a.ID, reasonLabel, classified.Class, backoff, a.state.ConsecutiveRateLimits, a.state.CumulativeRateLimitWait.Round(time.Second))
+
+				// Interruptible sleep: bail out immediately if the scan is stopped or canceled by operator.
+				if a.ctx != nil {
+					select {
+					case <-a.ctx.Done():
+						a.emit(Event{Type: "finished", Content: "Scan stopped", TotalTokens: tokenCount()})
+						return
+					case <-time.After(backoff):
+					}
+				} else {
+					time.Sleep(backoff)
+				}
+
+				if a.stopped.Load() {
 					return
 				}
-				a.emit(Event{Type: "error", Content: fmt.Sprintf("⏳ Rate limited by LLM provider — waiting up to %s before stopping this scan", waitFor.Round(time.Minute)), TotalTokens: tokenCount()})
-				// Sleep in 1-minute chunks so we can bail out if the agent is stopped.
-				for waited := time.Duration(0); waited < waitFor; {
-					if a.stopped.Load() || (a.ctx != nil && a.ctx.Err() != nil) {
-						break
-					}
-					chunk := time.Minute
-					if waitFor-waited < chunk {
-						chunk = waitFor - waited
-					}
-					time.Sleep(chunk)
-					waited += chunk
-					a.state.CumulativeRateLimitWait += chunk
-				}
-				a.touchActivity() // keep watchdog alive during long wait
+
+				a.state.CumulativeRateLimitWait += backoff
+				a.touchActivity() // keep watchdog alive during rate-limit/quota backoff
+
 				if maxWait > 0 && a.state.CumulativeRateLimitWait >= maxWait {
-					a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ Agent stopped: provider rate-limit wait budget exhausted after %s.", a.state.CumulativeRateLimitWait), TotalTokens: tokenCount()})
-					a.emit(Event{Type: "finished", Content: "Agent stopped: provider rate-limit wait budget exhausted; existing findings were preserved.", TotalTokens: tokenCount(), Aborted: true, AbortReason: "llm_rate_limited"})
+					log.Printf("[agent:%s] LLM %s wait budget exhausted after %s", a.ID, reasonLabel, a.state.CumulativeRateLimitWait)
+					a.emit(Event{Type: "paused", Content: "Scan paused: upstream provider temporarily unavailable; existing findings preserved.", TotalTokens: tokenCount(), Aborted: true, AbortReason: abortReason})
 					return
 				}
 				continue
@@ -1245,6 +1348,9 @@ func (a *Agent) Run(targets []string, instruction string) {
 				}
 			} else {
 				time.Sleep(backoff)
+			}
+			if a.stopped.Load() {
+				return
 			}
 			continue
 		}
@@ -1639,6 +1745,17 @@ func (a *Agent) Run(targets []string, instruction string) {
 			}
 
 			resultMsg := formatToolResult(tc.Name, result)
+			if a.boundedContextEnabled() && result.Error == "" {
+				// Information-complete archiving: persist the COMPLETE raw
+				// output (pre-truncation) so aged stubs can point at a
+				// byte-identical retrievable original.
+				minBytes := a.toolArchiveMinBytes()
+				if len(result.Output) >= minBytes {
+					if id := a.scanCtx.ToolOutputs.Archive(tc.Name, result.Output, minBytes); id != "" {
+						resultMsg = strings.TrimRight(resultMsg, "\n") + "\n" + archiveToolResultMarker(id)
+					}
+				}
+			}
 			a.msgMu.Lock()
 			a.messages = append(a.messages, llm.Message{Role: "user", Content: resultMsg})
 			a.msgMu.Unlock()
@@ -1665,7 +1782,18 @@ func (a *Agent) Run(targets []string, instruction string) {
 		if a.shouldPruneBeforeLLM() {
 			a.pruneMessages()
 		}
-		// ZERO DELAY — immediately proceed to next iteration
+		// Optional iteration delay to pace LLM request velocity and conserve provider rolling-window quotas.
+		if delay := a.getIterationDelay(); delay > 0 && !a.stopped.Load() && (a.maxIter == 0 || iter+1 < a.maxIter) {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-a.ctx.Done():
+				timer.Stop()
+			}
+			if a.stopped.Load() || (a.ctx != nil && a.ctx.Err() != nil) {
+				break
+			}
+		}
 	}
 
 	// The loop exited. Report the ACTUAL termination reason instead of always
@@ -1908,6 +2036,61 @@ func (a *Agent) SetResumeBriefing(s string) {
 	a.resumeBriefing = strings.TrimSpace(s)
 }
 
+func (a *Agent) getIterationDelay() time.Duration {
+	if a == nil {
+		return 0
+	}
+	if ms := a.iterationDelayMs.Load(); ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	if a.cfg != nil && a.cfg.IterationDelaySec > 0 {
+		return time.Duration(a.cfg.IterationDelaySec * float64(time.Second))
+	}
+	return 0
+}
+
+// SetIterationDelay dynamically updates the iteration delay in seconds.
+// It updates the agent's internal delay, its configuration, and recursively propagates
+// to any active child/subagent runners.
+func (a *Agent) SetIterationDelay(delaySec float64) {
+	if a == nil {
+		return
+	}
+	if delaySec < 0 {
+		delaySec = 0
+	}
+	a.iterationDelayMs.Store(int64(delaySec * 1000))
+	if a.cfg != nil {
+		a.cfg.IterationDelaySec = delaySec
+	}
+	a.childrenMu.Lock()
+	for child := range a.children {
+		child.SetIterationDelay(delaySec)
+	}
+	a.childrenMu.Unlock()
+}
+
+func (a *Agent) registerChildAgent(child *Agent) {
+	if a == nil || child == nil {
+		return
+	}
+	a.childrenMu.Lock()
+	if a.children == nil {
+		a.children = make(map[*Agent]struct{})
+	}
+	a.children[child] = struct{}{}
+	a.childrenMu.Unlock()
+}
+
+func (a *Agent) unregisterChildAgent(child *Agent) {
+	if a == nil || child == nil {
+		return
+	}
+	a.childrenMu.Lock()
+	delete(a.children, child)
+	a.childrenMu.Unlock()
+}
+
 // prepareScanEnvironment wires per-scan authenticated-session credentials and
 // whitebox source into the shared scan context. Runs at the start of Run()
 // (in the scan's own goroutine, so a slow git clone never blocks scan
@@ -2137,4 +2320,105 @@ func fixHttpxConflict() {
 			}
 		}
 	})
+}
+
+func determineAgentType(agentName string, isDelegated bool) string {
+	if !isDelegated {
+		return scanctx.AgentTypeRoot
+	}
+	lower := strings.ToLower(agentName)
+	switch {
+	case strings.Contains(lower, "authz") || strings.Contains(lower, "logic"):
+		return scanctx.AgentTypeAuthzLogic
+	case strings.Contains(lower, "inject") || strings.Contains(lower, "server"):
+		return scanctx.AgentTypeInjectionServer
+	case strings.Contains(lower, "client") || strings.Contains(lower, "source") || strings.Contains(lower, "xss"):
+		return scanctx.AgentTypeClientSource
+	case strings.Contains(lower, "verifier") || strings.Contains(lower, "verify"):
+		return scanctx.AgentTypeVerifier
+	default:
+		return scanctx.AgentTypeOther
+	}
+}
+
+func calculateMessageMetrics(msgs []llm.Message) (totalBytes, sysBytes, userBytes, asstBytes, toolCount, toolBytes, skillCount, skillBytes int) {
+	for _, m := range msgs {
+		b := len(m.Content)
+		totalBytes += b
+		switch m.Role {
+		case "system":
+			sysBytes += b
+		case "assistant":
+			asstBytes += b
+		case "user":
+			userBytes += b
+			isTool := strings.Contains(m.Content, "<function_results>") || strings.Contains(m.Content, "Tool '") || strings.Contains(m.Content, "result:\n")
+			if isTool {
+				toolCount++
+				toolBytes += b
+				if strings.Contains(m.Content, "read_skill") || strings.Contains(m.Content, "list_skills") || strings.Contains(m.Content, "Skill already loaded") {
+					skillCount++
+					skillBytes += b
+				}
+			}
+		}
+	}
+	return
+}
+
+func (a *Agent) recordTokenAttribution(usage *llm.TokenUsage, msgs []llm.Message, iter int, category string, retryAttempt int) {
+	if a == nil || a.scanCtx == nil || a.scanCtx.Tokens == nil {
+		return
+	}
+	totBytes, sysBytes, usrBytes, asstBytes, tCount, tBytes, sCount, sBytes := calculateMessageMetrics(msgs)
+	pTokens, outTokens, _ := a.client.GetTokens()
+
+	model := ""
+	provider := ""
+	if a.cfg != nil {
+		model = a.cfg.LLM
+		provider = a.cfg.LLMProvider
+	}
+
+	rec := scanctx.TokenAttribution{
+		ScanID:                  a.scanCtx.ID,
+		AgentID:                 a.ID,
+		AgentType:               determineAgentType(a.Name, a.state != nil && a.state.DelegatedAgent),
+		Iteration:               iter,
+		Model:                   model,
+		Provider:                provider,
+		PromptTokens:            0,
+		CompletionTokens:        0,
+		TotalTokens:             0,
+		CachedInputTokens:       0,
+		UncachedInputTokens:     0,
+		MessageCount:            len(msgs),
+		SerializedMessageBytes:  totBytes,
+		SystemMessageBytes:      sysBytes,
+		UserMessageBytes:        usrBytes,
+		AssistantMessageBytes:   asstBytes,
+		ToolResultCount:         tCount,
+		ToolResultBytes:         tBytes,
+		SkillResultCount:        sCount,
+		SkillResultBytes:        sBytes,
+		ConversationBufferBytes: totBytes,
+		RetryAttempt:            retryAttempt,
+		RequestCategory:         category,
+		CompactionCount:         a.compactionCount,
+		AgentCumulativePrompt:   pTokens,
+		AgentCumulativeOutput:   outTokens,
+		Timestamp:               time.Now(),
+	}
+	if usage != nil {
+		rec.PromptTokens = usage.PromptTokens
+		rec.CompletionTokens = usage.CompletionTokens
+		rec.TotalTokens = usage.TotalTokens
+		rec.CachedInputTokens = usage.GetCachedTokens()
+		rec.CacheReported = usage.HasCachedTokens
+		rec.UncachedInputTokens = usage.PromptTokens - rec.CachedInputTokens
+		if rec.UncachedInputTokens < 0 {
+			rec.UncachedInputTokens = 0
+		}
+	}
+	a.scanCtx.Tokens.Record(rec)
 }

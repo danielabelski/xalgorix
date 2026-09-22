@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.png?v=4.6.7" alt="Xalgorix — AI Autonomous Penetration Testing Platform" width="860" />
+<img src="assets/banner.png?v=4.6.91" alt="Xalgorix — AI Autonomous Penetration Testing Platform" width="860" />
 
 <br />
 
@@ -271,6 +271,26 @@ The image is **batteries-included**: an extensive offensive-security toolset is 
 The container runs as root by design (the engine only enables runtime auto-install for uid 0, and apt/go/cargo installs need system write access). Treat it as a disposable, network-isolated scanning sandbox. The same tags publish a multi-platform manifest for `linux/amd64` and `linux/arm64`, so Docker selects the native image automatically.
 
 On first run, if you don't set dashboard auth the container **generates a random admin password and prints it to the logs** (the image binds `0.0.0.0`, which the engine won't do without auth). Set `XALGORIX_USERNAME` + `XALGORIX_PASSWORD` (or `XALGORIX_PASSWORD_HASH`) to use your own. The binary never self-updates inside the container (`XALGORIX_NO_AUTO_UPDATE=1`) — pull a new image tag to upgrade. The **nuclei** engine and its vuln templates are refreshed to the latest on every image build (the release CI and `redeploy.sh` force this); pass `--build-arg NUCLEI_VERSION=vX.Y.Z` to pin the engine, or `NUCLEI_REFRESH=0 ./redeploy.sh` to reuse Docker's cache.
+
+### ☸️ Kubernetes (Helm)
+
+A Helm chart is included in the repository at [`deploy/chart`](deploy/chart). There is no hosted chart repository, so install from a git checkout:
+
+```bash
+git clone https://github.com/xalgorix/xalgorix.git
+cd xalgorix
+helm install xalgorix deploy/chart \
+  --namespace xalgorix --create-namespace \
+  --set auth.username=admin \
+  --set auth.password=change-me \
+  --set env.secret.XALGORIX_LLM=openai/gpt-5.6 \
+  --set env.secret.XALGORIX_API_KEY=your_openai_api_key
+```
+
+- The dashboard listens on port `9137`. Expose it with `ingress.enabled` (Ingress controller) or `httproute.enabled` (Gateway API) — never without dashboard auth.
+- Scan data and persisted dashboard settings live on a PVC mounted at `/data` (see `persistence` in `values.yaml`). Settings changed in the dashboard's Settings UI are written to `/data/.xalgorix.env` and take precedence over chart-provided env vars on restart.
+- Any `XALGORIX_*` variable can be passed through `env.raw`, `env.config`, or `env.secret`. Dashboard credentials go in `auth`, or point `auth.existingSecret` at a Secret containing `XALGORIX_USERNAME`/`XALGORIX_PASSWORD`.
+- The bundled toolset expects the same elevated permissions as the Docker run (`NET_ADMIN`, `NET_RAW`, `SYS_PTRACE`, seccomp `Unconfined`) — see the `securityContext` examples in `values.yaml`.
 
 ### 📋 Requirements (build from source)
 
@@ -704,6 +724,7 @@ Some settings require a restart because they affect process startup or server bi
 | `XALGORIX_RATE_RPS`            | `10`         | Sustained outbound request rate.                   |
 | `XALGORIX_RATE_BURST`          | `20`         | Outbound burst size.                               |
 | `XALGORIX_USE_PROXY`           | `false`      | Enable proxy routing.                              |
+| `XALGORIX_PROXY_REQUIRED`      | `false`      | Require one upstream proxy for target HTTP/browser paths without direct fallback. |
 | `XALGORIX_PROXY_URL`           | none         | Single proxy URL. Overrides proxy file.            |
 | `XALGORIX_PROXY_FILE`          | none         | File containing one proxy per line.                |
 | `XALGORIX_PROXY_ROTATION`      | `roundrobin` | Proxy rotation strategy: `roundrobin` or `random`. |
@@ -795,6 +816,8 @@ Web-mode scan data is stored under:
 ```
 
 The server keeps historical scan records on disk so the UI can recover after refresh or restart.
+
+In the Docker image and the Helm chart, this directory is the `/data` volume (`XALGORIX_DATA_DIR=/data`), persisted to a named volume or a PVC.
 
 ## 🧪 Development
 

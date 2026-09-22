@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +116,10 @@ type Registry struct {
 	tools          map[string]*Tool
 	circuitBreaker *CircuitBreaker
 	scanContextID  string // ID of the ScanContext this registry belongs to
+	contentChecker func(snippet string) bool
+	// schemaHidden withholds tool DOCUMENTATION from SchemaXML for role
+	// scoping. Hidden tools stay registered and executable.
+	schemaHidden map[string]bool
 }
 
 // NewRegistry creates a new tool registry.
@@ -123,6 +128,26 @@ func NewRegistry() *Registry {
 		tools:          make(map[string]*Tool),
 		circuitBreaker: NewCircuitBreaker(5, 60), // 5 failures, 60s recovery
 	}
+}
+
+// SetContentChecker associates a function that checks whether a content snippet
+// is present in the active conversation context.
+func (r *Registry) SetContentChecker(fn func(snippet string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.contentChecker = fn
+}
+
+// HasActiveContent reports whether the given content snippet is present in the
+// active conversation context. If no checker is registered, it returns false.
+func (r *Registry) HasActiveContent(snippet string) bool {
+	r.mu.RLock()
+	fn := r.contentChecker
+	r.mu.RUnlock()
+	if fn == nil {
+		return false
+	}
+	return fn(snippet)
 }
 
 // SetScanContextID associates this registry with a ScanContext.
@@ -350,7 +375,21 @@ func (r *Registry) SchemaXML() string {
 	defer r.mu.RUnlock()
 
 	out := "<tools>\n"
+	// Sorted tool order: map iteration is randomized per call, which made the
+	// schema section of the system prompt a different byte layout on every
+	// build (hurting provider prefix-cache stability and reproducibility).
+	// Content is unchanged — only the order becomes canonical.
+	sortedTools := make([]*Tool, 0, len(r.tools))
 	for _, t := range r.tools {
+		sortedTools = append(sortedTools, t)
+	}
+	sort.Slice(sortedTools, func(i, j int) bool { return sortedTools[i].Name < sortedTools[j].Name })
+	var hidden []string
+	for _, t := range sortedTools {
+		if r.schemaHidden[t.Name] {
+			hidden = append(hidden, t.Name)
+			continue
+		}
 		out += fmt.Sprintf("  <tool name=\"%s\">\n", attrEscape(t.Name))
 		out += fmt.Sprintf("    <description>%s</description>\n", textEscape(t.Description))
 		if len(t.Parameters) > 0 {
@@ -367,7 +406,42 @@ func (r *Registry) SchemaXML() string {
 		}
 		out += "  </tool>\n"
 	}
+	// Role-scoped schema: tools hidden from the prompt stay REGISTERED and
+	// callable — only their documentation is withheld. The one-line index
+	// keeps the model aware they exist (no phantom gaps), so the reachable
+	// tool set is unchanged; the coordinator retains full documentation.
+	if len(hidden) > 0 {
+		out += fmt.Sprintf("  <hidden_tools>%s</hidden_tools>\n", strings.Join(hidden, ", "))
+		out += "  <note>hidden_tools exist and remain callable but are outside your delegated lane; your coordinator retains them. If your assigned lane genuinely requires one, say so in your lane results instead of improvising.</note>\n"
+	}
 	out += "</tools>\n"
+	return out
+}
+
+// SetSchemaHidden withholds the given tool names from SchemaXML output while
+// keeping them fully registered and executable. nil/empty clears the scope.
+func (r *Registry) SetSchemaHidden(names []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(names) == 0 {
+		r.schemaHidden = nil
+		return
+	}
+	r.schemaHidden = make(map[string]bool, len(names))
+	for _, n := range names {
+		r.schemaHidden[n] = true
+	}
+}
+
+// SchemaHiddenNames returns the tools currently withheld from the schema.
+func (r *Registry) SchemaHiddenNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.schemaHidden))
+	for n := range r.schemaHidden {
+		out = append(out, n)
+	}
+	sort.Strings(out)
 	return out
 }
 

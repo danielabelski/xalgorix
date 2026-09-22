@@ -91,6 +91,13 @@ type ScanContext struct {
 	// coordinator reconcile work executed by parallel delegated specialists.
 	Coverage *CoverageStore
 
+	// Tokens tracks per-request token attribution and post-scan efficiency metrics.
+	Tokens *TokenTracker
+	// ToolOutputs archives the complete raw output of every tool result so
+	// aged tool-result messages can be replaced by retrieval stubs without
+	// losing any information (bounded working context backing store).
+	ToolOutputs *ToolArchive
+
 	// ctx/cancel for the scan's lifecycle
 	Ctx    context.Context
 	Cancel context.CancelFunc
@@ -104,17 +111,25 @@ type ScanContext struct {
 // New creates a fresh ScanContext for an isolated scan session.
 func New(id, scanDir string) *ScanContext {
 	ctx, cancel := context.WithCancel(context.Background())
+	tokens := NewTokenTracker()
+	if scanDir != "" {
+		// Compact per-request token records + aggregate summary persist under
+		// the scan directory so diagnostics survive completion and restarts.
+		tokens.SetPersistDir(scanDir)
+	}
 	return &ScanContext{
-		ID:       id,
-		ScanDir:  scanDir,
-		Vulns:    NewVulnStore(),
-		Notes:    NewNoteStore(),
-		Terminal: NewTerminalState(),
-		Browser:  NewBrowserState(),
-		Ledger:   NewLedgerStore(),
-		Coverage: NewCoverageStore(),
-		Ctx:      ctx,
-		Cancel:   cancel,
+		ID:          id,
+		ScanDir:     scanDir,
+		Vulns:       NewVulnStore(),
+		Notes:       NewNoteStore(),
+		Terminal:    NewTerminalState(),
+		Browser:     NewBrowserState(),
+		Ledger:      NewLedgerStore(),
+		Coverage:    NewCoverageStore(),
+		Tokens:      tokens,
+		ToolOutputs: NewToolArchive(scanDir),
+		Ctx:         ctx,
+		Cancel:      cancel,
 	}
 }
 

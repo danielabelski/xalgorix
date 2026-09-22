@@ -136,11 +136,18 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_CONTEXT_COMPACT_RATIO", Label: "Context compaction ratio", Category: "LLM", Description: "Fraction of the context window at which to auto-compact (0.5–0.9). Default 0.75 = compact at ~75% full. Compacting earlier discards useful working context and hurts output quality; going higher risks hitting the provider's hard limit first.", DefaultValue: "0.75", InputType: "number"},
 		{Key: "XALGORIX_CONTEXT_COMPACT_TOKENS", Label: "Context compaction budget (tokens, override)", Category: "LLM", Description: "Optional ABSOLUTE override for the compaction trigger. Leave at -1 (auto) to derive the trigger from the context window × ratio above. Set a positive token count to force a fixed budget instead. 0 disables auto-compaction. Default -1 (auto).", DefaultValue: "-1", InputType: "number"},
 		{Key: "XALGORIX_MEMORY_COMPRESSOR_TIMEOUT", Label: "Memory compressor timeout", Category: "LLM", Description: "Timeout in seconds for context compression.", DefaultValue: "30", InputType: "number"},
+		{Key: "XALGORIX_BOUNDED_CONTEXT", Label: "Bounded working context (token saver)", Category: "LLM", Description: "Archive the complete raw output of every tool result to disk and replace tool-result messages older than the active window below with compact retrieval stubs. The model fetches the byte-identical original via read_tool_output when needed — no information is lost, aged raw output just stops being resent on every iteration. Measured fleet impact: 40-60% input-token reduction. Applies to NEW scans.", DefaultValue: "false", InputType: "boolean"},
+		{Key: "XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW", Label: "Bounded context: active window", Category: "LLM", Description: "How many recent tool-result messages stay verbatim in the conversation before older ones become retrieval stubs (used by bounded working context above).", DefaultValue: "8", InputType: "number"},
+		{Key: "XALGORIX_TOOL_ARCHIVE_MIN_BYTES", Label: "Bounded context: archive threshold (bytes)", Category: "LLM", Description: "Minimum raw-output size before a tool result is archived/stubbed. Smaller results stay in-context verbatim.", DefaultValue: "1500", InputType: "number"},
+		{Key: "XALGORIX_ROLE_SCOPED_TOOLS", Label: "Role-scoped specialist tools (token saver)", Category: "LLM", Description: "Withhold documentation of role-foreign tools (e.g. browser tools from the authz specialist) from delegated specialists' prompts. Hidden tools remain callable and are listed in a compact index, so the reachable tool set is unchanged. Applies to NEW scans.", DefaultValue: "false", InputType: "boolean"},
+		{Key: "XALGORIX_LLM_MAX_INFLIGHT", Label: "LLM max in-flight concurrency", Category: "LLM", Description: "Maximum concurrent requests sent to the LLM provider across all scans and subagents. Clamps token velocity to prevent exhausting provider rolling-window rate limits or quotas. Default is 4 × MaxInstances. Takes effect after restart.", Placeholder: "4", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_ITERATIONS", Label: "Max iterations", Category: "Runtime", Description: "Maximum agent iterations per scan. 0 means unlimited.", DefaultValue: "0", InputType: "number"},
 		{Key: "XALGORIX_MIN_ITERATIONS", Label: "Min iterations (testing floor)", Category: "Runtime", Description: "Minimum testing floor in iterations before the gatekeeper permits finish. Ensures deep probing (OAST, ReDoS, fuzzing) before concluding.", DefaultValue: "50", InputType: "number"},
 		{Key: "XALGORIX_NO_TOOL_ABORT_AT", Label: "No-tool loop limit", Category: "Runtime", Description: "Consecutive assistant responses without a parsed tool call before cleanly stopping. Default 30; 0 disables this safety limit.", DefaultValue: "30", InputType: "number"},
 		{Key: "XALGORIX_MAX_WILDCARD_SUBDOMAINS", Label: "Wildcard subdomain cap", Category: "Runtime", Description: "Optional maximum full LLM sessions expanded from one wildcard target. Default -1 means unlimited; set a positive value only for an explicit emergency resource cap.", DefaultValue: "-1", InputType: "number"},
 		{Key: "XALGORIX_MAX_FINISH_REJECTIONS", Label: "Max finish rejections", Category: "Runtime", Description: "Number of times the agent's finish call will be rejected by the gatekeeper before allowing a deadlock bypass, enforcing deeper testing coverage.", DefaultValue: "15", InputType: "number"},
+		{Key: "XALGORIX_MAX_CONCURRENT_AGENTS", Label: "Max concurrent subagents", Category: "Runtime", Description: "Maximum delegated specialist subagents executing simultaneously per scan. Set to 1 to run specialists serially one at a time. Default 3.", DefaultValue: "3", InputType: "number", RequiresRestart: true},
+		{Key: "XALGORIX_ITERATION_DELAY", Label: "Iteration delay (seconds)", Category: "Runtime", Description: "Pause in seconds between agent reasoning iterations. Paces LLM request velocity to stay within rolling-window provider rate limits. 0 disables delay (default). Takes effect immediately.", DefaultValue: "0", InputType: "number"},
 		{Key: "XALGORIX_MAX_TOOL_CALLS", Label: "Max tool calls (budget)", Category: "Runtime", Description: "Per-scan tool-call cap; the scan stops cleanly when reached (findings preserved). 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_DURATION", Label: "Max duration seconds (budget)", Category: "Runtime", Description: "Per-scan wall-clock cap in seconds; the scan stops cleanly when reached. 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_TOKENS", Label: "Max LLM tokens (budget)", Category: "Runtime", Description: "Per-scan total-token cap; the scan stops cleanly when reached. 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
@@ -169,10 +176,11 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_RATE_RPS", Label: "Outbound RPS", Category: "Rate limits", Description: "Sustained per-domain outbound request rate.", DefaultValue: "10", InputType: "number"},
 		{Key: "XALGORIX_RATE_BURST", Label: "Outbound burst", Category: "Rate limits", Description: "Per-domain outbound burst size.", DefaultValue: "20", InputType: "number"},
 
-		{Key: "XALGORIX_USE_PROXY", Label: "Use proxy", Category: "Proxy", Description: "Enable proxy routing for outbound traffic.", DefaultValue: "false", InputType: "boolean"},
-		{Key: "XALGORIX_PROXY_URL", Label: "Proxy URL", Category: "Proxy", Description: "Single proxy URL. Overrides proxy file when set.", Placeholder: "socks5://user:pass@127.0.0.1:1080", InputType: "secret", Sensitive: true},
-		{Key: "XALGORIX_PROXY_FILE", Label: "Proxy file", Category: "Proxy", Description: "Path to a file with one proxy per line.", Placeholder: "/path/to/proxies.txt", InputType: "path"},
-		{Key: "XALGORIX_PROXY_ROTATION", Label: "Proxy rotation", Category: "Proxy", Description: "Proxy rotation strategy.", DefaultValue: "roundrobin", InputType: "select", Options: []string{"roundrobin", "random"}},
+		{Key: "XALGORIX_USE_PROXY", Label: "Use proxy", Category: "Proxy", Description: "Enable proxy routing for outbound traffic. Takes effect after restart.", DefaultValue: "false", InputType: "boolean", RequiresRestart: true},
+		{Key: "XALGORIX_PROXY_REQUIRED", Label: "Require proxy for scan HTTP", Category: "Proxy", Description: "Reject missing proxy configuration; route built-in scan HTTP/browser via the proxy and fail requests if it is down. Shell tools still require network isolation. Takes effect after restart.", DefaultValue: "false", InputType: "boolean", RequiresRestart: true},
+		{Key: "XALGORIX_PROXY_URL", Label: "Proxy URL", Category: "Proxy", Description: "Single proxy URL. Overrides proxy file when set. Takes effect after restart.", Placeholder: "socks5://user:pass@127.0.0.1:1080", InputType: "secret", Sensitive: true, RequiresRestart: true},
+		{Key: "XALGORIX_PROXY_FILE", Label: "Proxy file", Category: "Proxy", Description: "Path to a file with one proxy per line. Takes effect after restart.", Placeholder: "/path/to/proxies.txt", InputType: "path", RequiresRestart: true},
+		{Key: "XALGORIX_PROXY_ROTATION", Label: "Proxy rotation", Category: "Proxy", Description: "Proxy rotation strategy. Takes effect after restart.", DefaultValue: "roundrobin", InputType: "select", Options: []string{"roundrobin", "random"}, RequiresRestart: true},
 		{Key: "XALGORIX_TLS_SKIP_VERIFY", Label: "Skip TLS verification", Category: "Proxy", Description: "Allow insecure TLS verification for proxied/testing traffic.", DefaultValue: "false", InputType: "boolean"},
 
 		{Key: "XALGORIX_WORKSPACE", Label: "Workspace", Category: "Runtime", Description: "Workspace root for scan execution.", InputType: "path", RequiresRestart: true},
@@ -765,12 +773,30 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.LLMContextWindow = parseIntSetting(value, 128000)
 		case "XALGORIX_CONTEXT_COMPACT_RATIO":
 			s.cfg.ContextCompactRatio = parseFloatSetting(value, 0.75)
+		case "XALGORIX_BOUNDED_CONTEXT":
+			s.cfg.BoundedContext = parseBoolSetting(value, false)
+		case "XALGORIX_TOOL_ARCHIVE_MIN_BYTES":
+			s.cfg.ToolArchiveMinBytes = parseIntSetting(value, 1500)
+		case "XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW":
+			s.cfg.ToolArchiveActiveWindow = parseIntSetting(value, 8)
+		case "XALGORIX_ROLE_SCOPED_TOOLS":
+			s.cfg.RoleScopedTools = parseBoolSetting(value, false)
 		case "XALGORIX_MEMORY_COMPRESSOR_TIMEOUT":
 			s.cfg.MemCompTimeout = parseIntSetting(value, 30)
 		case "XALGORIX_MAX_ITERATIONS":
 			s.cfg.MaxIterations = parseIntSetting(value, 0)
 		case "XALGORIX_MIN_ITERATIONS":
 			s.cfg.MinIterations = parseIntSetting(value, 50)
+		case "XALGORIX_ITERATION_DELAY":
+			delay := parseFloatSetting(value, 0)
+			s.cfg.IterationDelaySec = delay
+			s.mu.Lock()
+			for _, agnt := range s.currentAgents {
+				if agnt != nil {
+					agnt.SetIterationDelay(delay)
+				}
+			}
+			s.mu.Unlock()
 		case "XALGORIX_MAX_WILDCARD_SUBDOMAINS":
 			s.cfg.MaxWildcardSubdomains = parseIntSetting(value, -1)
 		case "XALGORIX_NO_TOOL_ABORT_AT":
@@ -844,6 +870,8 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.AllowAutoInstallSudo = parseBoolSetting(value, false)
 		case "XALGORIX_USE_PROXY":
 			s.cfg.UseProxy = parseBoolSetting(value, false)
+		case "XALGORIX_PROXY_REQUIRED":
+			s.cfg.ProxyRequired = parseBoolSetting(value, false)
 		case "XALGORIX_PROXY_FILE":
 			s.cfg.ProxyFile = value
 		case "XALGORIX_PROXY_ROTATION":
@@ -895,12 +923,22 @@ func (s *Server) envSettingValue(key string) string {
 		return strconv.Itoa(s.cfg.LLMContextWindow)
 	case "XALGORIX_CONTEXT_COMPACT_RATIO":
 		return strconv.FormatFloat(s.cfg.ContextCompactRatio, 'g', -1, 64)
+	case "XALGORIX_BOUNDED_CONTEXT":
+		return strconv.FormatBool(s.cfg.BoundedContext)
+	case "XALGORIX_TOOL_ARCHIVE_MIN_BYTES":
+		return strconv.Itoa(s.cfg.ToolArchiveMinBytes)
+	case "XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW":
+		return strconv.Itoa(s.cfg.ToolArchiveActiveWindow)
+	case "XALGORIX_ROLE_SCOPED_TOOLS":
+		return strconv.FormatBool(s.cfg.RoleScopedTools)
 	case "XALGORIX_MEMORY_COMPRESSOR_TIMEOUT":
 		return strconv.Itoa(s.cfg.MemCompTimeout)
 	case "XALGORIX_MAX_ITERATIONS":
 		return strconv.Itoa(s.cfg.MaxIterations)
 	case "XALGORIX_MIN_ITERATIONS":
 		return strconv.Itoa(s.cfg.MinIterations)
+	case "XALGORIX_ITERATION_DELAY":
+		return strconv.FormatFloat(s.cfg.IterationDelaySec, 'g', -1, 64)
 	case "XALGORIX_MAX_WILDCARD_SUBDOMAINS":
 		return strconv.Itoa(s.cfg.MaxWildcardSubdomains)
 	case "XALGORIX_NO_TOOL_ABORT_AT":
@@ -963,6 +1001,8 @@ func (s *Server) envSettingValue(key string) string {
 		return strconv.FormatBool(s.cfg.AllowAutoInstallSudo)
 	case "XALGORIX_USE_PROXY":
 		return strconv.FormatBool(s.cfg.UseProxy)
+	case "XALGORIX_PROXY_REQUIRED":
+		return strconv.FormatBool(s.cfg.ProxyRequired)
 	case "XALGORIX_PROXY_FILE":
 		return s.cfg.ProxyFile
 	case "XALGORIX_PROXY_ROTATION":
@@ -1057,6 +1097,8 @@ func normalizeEnvSettingValue(def envSettingDefinition, value string) (string, e
 		return strconv.Itoa(clampInt(parseIntSetting(value, 60), 10, 3600)), nil
 	case "XALGORIX_LLM_MAX_RETRIES":
 		return strconv.Itoa(clampInt(parseIntSetting(value, 5), 0, 20)), nil
+	case "XALGORIX_LLM_MAX_INFLIGHT":
+		return strconv.Itoa(clampInt(parseIntSetting(value, 4), 1, 256)), nil
 	case "XALGORIX_MAX_RATE_LIMIT_WAIT":
 		return strconv.Itoa(clampInt(parseIntSetting(value, 30*60), -1, 7*24*60*60)), nil
 	case "XALGORIX_MAX_OUTPUT_TOKENS":
@@ -1094,6 +1136,16 @@ func normalizeEnvSettingValue(def envSettingDefinition, value string) (string, e
 		return strconv.Itoa(clampInt(parseIntSetting(value, -1), -1, 1000)), nil
 	case "XALGORIX_MAX_FINISH_REJECTIONS":
 		return strconv.Itoa(clampInt(parseIntSetting(value, 15), 1, 100)), nil
+	case "XALGORIX_MAX_CONCURRENT_AGENTS":
+		return strconv.Itoa(clampInt(parseIntSetting(value, 3), 1, 10)), nil
+	case "XALGORIX_ITERATION_DELAY":
+		d := parseFloatSetting(value, 0)
+		if d < 0 {
+			d = 0
+		} else if d > 300 {
+			d = 300
+		}
+		return strconv.FormatFloat(d, 'g', -1, 64), nil
 	}
 	return value, nil
 }

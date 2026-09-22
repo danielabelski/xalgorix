@@ -196,6 +196,9 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	// 0. Create and activate a per-session ScanContext for isolation.
 	//    This must happen BEFORE any tool state is touched.
 	sctx := scanctx.New(sess.id, sess.scanDir)
+	// Resume continuity: reload compact per-request token records persisted
+	// before a restart so attribution aggregates continue across restarts.
+	sctx.Tokens.LoadPersisted()
 	scanctx.Activate(sctx)
 	sess.sctx = sctx
 	log.Printf("[scanctx] Activated context %s for target %s (dir=%s)", sctx.ID, sess.target, sess.scanDir)
@@ -355,8 +358,43 @@ func (s *Server) executeScanSession(sess *scanSession) {
 		return
 	}
 
+	// 8a. Abnormal LLM-side pause (provider rate limit, quota exhausted, overloaded).
+	// Persist the current record, notes, ledger, iteration count, and workspace
+	// exactly as the resume machinery expects, without failing or marking finished.
+	if isProviderPauseReason(sess.abortReason) {
+		stopReason := sess.abortReason
+		if stopReason == "llm_rate_limited" {
+			stopReason = "provider_rate_limited"
+		}
+		pausedAt := time.Now().Format(time.RFC3339)
+		sess.record.Status = "paused"
+		sess.record.StopReason = stopReason
+		sess.record.FinishedAt = pausedAt
+
+		if sess.instanceID != "" {
+			s.instancesMu.RLock()
+			inst, ok := s.instances[sess.instanceID]
+			s.instancesMu.RUnlock()
+			if ok {
+				inst.mu.Lock()
+				if inst.Status == "running" || inst.Status == "pending" || inst.Status == "" {
+					inst.Status = "paused"
+					inst.StopReason = stopReason
+					inst.FinishedAt = pausedAt
+					normalizeTerminalWildcardInstanceLocked(inst)
+				}
+				inst.mu.Unlock()
+			}
+		}
+
+		s.saveScanRecordTo(sess.record, sess.scanDir)
+		log.Printf("[SCAN] %s: agent paused (%s) at phase %d (%d iterations, %d tool calls); state preserved for resume",
+			sess.id, stopReason, sess.record.CurrentPhase, sess.record.Iterations, sess.record.ToolCalls)
+		return
+	}
+
 	// 8b. Abnormal LLM-side abort (agent bailed: refused tools / empty responses
-	// / repeated errors / rate-limit).
+	// / repeated errors / unrecoverable failure).
 	//
 	// Distinguish two very different situations that both surface as "the model
 	// stopped calling tools":
@@ -419,6 +457,7 @@ func (s *Server) executeScanSession(sess *scanSession) {
 				}
 			}
 			s.saveScanRecordTo(sess.record, sess.scanDir)
+			s.finalizeTokenUsage(sess)
 			return
 		}
 		// (a) findings exist or testing was performed → fall through to a normal "finished" completion.
@@ -427,16 +466,19 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	}
 
 	// 9. Finalize record
-	sess.record.Status = "finished"
-	sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+	if !s.finalizeScanSessionRecord(sess) {
+		// Interrupted (user stop / instance halt / server shutdown): the record
+		// is already persisted with its terminal status by
+		// finalizeScanSessionRecord. Token diagnostics still finalize so the
+		// summary reflects the aborted run too.
+		s.finalizeTokenUsage(sess)
+		return
+	}
 
-	// NOTE: merges are deferred to sess.cleanup() (Wave C 4.2) under
-	// safe.Recover boundaries to guarantee panic-safe persistence. Both
-	// mergeReportedVulnerabilitiesIntoRecord and MergeVulnsToContext are
-	// idempotent (each entry keyed by vuln id / summary tuple), so the
-	// clean-finish path runs the merges exactly once via cleanup().
-
-	s.saveScanRecordTo(sess.record, sess.scanDir)
+	// Token diagnostics: persist the aggregate summary and log the
+	// [token-analysis] completion line (observability only; no sensitive
+	// content).
+	s.finalizeTokenUsage(sess)
 
 	// 10. Generate report if requested (always generate, even for clean scans)
 	if sess.genReport {
@@ -589,18 +631,32 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		}
 	}
 
-	if evt.Type == "finished" {
+	if evt.Type == "finished" || evt.Type == "paused" {
 		// An abnormal LLM-side abort (refused tools / empty responses / repeated
-		// errors / rate-limit) reuses the "finished" event type but is NOT a
-		// clean completion. Record the reason so finalize marks the scan failed.
+		// errors / rate-limit) reuses the "finished" or "paused" event type but is NOT a
+		// clean completion. Record the reason so finalize marks the scan failed or paused.
 		// Delegated-agent events share the root event stream. A failed specialist
 		// must be surfaced to the coordinator (the agent graph marks it failed),
 		// but must not poison the root session's final status: the coordinator can
 		// still cover that lane itself or use another specialist.
-		if evt.Aborted && evt.AgentID == "" {
-			sess.abortReason = evt.AbortReason
-			if sess.abortReason == "" {
-				sess.abortReason = "llm_aborted"
+		// However, upstream provider unavailability (rate limits, quota exhaustion,
+		// server overload) impacts the shared provider/account and cannot be bypassed
+		// by switching agents, so provider-level pause reasons pause the root session.
+		isRoot := isRootAgentEvent(sess, evt)
+		isProviderPause := evt.Type == "paused" || isProviderPauseReason(evt.AbortReason)
+		if evt.Aborted && (isRoot || isProviderPause) {
+			if !isProviderPauseReason(sess.abortReason) || isProviderPause {
+				sess.abortReason = evt.AbortReason
+				if sess.abortReason == "" {
+					if evt.Type == "paused" {
+						sess.abortReason = "provider_rate_limited"
+					} else {
+						sess.abortReason = "llm_aborted"
+					}
+				}
+			}
+			if isProviderPause && sess.agent != nil {
+				sess.agent.Stop()
 			}
 		}
 		// Build set of vulns already broadcast in real-time to avoid duplicates
@@ -986,4 +1042,52 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func isProviderPauseReason(reason string) bool {
+	return reason == "provider_rate_limited" ||
+		reason == "provider_quota_exhausted" ||
+		reason == "provider_overloaded" ||
+		reason == "llm_rate_limited"
+}
+
+func isRootAgentEvent(sess *scanSession, evt agent.Event) bool {
+	if evt.AgentID == "" {
+		return true
+	}
+	if sess != nil && sess.agent != nil && sess.agent.ID != "" && evt.AgentID == sess.agent.ID {
+		return true
+	}
+	return !strings.HasPrefix(evt.AgentID, "sub_") && !strings.HasPrefix(evt.AgentID, "sync_")
+}
+
+// finalizeScanSessionRecord saves the terminal or interrupted scan record to disk.
+// Returns true if the scan finished normally and report generation should proceed,
+// or false if the session was interrupted/stopped and must not generate a report.
+func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
+	if sess == nil || sess.record == nil {
+		return false
+	}
+	if instStatus, stopReason := s.instanceRunStatus(sess.instanceID); isInterruptedInstanceStatus(instStatus) {
+		sess.record.Status = instStatus
+		sess.record.StopReason = stopReason
+		sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+		s.saveScanRecordTo(sess.record, sess.scanDir)
+		return false
+	}
+	if s.stopReq.Load() || (sess.parentCtx != nil && sess.parentCtx.Err() != nil) {
+		sess.record.Status = "stopped"
+		sess.record.StopReason = "server_shutdown"
+		sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+		s.saveScanRecordTo(sess.record, sess.scanDir)
+		return false
+	}
+
+	sess.record.Status = "finished"
+	sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+
+	// NOTE: merges are deferred to sess.cleanup() under safe.Recover boundaries
+	// to guarantee panic-safe persistence.
+	s.saveScanRecordTo(sess.record, sess.scanDir)
+	return true
 }

@@ -173,8 +173,11 @@ type responsesEvent struct {
 			} `json:"content"`
 		} `json:"output"`
 		Usage *struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens        int `json:"input_tokens"`
+			OutputTokens       int `json:"output_tokens"`
+			InputTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	} `json:"response"`
 	// Error events carry a message under `error` on some backends and at
@@ -208,6 +211,11 @@ func extractResponsesText(ev *responsesEvent) string {
 // SSE deltas are accumulated into the full text before returning, so the
 // agent loop sees the same blocking string contract as doChat.
 func (c *Client) doResponses(ctx context.Context, ep Endpoint, messages []Message) (string, error) {
+	resp, _, err := c.doResponsesWithUsage(ctx, ep, messages)
+	return resp, err
+}
+
+func (c *Client) doResponsesWithUsage(ctx context.Context, ep Endpoint, messages []Message) (string, *TokenUsage, error) {
 	effort := ""
 	if c.cfg != nil {
 		effort = c.cfg.ReasoningEffort
@@ -215,12 +223,12 @@ func (c *Client) doResponses(ctx context.Context, ep Endpoint, messages []Messag
 	reqBody := buildResponsesBody(ep.Model, messages, effort, true)
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal Responses request: %w", err)
+		return "", nil, fmt.Errorf("failed to marshal Responses request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep.URL, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -228,16 +236,17 @@ func (c *Client) doResponses(ctx context.Context, ep Endpoint, messages []Messag
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var full strings.Builder
+	var usage *TokenUsage
 	scanErr := scanResponsesSSE(resp.Body, func(ev *responsesEvent) {
 		switch ev.Type {
 		case "response.output_text.delta":
@@ -249,17 +258,32 @@ func (c *Client) doResponses(ctx context.Context, ep Endpoint, messages []Messag
 				full.WriteString(extractResponsesText(ev))
 			}
 			if ev.Response.Usage != nil {
+				cached := 0
+				if ev.Response.Usage.InputTokensDetails != nil {
+					cached = ev.Response.Usage.InputTokensDetails.CachedTokens
+				}
 				c.mu.Lock()
 				c.totalIn += ev.Response.Usage.InputTokens
 				c.totalOut += ev.Response.Usage.OutputTokens
+				c.totalCached += cached
 				c.mu.Unlock()
+				usage = &TokenUsage{
+					PromptTokens:     ev.Response.Usage.InputTokens,
+					CompletionTokens: ev.Response.Usage.OutputTokens,
+					TotalTokens:      ev.Response.Usage.InputTokens + ev.Response.Usage.OutputTokens,
+					CachedTokens:     cached,
+					HasCachedTokens:  cached > 0,
+					PromptTokensDetails: &PromptTokensDetails{
+						CachedTokens: cached,
+					},
+				}
 			}
 		}
 	})
 	if scanErr != nil {
-		return "", scanErr
+		return "", usage, scanErr
 	}
-	return full.String(), nil
+	return full.String(), usage, nil
 }
 
 // streamResponses performs a streaming Responses API call, forwarding text
@@ -307,9 +331,14 @@ func (c *Client) streamResponses(ctx context.Context, ep Endpoint, messages []Me
 			}
 		case "response.completed":
 			if ev.Response.Usage != nil {
+				cached := 0
+				if ev.Response.Usage.InputTokensDetails != nil {
+					cached = ev.Response.Usage.InputTokensDetails.CachedTokens
+				}
 				c.mu.Lock()
 				c.totalIn += ev.Response.Usage.InputTokens
 				c.totalOut += ev.Response.Usage.OutputTokens
+				c.totalCached += cached
 				c.mu.Unlock()
 			}
 		}

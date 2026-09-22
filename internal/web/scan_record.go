@@ -286,9 +286,15 @@ func (s *Server) seedResumeInstanceFromRecord(inst *ScanInstance, req ScanReques
 	if rec.LogoPath != "" {
 		inst.LogoPath = rec.LogoPath
 	}
-	inst.Iterations = rec.Iterations
-	inst.ToolCalls = rec.ToolCalls
-	inst.TotalTokens = rec.TotalTokens
+	if rec.Iterations > inst.Iterations {
+		inst.Iterations = rec.Iterations
+	}
+	if rec.ToolCalls > inst.ToolCalls {
+		inst.ToolCalls = rec.ToolCalls
+	}
+	if rec.TotalTokens > inst.TotalTokens {
+		inst.TotalTokens = rec.TotalTokens
+	}
 	inst.Vulns = append([]VulnSummary(nil), rec.Vulns...)
 	if rec.SubScans != nil {
 		inst.SubScans = cloneSubScanSummaries(rec.SubScans)
