@@ -30,7 +30,9 @@ serviceAccount:
   # -- Whether a service account should be created.
   create: true
   # -- Whether to automatically mount the service account API credentials.
-  automount: true
+  # Xalgorix never talks to the Kubernetes API; leave disabled unless a
+  # sidecar in the pod needs it.
+  automount: false
   # -- Annotations added to the service account.
   annotations: {}
   # -- Name of the service account to use.
@@ -145,6 +147,11 @@ readinessProbe: {}
 # -- Horizontal pod autoscaler for the deployment.
 autoscaling:
   # -- Whether to create a HorizontalPodAutoscaler instead of a fixed replica count.
+  # WARNING: Xalgorix is stateful (scans, reports and the persisted settings
+  # file live under /data). Scaling beyond one replica is NOT supported with
+  # local persistence: the default ReadWriteOnce PVC cannot multi-attach, and
+  # even with ReadWriteMany storage each replica keeps independent scan state.
+  # Leave disabled unless you run each replica as a single shared-nothing unit.
   enabled: false
   # -- Minimum number of replicas.
   minReplicas: 1
