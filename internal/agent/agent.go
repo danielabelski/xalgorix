@@ -143,14 +143,16 @@ type Agent struct {
 	cancel                     context.CancelFunc
 	lastActivity               time.Time
 	activityMu                 sync.Mutex
-	scanStart                  time.Time // when Run() was called
-	discoveryMode              bool      // When true, allow finish at any iteration (for Phase 1 enumeration)
-	allowedPhases              []int     // selected methodology phases, empty means all
-	reconMode                  string    // active or passive reconnaissance
-	scanIntensity              string    // active or passive testing/scanning
-	activityHosts              []string  // normalized target hosts used by passive policy
-	targets                    []string  // raw scan targets from Run(), used to resolve a base URL for probe_hypothesis
-	passiveReconGuardActive    bool      // full scans with passive recon block direct access until passive evidence is collected
+	scanStart                  time.Time        // when Run() was called
+	discoveryMode              bool             // When true, allow finish at any iteration (for Phase 1 enumeration)
+	allowedPhases              []int            // selected methodology phases, empty means all
+	reconMode                  string           // active or passive reconnaissance
+	scanIntensity              string           // active or passive testing/scanning
+	activityHosts              []string         // normalized target hosts used by passive policy
+	targets                    []string         // raw scan targets from Run(), used to resolve a base URL for probe_hypothesis
+	engagement                 *EngagementScope // runtime allow-list of authorized hosts built from targets — see engagement_scope.go
+	scopeStrict                bool             // XALGORIX_STRICT_SCOPE: refuse ALL traffic to non-authorized hosts (no dependency-probe tier)
+	passiveReconGuardActive    bool             // full scans with passive recon block direct access until passive evidence is collected
 	passiveReconGuardDone      bool
 	passiveReconPassiveLookups int
 	passiveReconBlockedActive  int
@@ -385,6 +387,7 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 		targetAuthB:  cfg.TargetAuthSecondary,
 		sourceRepo:   cfg.SourceRepo,
 		scanContext:  cfg.ScanContext,
+		scopeStrict:  cfg.StrictScope,
 		children:     make(map[*Agent]struct{}),
 	}
 	if cfg.IterationDelaySec > 0 {
@@ -1029,6 +1032,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 		return
 	}
 	a.targets = targets // remember the scan targets so probe_hypothesis can resolve a base URL for a bare path
+	a.engagement = buildEngagementScope(targets, true)
 	if a.scanCtx != nil && a.delegatedAgentID == "" {
 		a.scanCtx.SetTargets(targets)
 	}
