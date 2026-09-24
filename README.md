@@ -845,6 +845,8 @@ In the Docker image and the Helm chart, this directory is the `/data` volume (`X
 ## 🚨 Safety Notes
 
 - Use Xalgorix only against authorized targets.
+- Authorized targets are a runtime allow-list the agent cannot extend: gated tool calls naming any other host are rejected, and a discovered host is reported as a finding instead of probed (a narrow set of passive-recon, DNS, and package-infrastructure services remains reachable).
+- Database/schema reset primitives (`DROP TABLE`, `TRUNCATE`, `db:reset`, factory reset, …) are hard-blocked on every host — authorized targets included.
 - Do not run active testing against third-party systems without permission.
 - Review scan instructions before launching.
 - Configure rate limits and proxy settings to match engagement rules.

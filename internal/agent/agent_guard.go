@@ -350,12 +350,16 @@ func (a *Agent) shouldBlockForActivityPolicy(toolName string, toolArgs map[strin
 // read_skill, etc.) bypass this gate entirely — they are exempt
 // because they don't probe targets.
 //
-// Activity_Hosts (a.activityHosts) is intentionally NOT consulted
-// here. Engagement-scope policing is no longer the agent guard's
-// job; this function only protects the operator's machine and
-// listener (per design.md → "Open Question: Requirement 3.7"). The
-// Local_Or_Listener_Host check fires regardless of whether scope is
-// populated.
+//	Engagement_Scope (a.engagement) IS consulted here: the scan's
+//	configured targets are a runtime allow-list the agent cannot extend.
+//	A VDP disclosure (2026-09-24) showed an agent promoting a third-party
+//	backend it read out of the target's SPA bundle to a new target and
+//	issuing writes against production data — prompt rules lost to the
+//	agent's own reasoning, so the runtime holds the boundary. A
+//	discovered host is a finding, never a target. Database/schema reset
+//	primitives are additionally blocked on every host, authorized or not.
+//	The Local_Or_Listener_Host check still fires first, regardless of
+//	scope population.
 //
 // Returns (false, "") when:
 //
@@ -366,6 +370,7 @@ func (a *Agent) shouldBlockForOutOfScope(toolName string, toolArgs map[string]st
 	lowerTool := strings.ToLower(toolName)
 	switch lowerTool {
 	case "terminal_execute", "python_action", "browser_action", "page_agent", "pageagent",
+		"http_request", "send_request",
 		"report_vulnerability", "authz_matrix", "probe_hypothesis":
 		// gated
 	default:
@@ -383,6 +388,43 @@ func (a *Agent) shouldBlockForOutOfScope(toolName string, toolArgs map[string]st
 					"Refusing to probe localhost / RFC1918 / the dashboard's "+
 					"listener from a Gated_Tool.", h,
 			)
+		}
+	}
+
+	// Destructive database/schema reset primitives are blocked on every
+	// host — authorized or not — because they destroy state the operator
+	// cannot reconstruct from the scan, and a disclosed incident showed
+	// an agent reaching for the target's reset function as a "repair"
+	// for its own unreverted change. Only tools that EXECUTE traffic are
+	// screened; report_vulnerability and planning tools legitimately
+	// quote these strings as evidence text.
+	if isTrafficExecutingTool(lowerTool) {
+		for _, value := range toolArgs {
+			if containsDestructiveReset(strings.ToLower(value)) {
+				return true, "Refused: the argument matches a database/schema reset or wipe primitive " +
+					"(DROP TABLE / TRUNCATE / db:reset / factory reset / similar). Those are hard-blocked on every host. " +
+					"If the target exposes such a function, record it as a finding (unprotected destructive action) " +
+					"with evidence that does NOT execute it."
+			}
+		}
+	}
+
+	// Engagement-scope allow-list: the scan's configured targets are the
+	// only target-side hosts the agent may touch. Third-party service
+	// exemptions (passive recon, DNS, package infrastructure) are inside
+	// Authorized. A nil/empty scope enforces nothing.
+	if a.engagement.Enforces() {
+		for _, h := range extractEngagementHosts(toolName, toolArgs) {
+			if !a.engagement.Authorized(h) {
+				return true, fmt.Sprintf(
+					"OUT-OF-SCOPE: %q is outside the authorized engagement scope. "+
+						"A discovered host is a finding, not a new target: record its existence "+
+						"with add_note (and report_vulnerability only when the finding belongs to an "+
+						"authorized target, e.g. the target's frontend disclosing a sensitive backend "+
+						"reference), then continue testing the authorized targets. Do not reach, probe, "+
+						"or authenticate to %q.", h, h,
+				)
+			}
 		}
 	}
 
