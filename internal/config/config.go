@@ -20,12 +20,13 @@ import (
 // Config holds all Xalgorix configuration.
 type Config struct {
 	// LLM settings
-	LLM             string // XALGORIX_LLM — provider-native model ID (for example, "gpt-5.6" or "zai-org/glm-4.5")
-	LLMProvider     string // XALGORIX_LLM_PROVIDER — explicit provider ID; keeps provider routing separate from the model name
-	APIBase         string // XALGORIX_API_BASE — API endpoint
-	APIKey          string // XALGORIX_API_KEY — API key
-	LLMProfile      string // XALGORIX_LLM_PROFILE — active credential pointer "<provider>:<profileId>" (v4.4.22+)
-	ReasoningEffort string // XALGORIX_REASONING_EFFORT — "none", "low", "medium", "high", or "xhigh"
+	LLM             string   // XALGORIX_LLM — provider-native model ID (for example, "gpt-5.6" or "zai-org/glm-4.5")
+	LLMProvider     string   // XALGORIX_LLM_PROVIDER — explicit provider ID; keeps provider routing separate from the model name
+	APIBase         string   // XALGORIX_API_BASE — API endpoint
+	APIKey          string   // XALGORIX_API_KEY — API key
+	APIKeys         []string // XALGORIX_API_KEYS — additional provider API keys rotated to dodge provider rate limits (combined with APIKey)
+	LLMProfile      string   // XALGORIX_LLM_PROFILE — active credential pointer "<provider>:<profileId>" (v4.4.22+)
+	ReasoningEffort string   // XALGORIX_REASONING_EFFORT — "none", "low", "medium", "high", or "xhigh"
 
 	// Language is the output language for human-readable AI content — agent
 	// reasoning, notes, vulnerability findings, and post-scan chat. It does
@@ -388,6 +389,7 @@ func load() *Config {
 		LLMProvider:             envOr("XALGORIX_LLM_PROVIDER", ""),
 		APIBase:                 envOr("XALGORIX_API_BASE", ""),
 		APIKey:                  envOr("XALGORIX_API_KEY", ""),
+		APIKeys:                 ParseAPIKeyList(envOr("XALGORIX_API_KEYS", "")),
 		LLMProfile:              envOr("XALGORIX_LLM_PROFILE", ""),
 		ReasoningEffort:         envOr("XALGORIX_REASONING_EFFORT", "high"),
 		Language:                NormalizeLanguage(envOr("XALGORIX_LANGUAGE", DefaultLanguage)),
@@ -858,6 +860,31 @@ func resolveReadDenyList(home, raw string) []string {
 		if entry != "" {
 			out = append(out, entry)
 		}
+	}
+	return out
+}
+
+// ParseAPIKeyList splits a comma- (or whitespace/newline-) separated
+// list of API keys into a clean, de-duplicated slice, preserving the
+// original order. Used for XALGORIX_API_KEYS, the operator-facing key
+// pool that the LLM client rotates across to spread provider rate
+// limits.
+func ParseAPIKeyList(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	seen := make(map[string]struct{}, len(fields))
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if _, dup := seen[f]; dup {
+			continue
+		}
+		seen[f] = struct{}{}
+		out = append(out, f)
 	}
 	return out
 }
