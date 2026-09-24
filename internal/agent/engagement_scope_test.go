@@ -128,63 +128,97 @@ func TestContainsDestructiveReset(t *testing.T) {
 }
 
 // TestShouldBlockOutOfScopeSupabasePivotIncident reproduces the VDP
-// disclosure (2026-09-24) end-to-end: an agent authorized against
-// www.xalgorix.com reads the target's SPA bundle, then pivots to the
-// third-party Supabase backend it finds there. Every leg of that
-// pivot must now be rejected.
+// disclosure (2026-09-24) under the tier model. The zero-loss property is
+// the headline: the READ that found the real vulnerability (the anon
+// trust_pages read via the backend the target's SPA bundle discloses)
+// REMAINS POSSIBLE — while every mutating leg of the pivot (signup,
+// PATCH, DELETE, terminal writes) is refused.
 func TestShouldBlockOutOfScopeSupabasePivotIncident(t *testing.T) {
 	a := &Agent{}
 	a.engagement = buildEngagementScope([]string{"https://www.xalgorix.com"}, false)
 
-	// Reading the backend out of the target's frontend bundle: blocked.
+	// The discovery read — exactly how the trust_pages exposure was
+	// found — stays allowed. Blocking it would have prevented the
+	// vulnerability from ever being found.
 	blocked, reason := a.shouldBlockForOutOfScope("http_request", map[string]string{
-		"url":    "https://ncdrcdylkcstetmltagu.supabase.co/rest/v1/trust_pages?select=*",
-		"method": "GET",
+		"url":     "https://ncdrcdylkcstetmltagu.supabase.co/rest/v1/trust_pages?select=*",
+		"method":  "GET",
+		"headers": `{"apikey":"eyJhbGciOiJIUzI1NiJ9.example.anon"}`,
 	})
-	if !blocked || !strings.Contains(reason, "OUT-OF-SCOPE") {
-		t.Fatalf("anon read of the third-party backend must be rejected, got blocked=%v reason=%q", blocked, reason)
+	if blocked {
+		t.Fatalf("the dependency-read that finds exposed backends must stay allowed: %s", reason)
 	}
 
-	// Writes against it: blocked the same way.
-	for _, method := range []string{"POST", "PATCH", "DELETE"} {
-		blocked, _ = a.shouldBlockForOutOfScope("http_request", map[string]string{
-			"url":    "https://ncdrcdylkcstetmltagu.supabase.co/rest/v1/trust_pages",
-			"method": method,
-		})
-		if !blocked {
-			t.Fatalf("%s against the third-party backend must be rejected", method)
-		}
+	// An empty-body POST probe is allowed: it reveals the authorization
+	// boundary without mutating anything.
+	blocked, _ = a.shouldBlockForOutOfScope("http_request", map[string]string{
+		"url":    "https://ncdrcdylkcstetmltagu.supabase.co/rest/v1/trust_pages",
+		"method": "POST",
+	})
+	if blocked {
+		t.Fatal("an empty-body write probe against a dependency must stay allowed")
 	}
 
-	// The throwaway-account signup leg: blocked.
+	// Mutating writes are refused: the incident's PATCH.
+	blocked, reason = a.shouldBlockForOutOfScope("http_request", map[string]string{
+		"url":    "https://ncdrcdylkcstetmltagu.supabase.co/rest/v1/trust_pages",
+		"method": "PATCH",
+		"body":   `{"enabled":false}`,
+	})
+	if !blocked || !strings.Contains(reason, "OUT-OF-SCOPE WRITE") {
+		t.Fatalf("the incident's PATCH must be refused, got %v %q", blocked, reason)
+	}
+
+	// DELETE is never non-mutating, even with an empty body.
+	blocked, _ = a.shouldBlockForOutOfScope("http_request", map[string]string{
+		"url":    "https://ncdrcdylkcstetmltagu.supabase.co/rest/v1/trust_pages",
+		"method": "DELETE",
+	})
+	if !blocked {
+		t.Fatal("an empty-body DELETE still deletes: must be refused")
+	}
+
+	// The throwaway-account signup leg (POST with a body): refused.
 	blocked, _ = a.shouldBlockForOutOfScope("http_request", map[string]string{
 		"url":    "https://ncdrcdylkcstetmltagu.supabase.co/auth/v1/signup",
 		"method": "POST",
+		"body":   `{"email":"probe@nonexistent.example","password":"Abcd1234!"}`,
 	})
 	if !blocked {
-		t.Fatal("signup against the third-party backend must be rejected")
+		t.Fatal("account creation against the third-party backend must be refused")
 	}
 
-	// A terminal pivot is blocked too.
+	// A terminal write pivot is refused.
 	blocked, _ = a.shouldBlockForOutOfScope("terminal_execute", map[string]string{
-		"command": "curl -sS -X PATCH https://ncdrcdylkcstetmltagu.supabase.co/rest/v1/trust_pages -H 'apikey: eyJhbGciOiJIUzI1NiJ9' -d '{\"enabled\":false}'",
+		"command": "curl -sS -X PATCH https://ncdrcdylkcstetmltagu.supabase.co/rest/v1/trust_pages -H 'apikey: eyJhbGciOiJIUzI1NiJ9' --data-raw \"x=1\"",
 	})
 	if !blocked {
-		t.Fatal("terminal pivot to the third-party backend must be rejected")
+		t.Fatal("terminal write pivot to the third-party backend must be refused")
 	}
 
-	// The authorized target and its subdomains still work.
+	// A plain terminal read of the dependency is allowed (bounded fetch).
+	blocked, _ = a.shouldBlockForOutOfScope("terminal_execute", map[string]string{
+		"command": "curl -sS https://ncdrcdylkcstetmltagu.supabase.co/rest/v1/trust_pages?select=*",
+	})
+	if blocked {
+		t.Fatal("a plain read fetch of a dependency must stay allowed")
+	}
+
+	// The authorized target and its subdomains keep FULL methodology,
+	// including writes — zero coverage loss on tier 1.
+	blocked, _ = a.shouldBlockForOutOfScope("http_request", map[string]string{
+		"url":    "https://api.xalgorix.com/api/feedback",
+		"method": "POST",
+		"body":   `{"message":"proof"}`,
+	})
+	if blocked {
+		t.Fatal("full active testing (writes included) must stay allowed on authorized targets")
+	}
 	blocked, _ = a.shouldBlockForOutOfScope("http_request", map[string]string{
 		"url": "https://www.xalgorix.com/assets/index-abc.js",
 	})
 	if blocked {
 		t.Fatal("reading the authorized target's own assets must stay allowed")
-	}
-	blocked, _ = a.shouldBlockForOutOfScope("http_request", map[string]string{
-		"url": "https://api.xalgorix.com/api/public/v1/findings",
-	})
-	if blocked {
-		t.Fatal("a subdomain of the authorized target's registrable domain must stay allowed")
 	}
 
 	// Passive recon data sources stay reachable.
@@ -193,6 +227,92 @@ func TestShouldBlockOutOfScopeSupabasePivotIncident(t *testing.T) {
 	})
 	if blocked {
 		t.Fatal("crt.sh passive recon must stay exempt")
+	}
+}
+
+// TestDependencyProbeTier pins the probe-tier boundary in detail.
+func TestDependencyProbeTier(t *testing.T) {
+	a := &Agent{}
+	a.engagement = buildEngagementScope([]string{"https://target.example.com"}, false)
+	dep := map[string]string{"url": "https://dep-backend.supabase.co/x"}
+
+	cases := []struct {
+		name    string
+		tool    string
+		args    map[string]string
+		blocked bool
+	}{
+		{"http HEAD read", "http_request", withMethod(dep, "HEAD"), false},
+		{"http OPTIONS", "http_request", withMethod(dep, "OPTIONS"), false},
+		{"http PUT empty body", "http_request", withMethod(dep, "PUT"), false},
+		{"http POST with body", "http_request", withArgs(dep, map[string]string{"method": "POST", "body": `{"a":1}`}), true},
+		{"http DELETE", "http_request", withMethod(dep, "DELETE"), true},
+		{"terminal plain curl", "terminal_execute", map[string]string{"command": "curl -sS https://dep-backend.supabase.co/api"}, false},
+		{"terminal timeout-wrapped curl", "terminal_execute", map[string]string{"command": "timeout 30 curl -sS https://dep-backend.supabase.co/api"}, false},
+		{"terminal -X POST without data", "terminal_execute", map[string]string{"command": "curl -X POST https://dep-backend.supabase.co/api"}, false},
+		{"terminal -X POST with -d", "terminal_execute", map[string]string{"command": "curl -X POST https://dep-backend.supabase.co/api -d 'x=1'"}, true},
+		{"terminal --data-urlencode", "terminal_execute", map[string]string{"command": "curl https://dep-backend.supabase.co/api --data-urlencode 'x=1'"}, true},
+		{"terminal -X DELETE", "terminal_execute", map[string]string{"command": "curl -X DELETE https://dep-backend.supabase.co/api"}, true},
+		{"terminal wget with --post-data", "terminal_execute", map[string]string{"command": "wget --post-data='x=1' https://dep-backend.supabase.co/api"}, true},
+		{"terminal nmap against dep", "terminal_execute", map[string]string{"command": "nmap -sV dep-backend.supabase.co"}, true},
+		{"terminal nc against dep", "terminal_execute", map[string]string{"command": "nc -zv dep-backend.supabase.co 443"}, true},
+		{"python requests.get", "python_action", map[string]string{"code": "import requests; print(requests.get('https://dep-backend.supabase.co/api').status_code)"}, false},
+		{"python requests.post with json", "python_action", map[string]string{"code": "requests.post('https://dep-backend.supabase.co/api', json={'a':1})"}, true},
+		{"python requests.delete", "python_action", map[string]string{"code": "requests.delete('https://dep-backend.supabase.co/api')"}, true},
+	}
+	for _, c := range cases {
+		blocked, _ := a.shouldBlockForOutOfScope(c.tool, c.args)
+		if blocked != c.blocked {
+			t.Errorf("%s: blocked=%v, want %v", c.name, blocked, c.blocked)
+		}
+	}
+}
+
+func withMethod(base map[string]string, method string) map[string]string {
+	out := copyArgs(base)
+	out["method"] = method
+	return out
+}
+
+func withArgs(base map[string]string, extra map[string]string) map[string]string {
+	out := copyArgs(base)
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
+}
+
+func copyArgs(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// TestStrictScopeRefusesDependencyProbes pins XALGORIX_STRICT_SCOPE: in
+// strict mode even reads of discovered dependencies are refused.
+func TestStrictScopeRefusesDependencyProbes(t *testing.T) {
+	a := &Agent{}
+	a.engagement = buildEngagementScope([]string{"https://target.example.com"}, false)
+	a.scopeStrict = true
+
+	blocked, reason := a.shouldBlockForOutOfScope("http_request", map[string]string{
+		"url":    "https://dep-backend.supabase.co/api",
+		"method": "GET",
+	})
+	if !blocked || !strings.Contains(reason, "strict mode") {
+		t.Fatalf("strict mode must refuse dependency reads, got %v %q", blocked, reason)
+	}
+
+	// Authorized targets are untouched by strict mode.
+	blocked, _ = a.shouldBlockForOutOfScope("http_request", map[string]string{
+		"url":    "https://target.example.com/api",
+		"method": "POST",
+		"body":   `{"a":1}`,
+	})
+	if blocked {
+		t.Fatal("strict mode must not restrict authorized targets")
 	}
 }
 
@@ -280,12 +400,20 @@ func TestEngagementScopeDoesNotBlockFilenameAndEmailTokens(t *testing.T) {
 		t.Fatal("schemeless host:port to the authorized target must pass")
 	}
 
-	// ...and a schemeless host:port third-party pivot is rejected.
+	// A schemeless host:port third-party READ is allowed under the
+	// dependency-probe tier (bounded read fetch)...
 	blocked, _ = a.shouldBlockForOutOfScope("terminal_execute", map[string]string{
 		"command": "curl -sS ncdrcdylkcstetmltagu.supabase.co:443/rest/v1/trust_pages",
 	})
+	if blocked {
+		t.Fatal("a schemeless read fetch of a dependency must stay allowed under the probe tier")
+	}
+	// ...while a schemeless host:port third-party WRITE is rejected.
+	blocked, _ = a.shouldBlockForOutOfScope("terminal_execute", map[string]string{
+		"command": "curl -sS -X PATCH ncdrcdylkcstetmltagu.supabase.co:443/rest/v1/trust_pages --data-raw x=1",
+	})
 	if !blocked {
-		t.Fatal("schemeless host:port to a third-party backend must be rejected")
+		t.Fatal("a schemeless write to a third-party backend must be rejected")
 	}
 
 	// Header-style tokens are not destinations.

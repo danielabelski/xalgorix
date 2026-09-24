@@ -409,22 +409,43 @@ func (a *Agent) shouldBlockForOutOfScope(toolName string, toolArgs map[string]st
 		}
 	}
 
-	// Engagement-scope allow-list: the scan's configured targets are the
-	// only target-side hosts the agent may touch. Third-party service
-	// exemptions (passive recon, DNS, package infrastructure) are inside
-	// Authorized. A nil/empty scope enforces nothing.
+	// Engagement scope, tiered. Third-party service exemptions (passive
+	// recon, DNS, package infrastructure) are inside Authorized. A
+	// nil/empty scope enforces nothing.
+	//
+	//   Authorized targets      → everything (only the destructive screen
+	//                             above still applies)
+	//   Discovered dependencies → non-mutating probes only: reads and
+	//                             empty-body write probes, because reads
+	//                             against backends the target itself
+	//                             discloses are exactly how exposed
+	//                             backends get found. Mutating requests
+	//                             are refused. Strict mode (XALGORIX_
+	//                             STRICT_SCOPE) refuses everything.
 	if a.engagement.Enforces() {
 		for _, h := range extractEngagementHosts(toolName, toolArgs) {
-			if !a.engagement.Authorized(h) {
+			if a.engagement.Authorized(h) {
+				continue
+			}
+			if !a.scopeStrict && dependencyProbeAllowed(lowerTool, toolArgs) {
+				continue
+			}
+			if a.scopeStrict {
 				return true, fmt.Sprintf(
-					"OUT-OF-SCOPE: %q is outside the authorized engagement scope. "+
+					"OUT-OF-SCOPE: %q is outside the authorized engagement scope (strict mode). "+
 						"A discovered host is a finding, not a new target: record its existence "+
-						"with add_note (and report_vulnerability only when the finding belongs to an "+
-						"authorized target, e.g. the target's frontend disclosing a sensitive backend "+
-						"reference), then continue testing the authorized targets. Do not reach, probe, "+
-						"or authenticate to %q.", h, h,
+						"with add_note and continue testing the authorized targets.", h,
 				)
 			}
+			return true, fmt.Sprintf(
+				"OUT-OF-SCOPE WRITE: %q is a discovered dependency, not an authorized target. "+
+					"Reads and empty-body probes against it are allowed — that is how exposed "+
+					"backends are found — but mutating requests are refused: no writes, no account "+
+					"creation, no deletion. Record the exposed surface as a finding (e.g. an "+
+					"unprotected write endpoint, or an unauthenticated read via a shipped key). "+
+					"The operator can add %q to the scan's authorized targets to enable active testing.",
+				h, h,
+			)
 		}
 	}
 

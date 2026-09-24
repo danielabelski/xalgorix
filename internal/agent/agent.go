@@ -151,6 +151,7 @@ type Agent struct {
 	activityHosts              []string         // normalized target hosts used by passive policy
 	targets                    []string         // raw scan targets from Run(), used to resolve a base URL for probe_hypothesis
 	engagement                 *EngagementScope // runtime allow-list of authorized hosts built from targets — see engagement_scope.go
+	scopeStrict                bool             // XALGORIX_STRICT_SCOPE: refuse ALL traffic to non-authorized hosts (no dependency-probe tier)
 	passiveReconGuardActive    bool             // full scans with passive recon block direct access until passive evidence is collected
 	passiveReconGuardDone      bool
 	passiveReconPassiveLookups int
@@ -386,6 +387,7 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 		targetAuthB:  cfg.TargetAuthSecondary,
 		sourceRepo:   cfg.SourceRepo,
 		scanContext:  cfg.ScanContext,
+		scopeStrict:  cfg.StrictScope,
 		children:     make(map[*Agent]struct{}),
 	}
 	if cfg.IterationDelaySec > 0 {

@@ -31,6 +31,8 @@ import (
 	"context"
 	"net"
 	"net/url"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -350,4 +352,136 @@ func extractEngagementHosts(toolName string, toolArgs map[string]string) []strin
 		}
 	}
 	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Discovered-dependency probe tier.
+//
+// A host that is neither authorized nor an exempt third-party service is
+// NOT hard-blocked: reads against it are exactly how exposed backends get
+// found (a VDP disclosure's trust_pages finding was discovered precisely by
+// reading the backend the target's SPA bundle ships a URL + anon key for).
+// The runtime instead refuses MUTATION: writes with bodies, account
+// creation, deletion, and every destructive primitive. Zero active-testing
+// capability is lost on authorized targets; on discovered dependencies
+// only provably non-mutating probes remain.
+
+// nonMutatingVerbs are the HTTP methods that can never change remote state.
+var nonMutatingVerbs = map[string]bool{"GET": true, "HEAD": true, "OPTIONS": true}
+
+// probeOnlyVerbs may hit a dependency only with an empty body: a no-op
+// write probe (e.g. POST {}) reveals the authorization boundary without
+// mutating data. DELETE is deliberately absent — an empty-body DELETE
+// still deletes.
+var probeOnlyVerbs = map[string]bool{"POST": true, "PUT": true, "PATCH": true}
+
+// httpArgsNonMutating reports whether an http_request/send_request call is
+// safe against a discovered dependency.
+func httpArgsNonMutating(toolArgs map[string]string) bool {
+	method := strings.ToUpper(strings.TrimSpace(toolArgs["method"]))
+	if method == "" {
+		method = "GET" // http_request's documented default
+	}
+	if nonMutatingVerbs[method] {
+		return true
+	}
+	if probeOnlyVerbs[method] {
+		return strings.TrimSpace(toolArgs["body"]) == ""
+	}
+	return false
+}
+
+// mutatingRequestCallRe matches the mutating verbs of the common Python
+// HTTP clients (requests/httpx/urllib3 session objects) used from
+// python_action.
+var mutatingRequestCallRe = regexp.MustCompile(`(?i)\.(post|put|patch|delete)\s*\(`)
+
+// pythonCodeIsNonMutating reports whether python_action code contains only
+// read-shaped requests (.get/.head) around a dependency host.
+func pythonCodeIsNonMutating(code string) bool {
+	return !mutatingRequestCallRe.MatchString(code)
+}
+
+// terminalFetchIsNonMutating reports whether a terminal command referencing
+// a discovered dependency is a bounded, read-only fetch. Only plain
+// curl/wget qualify (optionally wrapped in `timeout N`): any data-bearing
+// flag (-d/--data/--form/-T/--upload/--json/--post-data/...) or a
+// non-read -X verb disqualifies it, and every other binary (nc, nmap,
+// sqlmap, ssh, ...) is unclassifiable and therefore refused against
+// dependencies.
+func terminalFetchIsNonMutating(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return true
+	}
+	i := 0
+	if fields[0] == "timeout" && len(fields) > 2 {
+		i = 2 // "timeout 30 curl ..." — the binary is the third field
+	}
+	if i >= len(fields) {
+		return false
+	}
+	bin := filepath.Base(fields[i])
+	if bin != "curl" && bin != "wget" {
+		return false
+	}
+	verb := ""
+	for j := i + 1; j < len(fields); j++ {
+		f := fields[j]
+		// Normalize attached values (--post-data=x) to the bare flag so the
+		// data-bearing long flags are caught regardless of value style.
+		if strings.HasPrefix(f, "--") {
+			if eq := strings.Index(f, "="); eq >= 0 {
+				f = f[:eq]
+			}
+		}
+		switch {
+		case f == "-X" || f == "--request":
+			if j+1 < len(fields) {
+				verb = strings.ToUpper(fields[j+1])
+				j++
+			}
+		case strings.HasPrefix(f, "-X"):
+			verb = strings.ToUpper(f[2:])
+		case strings.HasPrefix(f, "--request="):
+			verb = strings.ToUpper(strings.TrimPrefix(f, "--request="))
+		case f == "--data" || f == "--data-raw" || f == "--data-binary" || f == "--data-urlencode" ||
+			f == "--data-ascii" || f == "--form" || f == "--form-string" ||
+			f == "--upload-file" || f == "--json" || f == "--post-data" || f == "--post-file" ||
+			f == "--body-file":
+			return false // a data-bearing curl is a mutation
+		case strings.HasPrefix(f, "--"):
+			// other long flags are fine; value-bearing verbs handled above
+		case strings.HasPrefix(f, "-") && len(f) > 1:
+			for _, r := range f[1:] {
+				// -d (data), -F (form), -T (upload), -j/--json shorthand
+				if r == 'd' || r == 'F' || r == 'T' {
+					return false
+				}
+			}
+		}
+	}
+	if verb == "" {
+		return true // curl/wget default to GET
+	}
+	return nonMutatingVerbs[verb] || probeOnlyVerbs[verb]
+}
+
+// dependencyProbeAllowed reports whether a gated tool call naming a
+// discovered-dependency host carries only non-mutating traffic: reads and
+// empty-body write probes. browser navigation is read-shaped (in-page
+// mutation after navigation is a documented residual; the destructive
+// screen still applies to its explicit arguments).
+func dependencyProbeAllowed(lowerTool string, toolArgs map[string]string) bool {
+	switch lowerTool {
+	case "http_request", "send_request":
+		return httpArgsNonMutating(toolArgs)
+	case "browser_action", "page_agent", "pageagent":
+		return true
+	case "terminal_execute":
+		return terminalFetchIsNonMutating(toolArgs["command"])
+	case "python_action":
+		return pythonCodeIsNonMutating(toolArgs["code"] + " " + toolArgs["script"])
+	}
+	return false
 }
