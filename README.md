@@ -41,7 +41,7 @@
 
 [![Xalgorix Open Source — Autonomous AI Pentesting & Exploit Verification (launch overview video)](assets/launch-overview.jpg)](https://youtu.be/B23boh51u8A)
 
-**▶️ [Watch the launch overview](https://youtu.be/B23boh51u8A)** — a walkthrough of an autonomous, exploit-verified pentest, from setup to findings.
+**▶️ [Watch the 50-second launch video](https://youtu.be/B23boh51u8A)** — Xalgorix in action: autonomous scanning and exploit-verified findings in under a minute.
 
 </div>
 
