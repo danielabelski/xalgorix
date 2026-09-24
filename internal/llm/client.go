@@ -70,6 +70,14 @@ type Client struct {
 	// When set, effectiveTemperature() returns it instead of cfg.Temperature.
 	// Use SetTemperature() to change at runtime (e.g. scanner→validator→reporter).
 	tempOverride atomic.Value // *float64
+	// keyRotator, when non-nil, replaces the resolved endpoint's API
+	// key with the next eligible key from the operator's pool
+	// (XALGORIX_API_KEYS + XALGORIX_API_KEY): requests spread
+	// round-robin across the pool and a key that just hit a provider
+	// rate limit is skipped for a short cooldown. nil when fewer than
+	// two distinct keys are configured, so single-key setups produce
+	// byte-identical requests.
+	keyRotator *KeyRotator
 }
 
 // PromptTokensDetails carries detailed prompt token breakdowns (cached vs audio/etc).
@@ -249,6 +257,17 @@ func NewClient(cfg *config.Config, opts ...Option) *Client {
 			burst = 1
 		}
 		c.rateLimiter = rate.NewLimiter(rate.Limit(cfg.RateLimitRPS), burst)
+	}
+	// Build the API-key pool rotator from XALGORIX_API_KEY +
+	// XALGORIX_API_KEYS. Only engages with two or more distinct keys;
+	// otherwise requests stay byte-identical to the single-key path.
+	if cfg != nil {
+		pool := make([]string, 0, len(cfg.APIKeys)+1)
+		pool = append(pool, cfg.APIKey)
+		pool = append(pool, cfg.APIKeys...)
+		if r := NewKeyRotator(pool); r != nil && r.Len() > 1 {
+			c.keyRotator = r
+		}
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -511,7 +530,7 @@ func (c *Client) resolveRequestEndpoint(ctx context.Context) (Endpoint, error) {
 			return Endpoint{}, err
 		}
 		ep.Model = normalizeEndpointModel(c.cfg.LLMProvider, ep.URL, ep.Model)
-		return ep, nil
+		return c.applyKeyRotation(ep), nil
 	}
 	url, model := c.resolveEndpoint()
 	providerID := strings.TrimSpace(c.cfg.LLMProvider)
@@ -526,13 +545,42 @@ func (c *Client) resolveRequestEndpoint(ctx context.Context) (Endpoint, error) {
 	case c.usesAnthropicAPI(url):
 		hs = "anthropic"
 	}
-	return Endpoint{
+	return c.applyKeyRotation(Endpoint{
 		URL:         url,
 		Model:       model,
 		HeaderStyle: hs,
 		Auth:        AuthAPIKey,
 		APIKey:      c.cfg.APIKey,
-	}, nil
+	}), nil
+}
+
+// applyKeyRotation replaces the resolved endpoint's API key with the
+// next eligible pooled key. Only endpoints carrying the legacy
+// configured key (ep.APIKey == cfg.APIKey) are rotated: per-scan
+// provider-profile and keystore credentials may belong to a different
+// provider and are left untouched, as are OAuth bearer endpoints and
+// credential-free (no-auth) endpoints whose key does not match the
+// configured one.
+func (c *Client) applyKeyRotation(ep Endpoint) Endpoint {
+	if c.keyRotator == nil || c.cfg == nil || ep.Auth != AuthAPIKey {
+		return ep
+	}
+	if ep.APIKey != c.cfg.APIKey {
+		return ep
+	}
+	if k := c.keyRotator.Pick(); k != "" {
+		ep.APIKey = k
+	}
+	return ep
+}
+
+// noteKeyRateLimited puts the pooled key used by the request that just
+// failed with a provider rate limit into cooldown, so the next pick
+// concentrates on the remaining keys.
+func (c *Client) noteKeyRateLimited() {
+	if c.keyRotator != nil {
+		c.keyRotator.MarkLastRateLimited()
+	}
 }
 
 // unknownHeaderStyleOnce guards a single log line per process so a
@@ -1205,6 +1253,7 @@ func (c *Client) chatWithRetry(messages []Message) (string, *TokenUsage, error) 
 
 		// Track if last error was a rate limit for the post-loop wrapper
 		if isRateLimitError(errStr) {
+			c.noteKeyRateLimited()
 			// A 429/usage-window response is not made more likely to succeed by
 			// replaying the same full context three to five times immediately.
 			// Return to the agent loop so its bounded, interruptible backoff owns
@@ -1339,6 +1388,9 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 			if readErr != nil {
 				ch <- StreamChunk{Err: fmt.Errorf("API returned %d (failed to read body: %w)", resp.StatusCode, readErr)}
 				return
+			}
+			if isRateLimitError(fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(respBody))) {
+				c.noteKeyRateLimited()
 			}
 			ch <- StreamChunk{Err: fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))}
 			return
@@ -1608,6 +1660,9 @@ func (c *Client) doChatWithUsage(messages []Message) (out string, usage *TokenUs
 		return "", nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		if isRateLimitError(fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(respBody))) {
+			c.noteKeyRateLimited()
+		}
 		return "", nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 

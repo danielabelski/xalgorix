@@ -242,6 +242,9 @@ func (c *Client) doResponsesWithUsage(ctx context.Context, ep Endpoint, messages
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
+		if isRateLimitError(fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(respBody))) {
+			c.noteKeyRateLimited()
+		}
 		return "", nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -319,6 +322,9 @@ func (c *Client) streamResponses(ctx context.Context, ep Endpoint, messages []Me
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
+		if isRateLimitError(fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(respBody))) {
+			c.noteKeyRateLimited()
+		}
 		ch <- StreamChunk{Err: fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))}
 		return
 	}

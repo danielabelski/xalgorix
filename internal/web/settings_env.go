@@ -44,19 +44,24 @@ type environmentSettingsResponse struct {
 }
 
 type llmSettingsResponse struct {
-	Model                     string `json:"model"`
-	APIBase                   string `json:"apiBase"`
-	APIKey                    string `json:"apiKey"`
-	HasAPIKey                 bool   `json:"hasApiKey"`
-	ReasoningEffort           string `json:"reasoningEffort"`
-	OllamaCompatible          bool   `json:"ollamaCompatible"`
-	LLMMaxRetries             int    `json:"llmMaxRetries"`
-	MemoryCompressorTimeout   int    `json:"memoryCompressorTimeout"`
-	MaxIterations             int    `json:"maxIterations"`
-	GeminiAPIKey              string `json:"geminiApiKey"`
-	HasGeminiAPIKey           bool   `json:"hasGeminiApiKey"`
-	EnvFile                   string `json:"envFile"`
-	EnvironmentRestartWarning bool   `json:"environmentRestartWarning"`
+	Model                   string `json:"model"`
+	APIBase                 string `json:"apiBase"`
+	APIKey                  string `json:"apiKey"`
+	HasAPIKey               bool   `json:"hasApiKey"`
+	ReasoningEffort         string `json:"reasoningEffort"`
+	OllamaCompatible        bool   `json:"ollamaCompatible"`
+	LLMMaxRetries           int    `json:"llmMaxRetries"`
+	MemoryCompressorTimeout int    `json:"memoryCompressorTimeout"`
+	MaxIterations           int    `json:"maxIterations"`
+	GeminiAPIKey            string `json:"geminiApiKey"`
+	HasGeminiAPIKey         bool   `json:"hasGeminiApiKey"`
+	// APIKeyPool is the masked view of the configured key pool
+	// (XALGORIX_API_KEYS) that outbound requests rotate across to
+	// spread provider rate limits.
+	APIKeyPool                []string `json:"apiKeyPool"`
+	HasAPIKeyPool             bool     `json:"hasApiKeyPool"`
+	EnvFile                   string   `json:"envFile"`
+	EnvironmentRestartWarning bool     `json:"environmentRestartWarning"`
 	// v4.4.22: catalog-aware fields driving the new LLM Settings
 	// tab. Provider mirrors the active provider id derived from
 	// LLMProfile (or the legacy XALGORIX_LLM "<provider>/<model>"
@@ -123,6 +128,7 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_LLM", Label: "LLM model", Category: "LLM", Description: "Provider-native model ID used by scans and post-scan chat. For best results, choose a current frontier model with strong reasoning and tool calling.", Placeholder: "gpt-5.6", InputType: "text"},
 		{Key: "XALGORIX_LLM_PROVIDER", Label: "LLM provider", Category: "LLM", Description: "Explicit provider ID used to route the selected model without adding a provider prefix to its model name.", Placeholder: "ollama", InputType: "text"},
 		{Key: "XALGORIX_API_KEY", Label: "LLM API key", Category: "LLM", Description: "Provider API key for the configured model.", Placeholder: "sk-...", InputType: "secret", Sensitive: true},
+		{Key: "XALGORIX_API_KEYS", Label: "LLM API key pool", Category: "LLM", Description: "Additional provider API keys for rate-limit rotation, comma-separated. Combined with the LLM API key above, outbound requests rotate across the pool and a key that hits a provider rate limit is skipped for a short cooldown. Effective for new scans.", Placeholder: "key1,key2,key3", InputType: "secret", Sensitive: true},
 		{Key: "XALGORIX_API_BASE", Label: "API base URL", Category: "LLM", Description: "Optional custom provider endpoint. Leave blank to use provider defaults.", Placeholder: "https://api.openai.com/v1", InputType: "url"},
 		{Key: "XALGORIX_LLM_PROFILE", Label: "Active LLM profile", Category: "LLM", Description: "Active credential pointer (\"<provider>:<profileId>\"). Set by the LLM Settings tab; takes precedence over XALGORIX_API_KEY/XALGORIX_LLM when present.", Placeholder: "openai:default", InputType: "text"},
 		{Key: "XALGORIX_REASONING_EFFORT", Label: "Reasoning effort", Category: "LLM", Description: "Reasoning depth for providers that support it.", DefaultValue: "high", InputType: "select", Options: []string{"none", "low", "medium", "high", "xhigh"}},
@@ -567,6 +573,8 @@ func (s *Server) llmSettings(ctx context.Context) llmSettingsResponse {
 		MemoryCompressorTimeout: s.cfg.MemCompTimeout,
 		MaxIterations:           s.cfg.MaxIterations,
 		GeminiAPIKey:            maskSecretValue(s.cfg.GeminiAPIKey),
+		APIKeyPool:              maskedKeyPoolList(s.cfg.APIKeys),
+		HasAPIKeyPool:           len(s.cfg.APIKeys) > 0,
 		HasGeminiAPIKey:         s.cfg.GeminiAPIKey != "",
 		EnvFile:                 xalgorixEnvFilePath(),
 		ActiveProfileKey:        s.cfg.LLMProfile,
@@ -665,7 +673,11 @@ func (s *Server) environmentSettings(restartRequired bool) environmentSettingsRe
 		value := s.envSettingValue(def.Key)
 		hasValue := os.Getenv(def.Key) != ""
 		if def.Sensitive {
-			value = maskSecretValue(value)
+			if def.Key == "XALGORIX_API_KEYS" {
+				value = maskKeyPoolValue(value)
+			} else {
+				value = maskSecretValue(value)
+			}
 		}
 		values = append(values, envSettingValue{
 			envSettingDefinition: def,
@@ -753,6 +765,8 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.APIBase = value
 		case "XALGORIX_API_KEY":
 			s.cfg.APIKey = value
+		case "XALGORIX_API_KEYS":
+			s.cfg.APIKeys = config.ParseAPIKeyList(value)
 		case "XALGORIX_LLM_PROFILE":
 			s.cfg.LLMProfile = value
 		case "XALGORIX_REASONING_EFFORT":
@@ -903,6 +917,8 @@ func (s *Server) envSettingValue(key string) string {
 		return s.cfg.APIBase
 	case "XALGORIX_API_KEY":
 		return s.cfg.APIKey
+	case "XALGORIX_API_KEYS":
+		return strings.Join(s.cfg.APIKeys, ", ")
 	case "XALGORIX_LLM_PROFILE":
 		return s.cfg.LLMProfile
 	case "XALGORIX_REASONING_EFFORT":
@@ -1033,6 +1049,30 @@ func maskSecretValue(value string) string {
 		return "****" + value[len(value)-8:]
 	}
 	return "****"
+}
+
+// maskKeyPoolValue masks every key in a comma-separated pool value so
+// the dashboard shows which keys are configured without leaking them.
+func maskKeyPoolValue(value string) string {
+	parts := strings.Split(value, ",")
+	masked := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		masked = append(masked, maskSecretValue(p))
+	}
+	return strings.Join(masked, ", ")
+}
+
+// maskedKeyPoolList masks each pooled key for the llmSettings payload.
+func maskedKeyPoolList(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, maskSecretValue(k))
+	}
+	return out
 }
 
 func isMaskedSettingValue(value string) bool {
