@@ -35,6 +35,18 @@
 
 ---
 
+## 🎬 Launch Overview
+
+<div align="center">
+
+[![Xalgorix Open Source — Autonomous AI Pentesting & Exploit Verification (launch overview video)](assets/launch-overview.jpg)](https://youtu.be/B23boh51u8A)
+
+**▶️ [Watch the launch overview](https://youtu.be/B23boh51u8A)** — a walkthrough of an autonomous, exploit-verified pentest, from setup to findings.
+
+</div>
+
+---
+
 ## 📸 Screenshots
 
 **🖥️ Self-hosted dashboard** — runs locally on `127.0.0.1:9137`
@@ -54,7 +66,7 @@
 Thanks to **[Swiftproxy](https://www.swiftproxy.net/?ref=xalgorix)** for sponsoring Xalgorix.
 
 <a href="https://www.swiftproxy.net/?ref=xalgorix">
-  <img src="assets/swiftproxy_xalgorix.png" alt="Swiftproxy sponsors Xalgorix — residential proxies for authorized testing across locations" width="860" />
+  <img src="assets/swiftproxy_xalgorix.webp" alt="Swiftproxy sponsors Xalgorix — residential proxies for authorized testing across locations" width="860" />
 </a>
 
 Your app can behave differently depending on where a request comes from. For Xalgorix users checking their own applications across regions, Swiftproxy offers **location targeting** to review regional behavior and **sticky sessions** to help keep a consistent IP during a test session. It supports **HTTP(S) and SOCKS5**, the same proxy protocols Xalgorix supports.
@@ -141,9 +153,10 @@ For merge gating and full exploit-verified pentests in CI, use the [hosted scann
 | | | |
 | --- | --- | --- |
 | 📸 [Screenshots](#-screenshots) | 🔩 [Configuration](#-configuration) | 🧾 [Environment Variables](#-environment-variables) |
-| 🚀 [Quick Start](#-quick-start) | 🆙 [Upgrading](#-upgrading-from-previous-versions) | 🔤 [Provider Prefixes](#-provider-prefixes) |
-| 🔎 [Overview](#-overview) | 🏃 [Running](#-running) | 💻 [CLI Reference](#-cli-reference) |
-| 💡 [Why Xalgorix](#-why-xalgorix) | 🧰 [Service Mode](#-service-mode) | 📡 [API Summary](#-api-summary) |
+| 🎬 [Launch Overview](#-launch-overview) | 🚀 [Quick Start](#-quick-start) | 🆙 [Upgrading](#-upgrading-from-previous-versions) |
+| 🔎 [Overview](#-overview) | 🏃 [Running](#-running) | 🔤 [Provider Prefixes](#-provider-prefixes) |
+| 💡 [Why Xalgorix](#-why-xalgorix) | 🧰 [Service Mode](#-service-mode) | 💻 [CLI Reference](#-cli-reference) |
+| 🎯 [Use Cases](#-use-cases) | 🔁 [Web UI Workflow](#-web-ui-workflow) | 📡 [API Summary](#-api-summary) |
 | 🎯 [Use Cases](#-use-cases) | 🔁 [Web UI Workflow](#-web-ui-workflow) | 💾 [Data Storage](#-data-storage) |
 | ✨ [Features](#-features) | 🔀 [Scan Modes](#-scan-modes) | 🧪 [Development](#-development) |
 | 📥 [Installation](#-installation) | 📂 [Scan Your Code](#-scan-your-code-no-target-needed) | 🚨 [Safety Notes](#-safety-notes) |
