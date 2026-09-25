@@ -25,7 +25,6 @@ type Config struct {
 	APIBase         string   // XALGORIX_API_BASE — API endpoint
 	APIKey          string   // XALGORIX_API_KEY — API key
 	APIKeys         []string // XALGORIX_API_KEYS — additional provider API keys rotated to dodge provider rate limits (combined with APIKey)
-	StrictScope     bool     // XALGORIX_STRICT_SCOPE — refuse all traffic to non-authorized hosts (no dependency-probe tier)
 	LLMProfile      string   // XALGORIX_LLM_PROFILE — active credential pointer "<provider>:<profileId>" (v4.4.22+)
 	ReasoningEffort string   // XALGORIX_REASONING_EFFORT — "none", "low", "medium", "high", or "xhigh"
 
@@ -391,7 +390,6 @@ func load() *Config {
 		APIBase:                 envOr("XALGORIX_API_BASE", ""),
 		APIKey:                  envOr("XALGORIX_API_KEY", ""),
 		APIKeys:                 ParseAPIKeyList(envOr("XALGORIX_API_KEYS", "")),
-		StrictScope:             envOrBool("XALGORIX_STRICT_SCOPE", false),
 		LLMProfile:              envOr("XALGORIX_LLM_PROFILE", ""),
 		ReasoningEffort:         envOr("XALGORIX_REASONING_EFFORT", "high"),
 		Language:                NormalizeLanguage(envOr("XALGORIX_LANGUAGE", DefaultLanguage)),
