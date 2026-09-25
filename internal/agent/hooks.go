@@ -2078,13 +2078,22 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 
 	adaptiveCoverageMet := false
 	if state.ReconDone && state.EndpointInventorySaved && dirBustingCount >= 1 && categoriesCovered >= 2 {
+		// When the specialist wave ran, the coverage metrics include child
+		// agent evidence that the root did not produce itself. The root must
+		// do substantially more of its OWN testing before the adaptive fast
+		// path opens — specialist results are input, not a substitute for
+		// the coordinator's independent verification and exploration.
+		delegationBoost := 0
+		if state.DelegationAttempted {
+			delegationBoost = 40
+		}
 		// Small surface (< 5 endpoints): allow finish at 25+ iterations with deep testing
-		if totalEndpoints < 5 && iter >= 25 && depth >= 2.0 {
+		if totalEndpoints < 5 && iter >= 25+delegationBoost && depth >= 2.0 {
 			adaptiveCoverageMet = true
 		}
 
 		// Medium surface (5-15 endpoints): allow finish at 40+ iterations with good testing
-		if totalEndpoints >= 5 && totalEndpoints <= 15 && iter >= 40 && depth >= 1.5 {
+		if totalEndpoints >= 5 && totalEndpoints <= 15 && iter >= 40+delegationBoost && depth >= 1.5 {
 			adaptiveCoverageMet = true
 		}
 	}

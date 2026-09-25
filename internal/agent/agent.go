@@ -634,8 +634,17 @@ func (a *Agent) delegatedWorkFinishGate(_ *ScanState, _ map[string]string) HookR
 func (a *Agent) maybeAutoDelegate(targets []string) string {
 	if a == nil || a.state == nil || a.registry == nil || a.agentGraph == nil ||
 		a.delegatedAgentID != "" || a.ctfMission || a.state.DiscoveryMode ||
-		a.state.ReconOnlyMode || a.state.DelegationAttempted ||
-		!a.state.ReconDone || !a.state.EndpointInventorySaved || a.state.Iteration < 5 || a.state.Plan == nil ||
+		a.state.ReconOnlyMode || a.state.DelegationAttempted {
+		return ""
+	}
+	// XALGORIX_DISABLE_AUTO_DELEGATE=true: skip the specialist wave entirely,
+	// restoring pre-v4.6.93 behavior where the root agent does all the work
+	// itself. Some operators prefer the deeper single-threaded methodology.
+	if a.cfg != nil && a.cfg.DisableAutoDelegate {
+		a.state.DelegationAttempted = true
+		return ""
+	}
+	if !a.state.ReconDone || !a.state.EndpointInventorySaved || a.state.Iteration < 5 || a.state.Plan == nil ||
 		!a.state.PlanBuilt || !a.state.LedgerSeeded || a.agentGraph.DelegationCount() > 0 {
 		return ""
 	}
@@ -681,7 +690,14 @@ Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", 
 	}
 	a.state.DelegationAttempted = true
 	a.state.DelegationNudgeFired = true
-	return fmt.Sprintf("🚀 ENGINE DELEGATION STARTED: launched %d non-overlapping specialists (%s). Continue the root's highest-value remaining work now; periodically collect each result with check_agent/wait_agent, verify candidates independently, and do not launch another wave.", len(spawned), strings.Join(spawned, ", "))
+	return fmt.Sprintf("🚀 ENGINE DELEGATION STARTED: launched %d non-overlapping specialists (%s). "+
+		"Continue the root's highest-value remaining work NOW — the specialist wave is a parallel "+
+		"accelerator, not a substitute for your own testing. While they run: (1) test endpoint/class "+
+		"pairs they do NOT cover, (2) do your own deep payload work on high-value routes, (3) "+
+		"periodically collect results with check_agent/wait_agent, and (4) after ALL specialists are "+
+		"collected, independently verify every claimed finding and CONTINUE TESTING uncovered surface — "+
+		"specialist completion is NOT a finish signal. Do not launch another wave.",
+		len(spawned), strings.Join(spawned, ", "))
 }
 
 func (a *Agent) eligibleSpecialistProfiles() []specialistProfile {
