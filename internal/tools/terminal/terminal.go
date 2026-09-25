@@ -1284,11 +1284,39 @@ func commandEnv(homeDir, goPath, workDir string, rateRuntime requestRateRuntime)
 		"XALGORIX_RATE_LOCK_DIR": true,
 		"XALGORIX_RATE_DELAY_MS": true,
 	}
+	// Scrub every XALGORIX_* variable and known credential variables from
+	// the inherited environment before spawning shell commands. The agent
+	// must never see the operator's proxy credentials, LLM API keys,
+	// dashboard auth, or integration tokens — a simple `env | grep` from
+	// a terminal_execute call would otherwise print them into scan logs
+	// that end up visible in the SaaS dashboard.
+	for _, kv := range []string{
+		"XALGORIX_API_KEY", "XALGORIX_API_KEYS", "XALGORIX_LLM",
+		"XALGORIX_LLM_PROVIDER", "XALGORIX_LLM_PROFILE", "XALGORIX_API_BASE",
+		"XALGORIX_PROXY_URL", "XALGORIX_PROXY_FILE", "XALGORIX_PROXY_ROTATION",
+		"XALGORIX_USERNAME", "XALGORIX_PASSWORD", "XALGORIX_PASSWORD_HASH",
+		"XALGORIX_TARGET_AUTH", "XALGORIX_TARGET_AUTH_B",
+		"XALGORIX_DISCORD_WEBHOOK", "XALGORIX_TELEGRAM_BOT_TOKEN",
+		"XALGORIX_TELEGRAM_CHAT_ID", "GEMINI_API_KEY", "AGENTMAIL_API_KEY",
+		"AGENTMAIL_POD", "CAIDO_API_TOKEN", "INBOUND_EMAIL_SECRET",
+		"XALGORIX_OOB_API_KEY", "XALGORIX_OOB_HOST",
+	} {
+		replace[kv] = true
+	}
 	env := make([]string, 0, len(os.Environ())+8)
 	existingPythonPath := os.Getenv("PYTHONPATH")
 	for _, kv := range os.Environ() {
 		key, _, ok := strings.Cut(kv, "=")
-		if ok && replace[key] {
+		if !ok {
+			continue
+		}
+		if replace[key] {
+			continue
+		}
+		// Catch-all: strip any XALGORIX_* variable we didn't explicitly
+		// allow-list above. The terminal tool only re-adds the three
+		// safe ones (WORKSPACE, RATE_LOCK_DIR, RATE_DELAY_MS).
+		if strings.HasPrefix(key, "XALGORIX_") {
 			continue
 		}
 		env = append(env, kv)

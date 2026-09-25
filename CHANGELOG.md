@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Security
+- **Operator credentials and proxy URLs are no longer visible to the agent via environment inheritance.** The terminal_execute and python_action tools scrubbed all XALGORIX_* variables (API keys, proxy credentials with embedded auth, dashboard credentials, integration tokens) and known credential variables (GEMINI_API_KEY, AGENTMAIL_API_KEY, CAIDO_API_TOKEN, etc.) from the environment passed to child processes. A simple `env | grep proxy` from terminal_execute previously printed the operator's upstream proxy credentials — including username, password, IP, and port — into scan logs visible in the dashboard.
+
 ### Fixed
 - **Default credential testing is no longer blocked when no operator-supplied account is available.** The auth-prerequisite guard was blocking the agent from testing , , and other standard default credential pairs on discovered login forms — a core OWASP methodology step (WSTG-ATHN-02) and one of the highest-yield anonymous pentest techniques. The guard now only blocks actual password-cracking tools (hashcat, rockyou, john-the-ripper, dictionary attacks); default credential testing on login endpoints is restored.
 
