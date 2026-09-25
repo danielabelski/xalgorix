@@ -708,7 +708,6 @@ Some settings require a restart because they affect process startup or server bi
 | ------------------------ | ----------------- | ---------------------------------- |
 | `XALGORIX_BIND`          | `127.0.0.1`       | Web server listen address.         |
 | `XALGORIX_ALLOW_LOCAL_TARGETS` | `false`     | Allow scanning locally-hosted apps (localhost / 127.0.0.1 / private IPs) on a self-hosted install. The dashboard's own listener is always protected. Leave off on shared/hosted deployments. |
-| `XALGORIX_STRICT_SCOPE`   | `false`     | Refuse ALL traffic to non-authorized hosts (no discovered-dependency read/probe tier). |
 | `XALGORIX_USERNAME`      | none              | Dashboard username.                |
 | `XALGORIX_PASSWORD`      | none              | Dashboard password.                |
 | `XALGORIX_PASSWORD_HASH` | none              | Preferred bcrypt password hash.    |
@@ -846,8 +845,6 @@ In the Docker image and the Helm chart, this directory is the `/data` volume (`X
 ## 🚨 Safety Notes
 
 - Use Xalgorix only against authorized targets.
-- Authorized targets are a runtime allow-list: the agent fully tests the configured targets and their subdomains, while discovered dependencies (backends the target itself discloses) are limited to non-mutating reads and empty-body probes — mutating writes against them are refused. A narrow set of passive-recon, DNS, and package-infrastructure services stays reachable. Set `XALGORIX_STRICT_SCOPE=true` to refuse all traffic to non-authorized hosts.
-- Database/schema reset primitives (`DROP TABLE`, `TRUNCATE`, `db:reset`, factory reset, …) are hard-blocked on every host — authorized targets included.
 - Do not run active testing against third-party systems without permission.
 - Review scan instructions before launching.
 - Configure rate limits and proxy settings to match engagement rules.
