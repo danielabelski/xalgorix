@@ -194,6 +194,26 @@ func rateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
 	}
 }
 
+// noIndexMiddleware adds X-Robots-Tag: noindex to every response so the
+// scanner dashboard and API are never indexed by search engines. This is a
+// security requirement: the scanner is infrastructure tooling, not public
+// content, and its presence on a public hostname should not surface in
+// search results or trigger Safe Browsing heuristics.
+func noIndexMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handleRobotsTxt serves a disallow-all robots.txt so crawlers never index
+// the scanner dashboard.
+func handleRobotsTxt(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("User-agent: *\nDisallow: /\n"))
+}
+
 func isStaticWebAssetPath(path string) bool {
 	if path == "" || strings.HasPrefix(path, "/api/") || path == "/ws" {
 		return false
@@ -1027,6 +1047,7 @@ func (s *Server) Start() error {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/robots.txt", handleRobotsTxt)
 	// SPA handler: serve static files if they exist, otherwise serve index.html
 	fileServer := http.FileServer(http.FS(staticFS))
 	// fs.Sub on embed.FS returns an fs.FS that does implement ReadFileFS today,
@@ -1307,7 +1328,7 @@ func (s *Server) Start() error {
 		// emits a structured log line with stack trace, and returns 500.
 		// gzip sits innermost (closest to the mux) so it compresses handler
 		// output after auth + rate limiting have run; it skips /ws.
-		Handler: safe.HTTPMiddleware(authMw(rlMiddleware(gzipMiddleware(mux)))),
+		Handler: safe.HTTPMiddleware(noIndexMiddleware(authMw(rlMiddleware(gzipMiddleware(mux))))),
 		// Bound the time spent reading request headers so a slow client
 		// cannot hold a connection open indefinitely (Slowloris). The
 		// dashboard serves interactive traffic, so keep this generous.
