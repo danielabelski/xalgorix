@@ -11,11 +11,18 @@ import (
 )
 
 // shouldBlockForMissingAuthPrerequisites prevents an anonymous assessment from
-// turning a leaked password hash or a login form into an unbounded credential
-// attack. A concrete leaked hash is already impact evidence for its root cause;
-// cracking it adds risk and routinely starves unrelated black-box lanes. The
-// guard is lifted when the operator supplied (or the scan ingested) a legitimate
-// session, where authenticated replay and role comparison are expected.
+// turning a leaked password hash into an unbounded cracking attack. A concrete
+// leaked hash is already impact evidence for its root cause; cracking it adds
+// risk and routinely starves unrelated black-box lanes. The guard is lifted
+// when the operator supplied (or the scan ingested) a legitimate session, where
+// authenticated replay and role comparison are expected.
+//
+// Deliberately NOT blocked: testing default credentials (admin:admin,
+// root:root) on discovered login forms. Default credential testing is a core
+// OWASP methodology step (WSTG-ATHN-02) and one of the highest-yield
+// anonymous techniques on misconfigured services — blocking it prevented
+// the agent from finding authentication vulnerabilities entirely on
+// targets where no operator-supplied account exists.
 func (a *Agent) shouldBlockForMissingAuthPrerequisites(toolName string, toolArgs map[string]string) (bool, string) {
 	if a == nil || a.state == nil || !a.state.AuthContextKnown || a.state.AuthContextAvailable {
 		return false, ""
@@ -37,15 +44,6 @@ func (a *Agent) shouldBlockForMissingAuthPrerequisites(toolName string, toolArgs
 	} {
 		if strings.Contains(" "+lower+" ", marker) {
 			return true, "No operator-supplied account or session is available. Preserve a leaked credential hash as impact evidence, but do not crack it; continue anonymous testing and skip role-dependent lanes with that prerequisite."
-		}
-	}
-	for _, pair := range []string{
-		"admin:admin", "admin:password", "admin:grafana", "root:root", "root:password", "grafana:grafana",
-		`"password":"admin"`, `"password": "admin"`, "password=admin",
-		`"password":"password"`, `"password": "password"`, "password=password",
-	} {
-		if strings.Contains(lower, pair) {
-			return true, "No operator-supplied account or session is available. Do not guess default credentials; use one randomized invalid-login baseline if needed, then continue anonymous testing."
 		}
 	}
 	return false, ""

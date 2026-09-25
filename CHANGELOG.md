@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Fixed
+- **Default credential testing is no longer blocked when no operator-supplied account is available.** The auth-prerequisite guard was blocking the agent from testing , , and other standard default credential pairs on discovered login forms — a core OWASP methodology step (WSTG-ATHN-02) and one of the highest-yield anonymous pentest techniques. The guard now only blocks actual password-cracking tools (hashcat, rockyou, john-the-ripper, dictionary attacks); default credential testing on login endpoints is restored.
+
+### Fixed
 - **Scan depth regression from the specialist wave: the root agent now continues its own deep testing after specialist collection.** The v4.6.93 specialist wave accelerated scans but caused the root to finish prematurely: specialist evidence closed plan tasks, the adaptive-coverage fast path bypassed the iteration floor, and the root wrapped up in 19 minutes with 5 findings instead of the 8+ hours and 20-38 findings the same target produced pre-specialist-wave. Three changes: (1) the adaptive-coverage iteration thresholds are raised by +40 iterations when delegation was used, so the root must do substantially more of its own work before the fast path opens; (2) the delegation launch message now explicitly instructs the root that specialist completion is NOT a finish signal and it must continue testing uncovered surface; (3) the specialist stopping rule now requires class-specific payloads per endpoint (not just one generic request) before a lane can close.
 - **New `XALGORIX_DISABLE_AUTO_DELEGATE` env var** skips the specialist wave entirely, restoring pre-v4.6.93 behavior where the root agent does all the work itself.
 
