@@ -358,7 +358,8 @@ const (
 	ReasoningDensityMinResponses  = 40   // need ≥ this many no-tool responses before the density safety net applies
 	ReasoningDensityAbortRatio    = 0.85 // > this fraction of no-tool responses …
 	ReasoningDensityAbortMinIters = 80   // … once ≥ this many iterations elapsed → abort (bounded mode only)
-	MalformedToolAbortAt          = 5    // protocol-corrupt replies → stop incomplete before a paid retry storm
+	MalformedToolAbortAt          = 10   // protocol-corrupt replies → stop incomplete before a paid retry storm
+	MalformedToolContextResetAt   = 5    // protocol-corrupt replies → aggressive context reset before abort
 )
 
 // noteBlockedToolCall records that a Gated_Tool call was rejected by a block
@@ -2469,9 +2470,30 @@ func hookNoToolHandler(state *ScanState, args map[string]string) HookResult {
 					state.MalformedToolOutputCount, malformedReason),
 			}
 		}
+		// At the context-reset threshold, the model's conversation is likely
+		// corrupted (provider control-token leaks, oversized context, or a
+		// poisoned message history from repeated failed recovery attempts).
+		// Repeating the same recovery prompt into the same context doesn't
+		// work — the model needs a completely different framing.
+		if state.MalformedToolOutputCount >= MalformedToolContextResetAt {
+			return HookResult{
+				Nudge: fmt.Sprintf(`⛔ PROTOCOL RESET (%s) — your last %d responses were all malformed.
+			
+The conversation context may be corrupted. STOP all current work and START FRESH with the simplest possible tool call. Do NOT reference, retry, or continue any previous action.
+			
+Your ONLY next action: make exactly ONE tool call in perfect XML format:
+			
+<function=add_note>
+<parameter=content>Protocol reset after %d malformed responses. Resuming scan from clean state.</parameter>
+</function>
+			
+After that note succeeds, resume your scan plan from the first uncompleted task. Use clean, minimal, properly-closed XML for every subsequent call.`,
+					malformedReason, state.MalformedToolOutputCount, state.MalformedToolOutputCount),
+			}
+		}
 		return HookResult{Nudge: fmt.Sprintf(`⚠️ TOOL PROTOCOL RECOVERY (%s)
 
-Your previous response was discarded because it contained provider control tokens or malformed tool syntax and could not execute. Do not repeat it, do not emit <tool_call>, and do not output prose-only planning.
+Your previous response was discarded because it contained provider control tokens or malformed tool syntax and could not execute. Do not repeat it, do not emit [[, and do not output prose-only planning.
 
 Your NEXT response must contain exactly one executable Xalgorix XML call, for example:
 <function=terminal_execute>
