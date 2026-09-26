@@ -168,8 +168,10 @@ func TestAccidentalDuplicateSuppression(t *testing.T) {
 			t.Fatalf("consecutive unchanged plan must be suppressed, got: %s", res2.Nudge)
 		}
 
-		// Simulate state change (auth testing completes, advancing plan progress)
+		// Simulate state change (auth lane actually exercised across endpoints,
+		// advancing plan progress - reconcile requires tested AND endpoints)
 		state.AccessControlTested = true
+		state.AccessControlEndpoints = map[string]bool{"/api/login": true, "/api/user": true}
 
 		// Third iteration with changed state: MUST produce updated plan brief
 		res3 := hookPlanner(state, nil)

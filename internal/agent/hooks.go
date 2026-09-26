@@ -2837,7 +2837,7 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	if !state.PlanBuilt && state.Plan == nil && state.ReconDone &&
 		(len(state.DiscoveredEndpoints) > 0 || len(state.DetectedTechs) > 0) {
 		if state.AuthContextKnown {
-			state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs, state.AuthContextAvailable)
+			state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
 		} else {
 			state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
 		}
@@ -2912,7 +2912,7 @@ func reconcilePlan(state *ScanState) {
 		case "auth-session":
 			// Auth testing is hard to detect precisely; treat as done once the
 			// agent has exercised any auth/access-control endpoint.
-			if state.AccessControlTested || len(state.AccessControlEndpoints) > 0 {
+			if state.AccessControlTested && len(state.AccessControlEndpoints) > 0 {
 				t.Status = TaskCompleted
 			}
 		case "verify", "report":
