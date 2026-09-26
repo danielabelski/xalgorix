@@ -20,7 +20,7 @@ func TestSystemPromptIncludesCollectableMultiAgentWorkflow(t *testing.T) {
 	graph.Register(registry)
 
 	agent := &Agent{
-		cfg:      &config.Config{RateLimitRPS: 2},
+		cfg:      &config.Config{RateLimitRPS: 2, Checklist: "professional"},
 		registry: registry,
 	}
 	prompt := agent.buildSystemPrompt(
@@ -129,7 +129,7 @@ func TestDelegatedSystemPromptRemovesRootWorkflowContradictions(t *testing.T) {
 
 func TestProfessionalPromptRequiresDepthAndCompleteCoverage(t *testing.T) {
 	agent := &Agent{
-		cfg:      &config.Config{RateLimitRPS: 2},
+		cfg:      &config.Config{RateLimitRPS: 2, Checklist: "professional"},
 		registry: tools.NewRegistry(),
 	}
 	prompt := agent.buildSystemPrompt(
@@ -175,7 +175,7 @@ func TestProfessionalPromptRequiresDepthAndCompleteCoverage(t *testing.T) {
 
 func TestProfessionalPromptDoesNotInventAuthenticationPrerequisites(t *testing.T) {
 	agent := &Agent{
-		cfg:      &config.Config{RateLimitRPS: 2},
+		cfg:      &config.Config{RateLimitRPS: 2, Checklist: "professional"},
 		registry: tools.NewRegistry(),
 	}
 	prompt := agent.buildSystemPrompt(
@@ -216,7 +216,7 @@ func TestExplicitCTFPromptKeepsSpecializedChecklist(t *testing.T) {
 
 func TestProfessionalPromptKeepsLocalScratchInsideWorkspaceTmp(t *testing.T) {
 	agent := &Agent{
-		cfg:      &config.Config{RateLimitRPS: 2},
+		cfg:      &config.Config{RateLimitRPS: 2, Checklist: "professional"},
 		registry: tools.NewRegistry(),
 	}
 	prompt := agent.buildSystemPrompt(
@@ -249,7 +249,7 @@ func TestProfessionalPromptKeepsLocalScratchInsideWorkspaceTmp(t *testing.T) {
 
 func TestProfessionalPromptPreservesAuthoritativeRequestAndOASTClass(t *testing.T) {
 	agent := &Agent{
-		cfg:      &config.Config{RateLimitRPS: 2},
+		cfg:      &config.Config{RateLimitRPS: 2, Checklist: "professional"},
 		registry: tools.NewRegistry(),
 	}
 	prompt := agent.buildSystemPrompt(
@@ -334,7 +334,7 @@ func TestWhiteboxGuidanceText(t *testing.T) {
 func TestSystemPromptIncludesProofIntegrityRule(t *testing.T) {
 	registry := tools.NewRegistry()
 	agent := &Agent{
-		cfg:      &config.Config{RateLimitRPS: 2},
+		cfg:      &config.Config{RateLimitRPS: 2, Checklist: "professional"},
 		registry: registry,
 	}
 	prompt := agent.buildSystemPrompt(

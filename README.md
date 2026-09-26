@@ -709,6 +709,7 @@ Some settings require a restart because they affect process startup or server bi
 | `XALGORIX_BIND`          | `127.0.0.1`       | Web server listen address.         |
 | `XALGORIX_ALLOW_LOCAL_TARGETS` | `false`     | Allow scanning locally-hosted apps (localhost / 127.0.0.1 / private IPs) on a self-hosted install. The dashboard's own listener is always protected. Leave off on shared/hosted deployments. |
 | `XALGORIX_DISABLE_AUTO_DELEGATE` | `false` | Skip the specialist wave entirely. The root agent does all testing itself (deeper, slower). |
+| `XALGORIX_CHECKLIST` | `full` | Methodology depth: `full` (comprehensive 22-phase, default) or `professional` (compact). The full checklist finds significantly more vulnerabilities. |
 | `XALGORIX_USERNAME`      | none              | Dashboard username.                |
 | `XALGORIX_PASSWORD`      | none              | Dashboard password.                |
 | `XALGORIX_PASSWORD_HASH` | none              | Preferred bcrypt password hash.    |
