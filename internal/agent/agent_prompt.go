@@ -28,8 +28,13 @@ func (a *Agent) buildSystemPrompt(targets []string, instruction string, ratePoli
 	rateDelay := formatRatePolicyDelay(promptPolicy)
 	ratePolicySection := buildRequestRatePolicySection(ratePolicy)
 
+	// XALGORIX_CHECKLIST: full (22-phase, default) or professional (compact)
+	checklistMode := ""
+	if a.cfg != nil {
+		checklistMode = strings.ToLower(strings.TrimSpace(a.cfg.Checklist))
+	}
 	baseChecklist := defaultChecklist
-	if !isExplicitCTFMission(instruction) {
+	if checklistMode == "professional" {
 		baseChecklist = professionalChecklist
 	}
 	checklist := rateLimitedChecklist(baseChecklist, ratePolicy)

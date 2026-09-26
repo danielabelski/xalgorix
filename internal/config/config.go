@@ -26,6 +26,7 @@ type Config struct {
 	APIKey              string   // XALGORIX_API_KEY — API key
 	APIKeys             []string // XALGORIX_API_KEYS — additional provider API keys rotated to dodge provider rate limits (combined with APIKey)
 	DisableAutoDelegate bool     // XALGORIX_DISABLE_AUTO_DELEGATE — skip the deterministic specialist wave entirely
+	Checklist           string   // XALGORIX_CHECKLIST - full or professional
 	LLMProfile          string   // XALGORIX_LLM_PROFILE — active credential pointer "<provider>:<profileId>" (v4.4.22+)
 	ReasoningEffort     string   // XALGORIX_REASONING_EFFORT — "none", "low", "medium", "high", or "xhigh"
 
@@ -392,6 +393,7 @@ func load() *Config {
 		APIKey:                  envOr("XALGORIX_API_KEY", ""),
 		APIKeys:                 ParseAPIKeyList(envOr("XALGORIX_API_KEYS", "")),
 		DisableAutoDelegate:     envOrBool("XALGORIX_DISABLE_AUTO_DELEGATE", false),
+		Checklist:               envOrChecklist(envOr("XALGORIX_CHECKLIST", "full")),
 		LLMProfile:              envOr("XALGORIX_LLM_PROFILE", ""),
 		ReasoningEffort:         envOr("XALGORIX_REASONING_EFFORT", "high"),
 		Language:                NormalizeLanguage(envOr("XALGORIX_LANGUAGE", DefaultLanguage)),
@@ -889,4 +891,13 @@ func ParseAPIKeyList(raw string) []string {
 		out = append(out, f)
 	}
 	return out
+}
+
+// envOrChecklist validates the XALGORIX_CHECKLIST value.
+func envOrChecklist(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "professional" {
+		return "professional"
+	}
+	return "full"
 }
