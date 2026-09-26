@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+- **Consecutive guard blocks no longer tell the agent to finish the entire scan.** After 6 blocked tool calls, the hard nudge previously said "call finish" — abandoning ALL remaining vulnerability phases because one category was blocked. The message now says "pivot to a DIFFERENT vulnerability class or methodology phase" and explicitly states "Do NOT call finish because one category was blocked."
+- **Report format failures no longer silently drop proven findings.** The retry limit is raised from 3 to 5, and on exhaustion the agent is told to save the complete finding details (title, severity, endpoint, exploitation proof) as a note — preserving the finding for the operator — and to continue testing other surfaces rather than force-finishing the scan.
+
 ### Security
 - **Operator credentials and proxy URLs are no longer visible to the agent via environment inheritance.** The terminal_execute and python_action tools scrubbed all XALGORIX_* variables (API keys, proxy credentials with embedded auth, dashboard credentials, integration tokens) and known credential variables (GEMINI_API_KEY, AGENTMAIL_API_KEY, CAIDO_API_TOKEN, etc.) from the environment passed to child processes. A simple `env | grep proxy` from terminal_execute previously printed the operator's upstream proxy credentials — including username, password, IP, and port — into scan logs visible in the dashboard.
 
