@@ -98,23 +98,23 @@ func TestAutoPlanBlackBox(t *testing.T) {
 	}
 }
 
-func TestAutoPlanWithoutAuthSkipsRoleDependentIDOR(t *testing.T) {
-	p := AutoPlan([]string{"/login", "/public/api"}, nil, false)
+// Coverage requirement: even with no operator-supplied credentials, the plan
+// must retain the full auth lane and a pending IDOR task. Vulnerability
+// classes are never skipped based on scan context.
+func TestAutoPlanAlwaysKeepsAuthAndIDOR(t *testing.T) {
+	p := AutoPlan([]string{"/login", "/public/api"}, nil)
 
 	auth := p.Get("auth-session")
 	if auth == nil || auth.Status != TaskPending {
-		t.Fatalf("bounded anonymous authentication task = %+v, want pending", auth)
+		t.Fatalf("auth task = %+v, want pending full authentication lane", auth)
 	}
-	if !strings.Contains(auth.Title, "no credential guessing") {
-		t.Fatalf("anonymous auth task does not constrain credential guessing: %+v", auth)
+	if !strings.Contains(auth.Title, "Authentication & session testing") {
+		t.Fatalf("auth task was downgraded: %+v", auth)
 	}
 
 	idor := p.Get("idor")
-	if idor == nil || idor.Status != TaskSkipped {
-		t.Fatalf("credential-less IDOR task = %+v, want skipped", idor)
-	}
-	if !strings.Contains(idor.Notes, "no operator-provided or ingested account/session") {
-		t.Fatalf("credential-less IDOR skip lacks prerequisite rationale: %+v", idor)
+	if idor == nil || idor.Status != TaskPending {
+		t.Fatalf("IDOR task = %+v, want pending regardless of auth context", idor)
 	}
 }
 
@@ -240,7 +240,7 @@ func TestEndpointCoverageKeepsQualifiedHostsSeparate(t *testing.T) {
 	}
 }
 
-func TestEndpointCoverageIsSharedAcrossDelegatedAgents(t *testing.T) {
+func TestEndpointCoverageStaysAgentLocal(t *testing.T) {
 	contextID := "shared-coverage-" + t.Name()
 	ctx := scanctx.New(contextID, t.TempDir())
 	scanctx.Activate(ctx)
@@ -255,14 +255,18 @@ func TestEndpointCoverageIsSharedAcrossDelegatedAgents(t *testing.T) {
 	specialist.ScanContextID = contextID
 
 	markEndpointClassCoverage(specialist, "https://target.example/api/users?id=1", "sqli")
-	if !endpointTestedForClass(coordinator, "https://target.example/api/users", "sqli") {
-		t.Fatal("coordinator did not observe exact coverage executed by its specialist")
+	// Specialist coverage must NOT satisfy the coordinator's own plan: a
+	// shallow delegated probe closing root tasks is what collapsed scan depth
+	// from a full multi-hour assessment into a minutes-long run. Only the
+	// executing agent's own matrix counts.
+	if endpointTestedForClass(coordinator, "https://target.example/api/users", "sqli") {
+		t.Fatal("specialist coverage must not satisfy the coordinator's own plan")
 	}
-	if endpointTestedForClass(coordinator, "https://target.example/api/admin", "sqli") {
-		t.Fatal("specialist coverage leaked to an untested endpoint")
+	if !endpointTestedForClass(specialist, "https://target.example/api/users", "sqli") {
+		t.Fatal("specialist must observe its own coverage")
 	}
-	if endpointTestedForClass(coordinator, "https://target.example/api/users", "xss") {
-		t.Fatal("specialist coverage leaked to an untested class")
+	if !endpointTestedForClass(specialist, "https://target.example/api/users?id=1", "sqli") {
+		t.Fatal("specialist must observe its own coverage under a query-qualified alias")
 	}
 }
 

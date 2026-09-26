@@ -279,20 +279,19 @@ func endpointTestedForClass(state *ScanState, endpoint, class string) bool {
 	}
 	aliases := endpointCoverageLookupAliases(endpoint)
 	hasEndpointMatrixEvidence := false
-	shared := sharedCoverageForState(state)
+	// Only the agent's OWN per-endpoint matrix satisfies coverage. Coverage
+	// executed by a delegated specialist must NOT close the coordinator's
+	// plan tasks: a single shallow child probe per endpoint would satisfy
+	// taskCoverageComplete and let the whole scan finish in minutes without
+	// the coordinator ever exercising the class itself. Specialist work is
+	// evidence input for the report, never a substitute for the coordinator's
+	// own coverage. The scan-level shared store remains in use for whole-scan
+	// markers such as OAST probe completion.
 	for _, alias := range aliases {
 		if classes, ok := state.EndpointClassCoverage[alias]; ok {
 			hasEndpointMatrixEvidence = true
 			if classes[class] {
 				return true
-			}
-		}
-		if shared != nil {
-			if shared.Has(alias, class) {
-				return true
-			}
-			if shared.HasEndpoint(alias) {
-				hasEndpointMatrixEvidence = true
 			}
 		}
 	}
@@ -398,9 +397,8 @@ func FormatGaps(gaps []CoverageGap) string {
 // endpoints may be empty (pure black-box): the plan then covers the methodology
 // phases as whole-target tasks, which the model refines once it discovers
 // surface. detectedTechs nudges the tech-specific classes (e.g. java → ssti).
-func AutoPlan(endpoints []string, detectedTechs map[string]bool, authAvailable ...bool) *Plan {
+func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 	p := NewPlan()
-	hasAuthContext := len(authAvailable) == 0 || authAvailable[0]
 
 	// Phase 1-2: recon is a prerequisite for everything. Even with a seeded
 	// surface, live fingerprinting confirms the surface is reachable and
@@ -455,16 +453,10 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool, authAvailable .
 		p.add(t)
 	}
 
-	// Phase 5: always retain a bounded anonymous authentication-control check.
-	// When the operator supplied a real session/account, this becomes the full
-	// session-testing lane. Otherwise the plan explicitly forbids credential
-	// invention and records role-dependent work as unavailable.
+	// Phase 5: full authentication & session testing - always a complete lane,
+	// regardless of whether operator-supplied credentials exist.
 	authTitle := "Authentication & session testing (login bypass, JWT, session fixation)"
-	authNotes := "Use the operator-provided or ingested authenticated context."
-	if !hasAuthContext {
-		authTitle = "Anonymous authentication controls (login/reset/signup availability; no credential guessing)"
-		authNotes = "No operator-provided account or session. Test concrete anonymous controls once; do not spray passwords, create accounts, or crack hashes."
-	}
+	authNotes := "Test all authentication controls thoroughly - login bypass, JWT/session manipulation, weak credentials, registration flows. Never skip or downgrade this task."
 	p.add(&Task{
 		ID:        "auth-session",
 		Title:     authTitle,
@@ -476,15 +468,9 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool, authAvailable .
 		Origin:    "auto",
 	})
 
-	// Phase 8: IDOR / broken access control requires at least one legitimate
-	// role baseline. Do not let a mandatory pending task turn a credential-less
-	// black-box run into password spraying or unauthorized account creation.
+	// Phase 8: IDOR / broken access control - always tested.
 	idorStatus := TaskPending
 	idorNotes := ""
-	if !hasAuthContext {
-		idorStatus = TaskSkipped
-		idorNotes = "Skipped automatically: no operator-provided or ingested account/session exists for a legitimate role baseline."
-	}
 	p.add(&Task{
 		ID:        "idor",
 		Title:     "IDOR / broken access control (horizontal + vertical)",
@@ -533,6 +519,8 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool, authAvailable .
 // misses.
 func defaultVulnClasses(detectedTechs map[string]bool) []string {
 	classes := make([]string, 0, len(requiredCoverageClasses())+2)
+	// The dedicated Phase-8 idor task always covers this class; keep it out of
+	// the test-* loop to avoid a duplicate lane.
 	for _, class := range requiredCoverageClasses() {
 		if class != "idor" {
 			classes = append(classes, class)
@@ -541,12 +529,8 @@ func defaultVulnClasses(detectedTechs map[string]bool) []string {
 	if detectedTechs == nil {
 		return classes
 	}
-	if detectedTechs["nodejs"] {
-		classes = append(classes, "prototype-pollution")
-	}
-	if detectedTechs["php"] {
-		classes = append(classes, "lfi")
-	}
+	classes = append(classes, "prototype-pollution")
+	classes = append(classes, "lfi")
 	return classes
 }
 
