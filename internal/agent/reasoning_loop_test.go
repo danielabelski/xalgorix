@@ -161,7 +161,8 @@ func TestNoToolHandler_MalformedProtocolIsBoundedAndClassified(t *testing.T) {
 	state.NoToolAbortConfigured = true
 	state.NoToolAbortLimit = 0 // generic no-tool abort disabled must not allow protocol retry storms
 
-	for i := 1; i < MalformedToolAbortAt; i++ {
+	// Below the context-reset threshold: standard recovery prompt
+	for i := 1; i < MalformedToolContextResetAt; i++ {
 		res := hookNoToolHandler(state, map[string]string{
 			"response":         "agent <tool_call>",
 			"malformed_reason": "unparsed_tool_call",
@@ -171,6 +172,20 @@ func TestNoToolHandler_MalformedProtocolIsBoundedAndClassified(t *testing.T) {
 		}
 		if !strings.Contains(res.Nudge, "TOOL PROTOCOL RECOVERY") {
 			t.Fatalf("malformed output missing protocol-recovery nudge at %d: %q", i, res.Nudge)
+		}
+	}
+
+	// At and above the context-reset threshold: protocol reset prompt
+	for i := MalformedToolContextResetAt; i < MalformedToolAbortAt; i++ {
+		res := hookNoToolHandler(state, map[string]string{
+			"response":         "agent <tool_call>",
+			"malformed_reason": "unparsed_tool_call",
+		})
+		if res.ForceSkip {
+			t.Fatalf("malformed output aborted too early at reset threshold %d: %+v", i, res)
+		}
+		if !strings.Contains(res.Nudge, "PROTOCOL RESET") {
+			t.Fatalf("malformed output missing protocol-reset nudge at %d: %q", i, res.Nudge)
 		}
 	}
 

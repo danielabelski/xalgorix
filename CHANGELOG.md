@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Fixed
+- **Malformed tool-output recovery is now far more resilient.** The abort threshold is raised from 5 to 10 consecutive protocol-corrupt responses, and at 5 consecutive failures the agent receives a complete protocol reset prompt — a fundamentally different framing that tells it to STOP all work, make one simple add_note call, and resume from a clean state. Previously, the same recovery prompt was repeated into the same corrupted context 5 times, and when the model couldn't break the loop the scan terminated with credits consumed and endpoint coverage unfinished. The reset prompt changes the model's task entirely, which reliably breaks the corrupted-output loop that MiniMax and some other providers fall into when context is poisoned by provider control-token leaks.
+
+### Fixed
 - **Consecutive guard blocks no longer tell the agent to finish the entire scan.** After 6 blocked tool calls, the hard nudge previously said "call finish" — abandoning ALL remaining vulnerability phases because one category was blocked. The message now says "pivot to a DIFFERENT vulnerability class or methodology phase" and explicitly states "Do NOT call finish because one category was blocked."
 - **Report format failures no longer silently drop proven findings.** The retry limit is raised from 3 to 5, and on exhaustion the agent is told to save the complete finding details (title, severity, endpoint, exploitation proof) as a note — preserving the finding for the operator — and to continue testing other surfaces rather than force-finishing the scan.
 
