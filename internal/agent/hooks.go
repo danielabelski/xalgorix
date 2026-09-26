@@ -379,7 +379,7 @@ func noteBlockedToolCall(state *ScanState, name string, args map[string]string) 
 		return ""
 	}
 	if state.ConsecutiveBlockedCalls >= BlockedCallHardNudge {
-		return fmt.Sprintf("\n\n⛔ STOP — %d of your last tool calls were rejected by scan guards with no allowed action in between. Repeating a blocked action cannot change the result. You MUST change course NOW: choose an IN-SCOPE target and a policy-allowed action, or — if in-scope testing is exhausted — call finish. Do not attempt this or any other blocked action again.", state.ConsecutiveBlockedCalls)
+		return fmt.Sprintf("\n\n⛔ STOP — %d of your last tool calls were rejected by scan guards with no allowed action in between. Repeating a blocked action cannot change the result. You MUST change course NOW: choose an IN-SCOPE target and a policy-allowed action, or — if this entire vulnerability class is exhausted — pivot to a DIFFERENT vulnerability class or methodology phase. Do NOT call finish because one category was blocked: the scan has many remaining surfaces to test. Do not attempt this or any other blocked action again.", state.ConsecutiveBlockedCalls)
 	}
 	if identical {
 		return fmt.Sprintf("\n\n⚠️ You have attempted this exact blocked action %d times in a row — it will never be permitted. Stop repeating it and pick a different, in-scope and policy-allowed action.", state.ConsecutiveBlockedCalls)
@@ -686,7 +686,7 @@ func hookReportRetryGuard(state *ScanState, args map[string]string) HookResult {
 		return HookResult{}
 	}
 
-	msg := "⛔ Loop limit reached: report_vulnerability has already failed its parameter validation three times. Do not call it again for this candidate. Preserve any evidence in add_note if needed. Force finishing to prevent another report/finish usage loop."
+	msg := "⛔ Report format failed multiple times. Do NOT retry with the same XML shape. Save the complete finding details (title, severity, endpoint, exploitation proof) as a note with add_note, then attempt report_vulnerability ONE more time using the simplest valid XML: only title, severity, and description. If that also fails, the evidence note preserves the finding for the operator."
 	return HookResult{
 		ForceSkip:   true,
 		Nudge:       msg,
@@ -2985,7 +2985,7 @@ func hookReportVulnerabilityTracker(state *ScanState, args map[string]string) Ho
 			state.PendingFailedReportCalls = 0
 			state.ReportRetryLimitReached = true
 			return HookResult{
-				Nudge: "⛔ REPORT REPAIR STOPPED: report_vulnerability failed three times. Do not call it again for this candidate. Save any useful evidence with add_note and call finish now; already-saved findings are preserved.",
+				Nudge: "⛔ REPORT FORMAT EXHAUSTED: report_vulnerability failed multiple times. Save the complete finding details (title, severity, endpoint, exploitation proof) as a note with add_note — the evidence note preserves the finding for the operator even if the structured report could not be submitted. Then continue testing other surfaces; do not force-finish the scan.",
 			}
 		}
 	case isSuccessfulResolution:
